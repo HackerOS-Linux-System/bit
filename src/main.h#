@@ -1,1 +1,162 @@
+mod util
+mod ui
+mod cli
 
+extern static [c] is
+    fn exit(code: int)
+end
+
+fn arg_at(arr: [string], i: int) -> string is
+    if i < array_len(arr) is return arr[i] end
+    return ""
+end
+
+fn join_from(arr: [string], start: int) -> string is
+    let mut out: string = ""
+    let mut i: int = start
+    while i < array_len(arr) is
+        if out != "" is out = out + " " end
+        out = out + util::sq(arr[i])
+        i += 1
+    end
+    return out
+end
+
+fn main() is
+    let args: [string] = env::args()
+    let argc: int = array_len(args)
+
+    let mut release:   bool   = false
+    let mut debug:     bool   = false
+    let mut verbose:   bool   = false
+    let mut force:     bool   = false
+    let mut no_build:  bool   = false
+    let mut use_lock:  bool   = true
+    let mut global:    bool   = false
+    let mut everything: bool  = false
+    let mut is_lib:    bool   = false
+    let mut target:    string = ""
+    let mut platform:  string = ""
+    let mut emit:      string = ""
+    let mut output:    string = ""
+    let mut lang:      string = ""
+    let mut sign:      string = ""
+    let mut cmd:       string = ""
+    let mut pos:       [string] = []
+    let mut passthru:  string = ""
+
+    let mut i: int = 1
+    while i < argc is
+        let a: string = args[i]
+        if a == "--" is
+            passthru = join_from(args, i + 1)
+            i = argc
+        else is
+            match a is
+                "--version" | "-V" => is cli::print_version() return end
+                "--help"    | "-h" => is cli::print_help()    return end
+                "--release" | "-r" => is release = true end
+                "--debug"          => is debug = true end
+                "--verbose" | "-v" => is verbose = true end
+                "--force"   | "-f" => is force = true end
+                "--no-build"       => is no_build = true end
+                "--no-lock"        => is use_lock = false end
+                "--global"  | "-g" => is global = true end
+                "--all"            => is everything = true end
+                "--lib"            => is is_lib = true end
+                "--target"  | "-t" => is
+                    i += 1
+                    target = arg_at(args, i)
+                end
+                "--platform"       => is
+                    i += 1
+                    platform = arg_at(args, i)
+                end
+                "--emit"           => is
+                    i += 1
+                    emit = arg_at(args, i)
+                end
+                "--output"  | "-o" => is
+                    i += 1
+                    output = arg_at(args, i)
+                end
+                "--lang"    | "-l" => is
+                    i += 1
+                    lang = arg_at(args, i)
+                end
+                "--sign"           => is
+                    i += 1
+                    sign = arg_at(args, i)
+                end
+                _ => is
+                    if string_starts_with(a, "-") && string_len(a) > 1 is
+                        ui::fail("unknown option '" + a + "'   (bit --help)")
+                        exit(2)
+                    else if cmd == "" is
+                        cmd = a
+                    else is
+                        pos = array_push(pos, a)
+                    end
+                end
+            end
+        end
+        i += 1
+    end
+
+    let mut rc: int = 0
+
+    if cmd == "" is
+        rc = cli::cmd_auto(verbose)
+    else is
+        let first: string = arg_at(pos, 0)
+        match cmd is
+            "init" | "new" => is
+                rc = cli::cmd_init(first, if lang != "" then lang else target, is_lib)
+            end
+            "build" => is
+                rc = cli::cmd_build(release, debug, verbose, target, platform, if emit != "" then emit else output, sign, use_lock)
+            end
+            "run" => is
+                rc = cli::cmd_run(release, debug, verbose, target, platform, passthru, use_lock)
+            end
+            "check" => is rc = cli::cmd_check(verbose) end
+            "clean" => is rc = cli::cmd_clean(everything) end
+            "cache" => is rc = cli::cmd_cache() end
+            "x" | "cmd" => is
+                rc = cli::cmd_x(first, if passthru != "" then passthru else join_from(pos, 1))
+            end
+            "commands" => is rc = cli::cmd_commands() end
+            "publish" => is rc = cli::cmd_publish() end
+            "install" | "i" => is
+                rc = cli::cmd_install(pos, output, target, platform, no_build, release, force, verbose, use_lock)
+            end
+            "add" => is
+                rc = cli::cmd_add(first, arg_at(pos, 1), output, target, no_build, release, verbose)
+            end
+            "remove" | "rm" | "uninstall" => is rc = cli::cmd_remove(first, global) end
+            "upgrade" => is rc = cli::cmd_upgrade(first, verbose, release) end
+            "list" | "ls" | "installed" => is rc = cli::cmd_list() end
+            "search" => is rc = cli::cmd_search(first, lang) end
+            "info" => is rc = cli::cmd_info(first) end
+            "update" => is rc = cli::cmd_update() end
+            "verify" => is rc = cli::cmd_verify(first) end
+            "doctor" => is rc = cli::cmd_doctor() end
+            "langs" | "languages" => is rc = cli::cmd_langs() end
+            "help" => is cli::print_help() end
+            _ => is
+                ;; not built in: maybe a custom command from Bit.hk's [commands]
+                let extra: string = if passthru != "" then passthru else join_from(pos, 0)
+                let crc: int = cli::try_custom(cmd, extra)
+                if crc == -1 is
+                    ui::fail("unknown command '" + cmd + "'")
+                    ui::note("see:  bit --help      custom commands:  bit commands")
+                    rc = 2
+                else is
+                    rc = crc
+                end
+            end
+        end
+    end
+
+    if rc != 0 is exit(rc) end
+end
