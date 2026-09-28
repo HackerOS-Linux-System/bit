@@ -1,0 +1,154 @@
+mod util
+mod ui
+mod hk
+mod index
+mod checksum
+mod lock
+mod project
+mod build
+mod installer
+
+fn project_lock_path(p: project::Project) -> string is
+    return project::root_of(p) + "/Bit.lock"
+end
+
+fn link_into_cache(p: project::Project, dep_name: string, target: string) is
+    util::mkdir_p(project::cache_libs(p))
+    util::run("ln -sfn " + util::sq(target) + " " + util::sq(project::cache_libs(p) + "/" + dep_name))
+end
+
+fn resolve_path(p: project::Project, rel: string) -> string is
+    if string_starts_with(rel, "/") is return rel end
+    return project::root_of(p) + "/" + rel
+end
+
+;; Installs/links one dependency. Returns the name it is installed under ("" on failure).
+fn ensure_one(p: project::Project, d: project::Dep, pl: lock::Lock, use_lock: bool, force: bool,
+              verbose: bool, release: bool) -> string is
+    let dname: string = project::dep_name(d)
+    let kind: string = project::dep_kind(d)
+
+    if kind == "invalid" is
+        ui::bad(dname + "  " + ui::red("declared dynamic") + " — bit links libraries statically")
+        return ""
+    end
+
+    if kind == "path" is
+        let dir: string = resolve_path(p, project::dep_arg(d))
+        if !dir_exists(dir) is
+            ui::bad(dname + "  " + ui::red("path not found: ") + dir)
+            return ""
+        end
+        link_into_cache(p, dname, dir)
+        ui::ok(dname + "  " + ui::dim("path " + dir))
+        return ""      ;; path deps are not part of the global install/lock
+    end
+
+    ;; locked commit (only when the Bit.lock knows it and no explicit rev is given)
+    let locked: lock::Locked = lock::lock_get(pl, dname)
+    let mut rev: string = project::dep_rev(d)
+    if use_lock && rev == "" && lock::locked_commit(locked) != "" is
+        rev = lock::locked_commit(locked)
+    end
+
+    let spec: string = if kind == "git" then project::dep_arg(d) else dname
+    let want_build: bool = true
+    let opts: installer::InstallOpts = installer::iopts(force, want_build, project::dep_output(d),
+                                                       project::dep_lang(d), "", release, verbose)
+    if installer::install_lib(spec, rev, opts) != 0 is return "" end
+
+    let installed: string = if kind == "git" then installer::repo_name_from_url(project::dep_arg(d)) else dname
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    let now: lock::Locked = lock::lock_get(gl, installed)
+
+    ;; integrity: the project lock pins a checksum — the installed tree must match it
+    if use_lock && lock::locked_checksum(locked) != "" && lock::locked_checksum(now) != "" is
+        if lock::locked_checksum(locked) != lock::locked_checksum(now) is
+            ui::bad(dname + "  " + ui::red("does not match Bit.lock") + " " + ui::dim("(pinned " +
+                    util::short_hash(checksum::untag(lock::locked_checksum(locked))) + ", installed " +
+                    util::short_hash(checksum::untag(lock::locked_checksum(now))) + ")"))
+            ui::note("investigate, or re-resolve with:  bit upgrade " + dname)
+            return ""
+        end
+    end
+
+    link_into_cache(p, dname, installer::current_dir(installed))
+    return installed
+end
+
+;; Returns the number of dependencies that could not be satisfied.
+pub fn ensure_deps(p: project::Project, verbose: bool, release: bool, use_lock: bool, force: bool) -> int is
+    let deps: [project::Dep] = project::deps(p)
+    if array_len(deps) == 0 is return 0 end
+
+    project::cache_ensure(p)
+    ui::line(ui::bold("dependencies") + " " + ui::dim("(" + to_string(array_len(deps)) + ")"))
+    let mut pl: lock::Lock = lock::lock_read(project_lock_path(p))
+    let mut failed: int = 0
+    let mut i: int = 0
+    while i < array_len(deps) is
+        let d: project::Dep = deps[i]
+        let installed: string = ensure_one(p, d, pl, use_lock, force, verbose, release)
+        if installed == "" && project::dep_kind(d) != "path" is
+            failed += 1
+        else if installed != "" is
+            let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+            let e: lock::Locked = lock::lock_get(gl, installed)
+            pl = lock::lock_set(pl, lock::Locked {
+                lk_name: project::dep_name(d), lk_version: lock::locked_version(e),
+                lk_commit: lock::locked_commit(e), lk_url: lock::locked_url(e),
+                lk_checksum: lock::locked_checksum(e), lk_lang: lock::locked_lang(e),
+                lk_output: lock::locked_output(e), lk_at: lock::locked_at(e)
+            })
+        end
+        i += 1
+    end
+    if failed == 0 is lock::lock_write(project_lock_path(p), pl) end
+    ui::blank()
+    return failed
+end
+
+;; ── bare `bit` ───────────────────────────────────────────────────────────────
+
+pub fn auto(verbose: bool) -> int is
+    let p: project::Project = project::load_here()
+    if !project::is_loaded(p) is
+        ui::fail("no Bit.hk found in " + project::cwd() + " or any parent directory")
+        ui::note("create a project:  bit init <name>      all commands:  bit --help")
+        return 1
+    end
+
+    let o0: build::BuildOpts = build::opts_default(p)
+    let o: build::BuildOpts = build::opts_new(build::opts_release(o0), verbose, project::get(p, "default-build", "target", ""),
+                                             project::get(p, "default-build", "platform", ""),
+                                             project::get(p, "default-build", "emit", ""))
+
+    let before: string = project::get(p, "default-build", "before", "")
+    if before != "" is
+        ui::line(ui::dim("before: " + before))
+        if build::shell_in_root(p, before) != 0 is
+            ui::fail("[default-build] before failed")
+            return 1
+        end
+    end
+
+    if ensure_deps(p, verbose, build::opts_release(o), true, false) != 0 is
+        ui::fail("some dependencies could not be installed")
+        return 1
+    end
+    if build::build_project(p, o) != 0 is return 1 end
+
+    let after: string = project::get(p, "default-build", "after", "")
+    if after != "" is
+        ui::line(ui::dim("after: " + after))
+        if build::shell_in_root(p, after) != 0 is
+            ui::fail("[default-build] after failed")
+            return 1
+        end
+    end
+
+    if project::get_bool(p, "default-build", "run", false) is
+        return build::run_project(p, o, project::get(p, "default-build", "args", ""), true)
+    end
+    return 0
+end
