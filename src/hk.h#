@@ -1,0 +1,178 @@
+mod util
+
+pub struct HkEntry is
+    pub he_section: string
+    pub he_key:     string
+    pub he_value:   string
+end
+
+pub struct Hk is
+    pub hk_entries: [HkEntry]
+    pub hk_count:   int
+end
+
+pub fn hk_empty() -> Hk is
+    return Hk { hk_entries: [], hk_count: 0 }
+end
+
+;; Cuts a trailing `;;` comment, respecting double-quoted strings.
+fn strip_comment(v: string) -> string is
+    let n: int = string_len(v)
+    let mut in_str: bool = false
+    let mut i: int = 0
+    while i < n - 1 is
+        let c: string = string_at(v, i)
+        if c == "\"" is in_str = !in_str end
+        if !in_str && c == ";" && string_at(v, i + 1) == ";" is
+            return string_trim(string_slice(v, 0, i))
+        end
+        i += 1
+    end
+    return v
+end
+
+fn unquote(v: string) -> string is
+    let t: string = string_trim(v)
+    if string_len(t) >= 2 && string_starts_with(t, "\"") && string_ends_with(t, "\"") is
+        return string_slice(t, 1, string_len(t) - 1)
+    end
+    return t
+end
+
+;; `[Default build]`, `[default_build]` and `[default-build]` are the same section.
+pub fn norm_section(raw: string) -> string is
+    let t: string = string_lower(string_trim(raw))
+    return string_replace(string_replace(t, " ", "-"), "_", "-")
+end
+
+pub fn hk_parse(text: string) -> Hk is
+    let lines: [string] = string_split(string_replace(text, "\r", ""), "\n")
+    let mut entries:  [HkEntry] = []
+    let mut section:  string = ""
+    let mut last_key: string = ""
+    let mut i: int = 0
+
+    ;; NOTE: no `continue` here on purpose — H# codegen has had trouble with
+    ;; `continue` skipping later `let`s (see bytes' config.h# history), so the
+    ;; loop body is a plain if / else-if chain.
+    while i < array_len(lines) is
+        let line: string = string_trim(lines[i])
+        i += 1
+
+        let is_skip: bool = line == "" || string_starts_with(line, ";;") ||
+                            string_starts_with(line, "!") || string_starts_with(line, "#")
+        let is_section: bool = string_starts_with(line, "[") && string_ends_with(line, "]")
+
+        if is_skip is
+            section = section
+        else if is_section is
+            section = norm_section(string_slice(line, 1, string_len(line) - 1))
+            last_key = ""
+        else is
+            let mut body: string = line
+            let mut sub:  bool   = false
+            if string_starts_with(body, "-->") is
+                body = string_trim(string_slice(body, 3, string_len(body)))
+                sub = true
+            else if string_starts_with(body, "->") is
+                body = string_trim(string_slice(body, 2, string_len(body)))
+            end
+
+            let arrow: int = string_find(body, "=>")
+            let eq:    int = string_find(body, "=")
+            let mut key: string = ""
+            let mut val: string = ""
+
+            if arrow >= 0 is
+                key = string_trim(string_slice(body, 0, arrow))
+                val = string_slice(body, arrow + 2, string_len(body))
+            else if eq >= 0 is
+                key = string_trim(string_slice(body, 0, eq))
+                val = string_slice(body, eq + 1, string_len(body))
+            else is
+                key = string_trim(body)
+            end
+
+            key = unquote(key)
+            if key != "" is
+                if sub && last_key != "" is
+                    key = last_key + "." + key
+                else if !sub is
+                    last_key = key
+                end
+                entries = array_push(entries, HkEntry {
+                    he_section: section, he_key: key,
+                    he_value: unquote(strip_comment(string_trim(val)))
+                })
+            end
+        end
+    end
+
+    return Hk { hk_entries: entries, hk_count: array_len(entries) }
+end
+
+pub fn hk_get(h: Hk, section: string, key: string, fallback: string) -> string is
+    let mut i: int = 0
+    while i < h.hk_count is
+        if h.hk_entries[i].he_section == section && h.hk_entries[i].he_key == key is
+            return h.hk_entries[i].he_value
+        end
+        i += 1
+    end
+    return fallback
+end
+
+pub fn hk_has(h: Hk, section: string, key: string) -> bool is
+    let mut i: int = 0
+    while i < h.hk_count is
+        if h.hk_entries[i].he_section == section && h.hk_entries[i].he_key == key is return true end
+        i += 1
+    end
+    return false
+end
+
+pub fn hk_has_section(h: Hk, section: string) -> bool is
+    let mut i: int = 0
+    while i < h.hk_count is
+        if h.hk_entries[i].he_section == section is return true end
+        i += 1
+    end
+    return false
+end
+
+;; Keys (in file order) of a section.
+pub fn hk_keys(h: Hk, section: string) -> [string] is
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < h.hk_count is
+        if h.hk_entries[i].he_section == section is
+            out = array_push(out, h.hk_entries[i].he_key)
+        end
+        i += 1
+    end
+    return out
+end
+
+;; `[a, b, "c"]` -> ["a", "b", "c"]   (a bare `a, b` list works too)
+pub fn hk_list(value: string) -> [string] is
+    let mut t: string = string_trim(value)
+    if string_starts_with(t, "[") && string_ends_with(t, "]") is
+        t = string_slice(t, 1, string_len(t) - 1)
+    end
+    let parts: [string] = util::csv_split(t)
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(parts) is
+        let v: string = unquote(parts[i])
+        if v != "" is out = array_push(out, v) end
+        i += 1
+    end
+    return out
+end
+
+;; `[package]` first, then `[project]` (bit.hk / Hacker Lang spelling).
+pub fn hk_pkg(h: Hk, key: string, fallback: string) -> string is
+    let a: string = hk_get(h, "package", key, "")
+    if a != "" is return a end
+    return hk_get(h, "project", key, fallback)
+end
