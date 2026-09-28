@@ -1,0 +1,46 @@
+mod util
+mod ui
+mod project
+mod build
+
+pub fn has_command(p: project::Project, name: string) -> bool is
+    if !project::is_loaded(p) is return false end
+    return project::command_body(p, name) != ""
+end
+
+pub fn run_command(p: project::Project, name: string, args: string) -> int is
+    let body: string = project::command_body(p, name)
+    if body == "" is
+        ui::fail("no command '" + name + "' in [commands] of Bit.hk")
+        return 1
+    end
+    let cmd: string = if string_contains(body, "{args}") then string_replace(body, "{args}", args)
+                      else if args != "" then body + " " + args
+                      else body
+    ui::line(ui::dim("$ " + cmd))
+    return build::shell_in_root(p, cmd)
+end
+
+pub fn list_commands(p: project::Project) -> int is
+    if !project::is_loaded(p) is
+        ui::fail("no Bit.hk here")
+        return 1
+    end
+    let names: [string] = project::command_names(p)
+    ui::heading("Custom commands  " + ui::dim("[commands] in Bit.hk"))
+    if array_len(names) == 0 is
+        ui::note("none defined. Add to Bit.hk:")
+        ui::note("  [commands]")
+        ui::note("  -> hello => echo hello from bit")
+        ui::blank()
+        return 0
+    end
+    let mut i: int = 0
+    while i < array_len(names) is
+        let d: string = project::command_desc(p, names[i])
+        ui::line(ui::cyan(string_pad_right(names[i], 16)) + " " + (if d != "" then d else ui::dim(project::command_body(p, names[i]))))
+        i += 1
+    end
+    ui::blank()
+    return 0
+end
