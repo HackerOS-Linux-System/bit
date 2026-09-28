@@ -1,0 +1,47 @@
+extern static [c] is
+    fn system(cmd: string) -> int
+end
+
+;; ── Shell ────────────────────────────────────────────────────────────────────
+
+pub fn run(cmd: string) -> int is
+    return system(cmd)
+end
+
+;; stdout of a command, trimmed.
+pub fn capture(cmd: string) -> string is
+    return string_trim(shell(cmd))
+end
+
+;; POSIX single-quote a value so it is safe inside a shell command line.
+pub fn sq(s: string) -> string is
+    return "'" + string_replace(s, "'", "'\\''") + "'"
+end
+
+;; Retries transient failures (DNS blip, dropped connection) with a short
+;; linear back-off. Returns the last exit code.
+pub fn run_retry(cmd: string, attempts: int) -> int is
+    let mut tries: int = 0
+    let mut rc:    int = 1
+    while tries < attempts is
+        tries += 1
+        rc = system(cmd)
+        if rc == 0 is return 0 end
+        if tries < attempts is system("sleep " + to_string(tries * 2)) end
+    end
+    return rc
+end
+
+pub fn tool_exists(name: string) -> bool is
+    return system("command -v " + sq(name) + " >/dev/null 2>&1") == 0
+end
+
+;; First tool of `names` found on PATH, or "" when none is installed.
+pub fn first_tool(names: [string]) -> string is
+    let mut i: int = 0
+    while i < array_len(names) is
+        if tool_exists(names[i]) is return names[i] end
+        i += 1
+    end
+    return ""
+end
