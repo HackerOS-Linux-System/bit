@@ -1,0 +1,16 @@
+{
+  "name": "bit-io-website",
+  "version": "1.0.0",
+  "private": true,
+  "description": "bit.io — the library index for H#, Hacker Lang and HackerScript",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p . --noEmit",
+    "build": "npm run clean && tsc -p . && cp -r public/. dist/",
+    "clean": "rm -rf dist",
+    "serve": "npm run build && cd dist && python3 -m http.server 8080"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
