@@ -5,176 +5,242 @@
       "name": "mold",
       "target": "https://github.com/bit-io/mold",
       "description": "TUI library inspired ratatui.",
-      "tags": ["TUI"],
+      "tags": [
+        "TUI"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "tui",
       "target": "https://github.com/bit-io/tui",
       "description": "TUI library inspired bubbles/bubbletea.",
-      "tags": ["TUI"],
+      "tags": [
+        "TUI"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "H2D",
       "target": "https://github.com/bit-io/H2D",
       "description": "2D game library.",
-      "tags": ["2d", "Game-Library", "Game-Engine"],
+      "tags": [
+        "2d",
+        "Game-Library",
+        "Game-Engine"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "hprompt",
       "target": "https://github.com/bit-io/hprompt",
       "description": "Library for shells (inspired rustyline).",
-      "tags": ["shell"],
+      "tags": [
+        "shell"
+      ],
       "author": "Bit Developers"
     },
-    { 
+    {
       "name": "obsidian",
       "target": "https://github.com/bit-io/obsidian",
       "description": "LLVM wrapper for H#.",
-      "tags": ["LLVM"],
+      "tags": [
+        "LLVM"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "satsolv",
       "target": "https://github.com/bit-io/satsolv",
       "description": "Libsolv wrapper for H#.",
-      "tags": ["libsolv", "solver"],
+      "tags": [
+        "libsolv",
+        "solver"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "gtk",
       "target": "https://github.com/bit-io/gtk",
       "description": "GTK Library.",
-      "tags": ["GUI", "gtk"],
+      "tags": [
+        "GUI",
+        "gtk"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "wasm",
       "target": "https://github.com/bit-io/wasm",
       "description": "WASM library for H#.",
-      "tags": ["wasm"],
+      "tags": [
+        "wasm"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "progress-bar",
       "target": "https://github.com/bit-io/progress-bar",
       "description": "Progress bars.",
-      "tags": ["progress-bar"],
+      "tags": [
+        "progress-bar"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "git",
       "target": "https://github.com/bit-io/git",
       "description": "Git library.",
-      "tags": ["git"],
+      "tags": [
+        "git"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "silver",
       "target": "https://github.com/bit-io/silver",
       "description": "GUI library.",
-      "tags": ["GUI"],
+      "tags": [
+        "GUI"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "container",
       "target": "https://github.com/bit-io/container",
       "description": "Library for building containers.",
-      "tags": ["container"],
+      "tags": [
+        "container"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "lsp",
       "target": "https://github.com/bit-io/lsp",
       "description": "LSP library.",
-      "tags": ["lsp", "lsp-server"],
+      "tags": [
+        "lsp",
+        "lsp-server"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "landlock",
       "target": "https://github.com/bit-io/landlock",
       "description": "Landlock library for H#.",
-      "tags": ["landlock"],
+      "tags": [
+        "landlock"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "libseccomp",
       "target": "https://github.com/bit-io/libseccomp",
       "description": "Libseccomp library for H#.",
-      "tags": ["libseccomp"],
+      "tags": [
+        "libseccomp"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "qt",
       "target": "https://github.com/bit-io/qt",
       "description": "QT library bindings.",
-      "tags": ["qt", "qt6"],
+      "tags": [
+        "qt",
+        "qt6"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "scopeguard",
       "target": "https://github.com/bit-io/scopeguard",
       "description": "Scopeguard library bindings.",
-      "tags": ["scopeguard"],
+      "tags": [
+        "scopeguard"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "nidus",
       "target": "https://github.com/bit-io/nidus",
       "description": "Library for nice errors.",
-      "tags": ["error"],
+      "tags": [
+        "error"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "volcan",
       "target": "https://github.com/bit-io/volcan",
       "description": "Library inspired smithay.",
-      "tags": ["wayland", "xwayland", "wayland-protocols"],
+      "tags": [
+        "wayland",
+        "xwayland",
+        "wayland-protocols"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "regex",
       "target": "https://github.com/bit-io/regex",
       "description": "Regex library for Hacker Lang.",
-      "tags": ["regex"],
+      "tags": [
+        "regex"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "json-parser",
       "target": "https://github.com/bit-io/json-parser",
       "description": "Parser for .json.",
-      "tags": ["json"],
+      "tags": [
+        "json"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "toml-parser",
       "target": "https://github.com/bit-io/toml-parser",
       "description": "Parser for .toml.",
-      "tags": ["toml"],
+      "tags": [
+        "toml"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "hacker",
       "target": "https://github.com/HackerOS-Linux-System/hacker",
       "description": "Parser for .hacker files.",
-      "tags": ["hacker", "HackerOS", "HackerOS-Linux-System"],
+      "tags": [
+        "hacker",
+        "HackerOS",
+        "HackerOS-Linux-System"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "hk-parser",
       "target": "https://github.com/HackerOS-Linux-System/hk-parser",
       "description": "Official library for .hk format.",
-      "tags": ["hk-parser", "hk-files", "HackerOS", "HackerOS-Linux-System"],
+      "tags": [
+        "hk-parser",
+        "hk-files",
+        "HackerOS",
+        "HackerOS-Linux-System"
+      ],
       "author": "Bit Developers"
     },
     {
       "name": "libfasttree",
       "target": "https://github.com/Zenit-Linux/libfasttree",
       "description": "A modern succesor for ostree.",
-      "tags": ["ostree", "fasttree", "immuntable", "Zenit-Linux"],
+      "tags": [
+        "ostree",
+        "fasttree",
+        "immuntable",
+        "Zenit-Linux"
+      ],
       "author": "Bit Developers"
-    },
+    }
   ]
 }
