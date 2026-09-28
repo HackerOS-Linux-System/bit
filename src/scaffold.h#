@@ -1,0 +1,106 @@
+mod util
+mod ui
+mod index
+mod project
+
+fn manifest(name: string, lang: string, is_lib: bool) -> string is
+    let lang_key: string = if lang == "hackerlang" then "hl" else if lang == "hackerscript" then "hs" else "h#"
+    let mut m: string = "[package]\n" +
+        "-> name        => " + name + "\n" +
+        "-> version     => 0.1.0\n" +
+        "-> description => " + name + "\n" +
+        "-> authors     => [\"" + util::or_default(env_get("USER"), "you") + "\"]\n" +
+        "-> license     => MIT\n" +
+        "-> lang        => " + lang_key + "         ;; h# | hl | hs  (several: h#, hs)\n\n"
+    if lang == "hackerlang" is
+        m = m + "[layout]\n" +
+            "-> hl-entry => " + (if is_lib then "lib.hl" else "main.hl") + "     ;; Hacker Lang must be told where its code is\n\n"
+    end
+    m = m + "[build]\n" +
+        "-> link => static          ;; bit links everything statically\n" +
+        ";; -> target   => h#        ;; language toolchain to build with\n" +
+        ";; -> platform => linux-aarch64   ;; cross-compilation platform\n\n"
+    if is_lib is
+        m = m + "[lib]\n-> output => hlib          ;; hlib | so | a | obj\n\n"
+    end
+    m = m + "[default-build]          ;; what a bare `bit` does\n" +
+        "-> profile => release\n" +
+        ";; -> run    => true\n" +
+        ";; -> before => echo starting\n\n" +
+        "[dependencies]\n;; -> mold => *\n;; -> tui  => rev v1.0\n;; -> mine => path ../mine\n\n" +
+        "[commands]\n;; -> hello => echo hello from bit\n;; --> description => Say hello\n"
+    return m
+end
+
+fn stub_source(lang: string, name: string, is_lib: bool) -> string is
+    if lang == "hsharp" is
+        if is_lib is
+            return ";; " + name + " — library entry point\npub fn hello() -> string is\n    return \"hello from " + name + "\"\nend\n"
+        end
+        return "fn main() is\n    write(\"Hello from " + name + "!\")\nend\n"
+    end
+    if lang == "hackerscript" is
+        if is_lib is
+            return "!! " + name + " — biblioteka\n\nfun hello() -> Str [\n    end \"hello from " + name + "\"\n]\n"
+        end
+        return "!! Witaj w HackerScript!\n\nfun main() [\n    log(\"Hello from " + name + "!\")\n    end\n]\n"
+    end
+    return "/// " + name + "\n\n~> Hello from " + name + "!\n"
+end
+
+fn stub_path(lang: string, is_lib: bool) -> string is
+    if lang == "hsharp" is
+        let f: string = if is_lib then "src/lib.h#" else "src/main.h#"
+        return f
+    end
+    if lang == "hackerscript" is
+        let f: string = if is_lib then "lib/mod.hcs" else "cmd/main.hcs"
+        return f
+    end
+    let f: string = if is_lib then "lib.hl" else "main.hl"
+    return f
+end
+
+pub fn init_project(name_in: string, lang_in: string, is_lib: bool) -> int is
+    let lang: string = if lang_in == "" then "hsharp" else index::normalize_lang(lang_in)
+    if lang == "" is
+        ui::fail("unknown language '" + lang_in + "' (use h#, hl or hs)")
+        return 1
+    end
+
+    let here: bool = name_in == ""
+    let dir: string = if here then "." else name_in
+    let name: string = if here then util::basename(fs_cwd()) else util::basename(name_in)
+    if !util::valid_name(name) is
+        ui::fail("'" + name + "' is not a valid project name")
+        return 1
+    end
+    if !here && dir_exists(dir) is
+        ui::fail("directory '" + dir + "' already exists")
+        return 1
+    end
+    if here && project::manifest_in(".") != "" is
+        ui::fail("this directory already has a Bit.hk")
+        return 1
+    end
+
+    util::mkdir_p(dir)
+    let entry: string = stub_path(lang, is_lib)
+    util::mkdir_p(dir + "/" + util::dirname(entry))
+    file_write(dir + "/Bit.hk", manifest(name, lang, is_lib))
+    if !file_exists(dir + "/" + entry) is
+        file_write(dir + "/" + entry, stub_source(lang, name, is_lib))
+    end
+    if !file_exists(dir + "/.gitignore") is
+        file_write(dir + "/.gitignore", "cache/\n")
+    end
+
+    ui::ok("created " + ui::bold(name) + " (" + project::lang_label(lang) + (if is_lib then " library" else "") + ")")
+    ui::line(ui::dim("Bit.hk  " + entry + "  .gitignore"))
+    ui::blank()
+    ui::line(ui::bold("Next:"))
+    if !here is ui::line("  cd " + dir) end
+    ui::line("  bit            " + ui::dim("# builds it (uses [default-build] from Bit.hk)"))
+    ui::blank()
+    return 0
+end
