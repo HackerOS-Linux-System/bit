@@ -1,1 +1,124 @@
+name: Build & deploy website (bit.io)
 
+on:
+  push:
+    branches: [main]
+    paths:
+      - "website/**"
+      - "index/**"
+      - ".github/workflows/build-website.yml"
+  pull_request:
+    paths:
+      - "website/**"
+      - "index/**"
+      - ".github/workflows/build-website.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time; a newer push replaces a queued one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  validate-index:
+    name: Validate index/repository.json
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Strict JSON + schema checks
+        run: |
+          set -euo pipefail
+          f=index/repository.json
+          # strict parse: catches trailing commas and other hand-editing slips
+          jq -e . "$f" > /dev/null
+          jq -e '.libraries | type == "array" and length > 0' "$f" > /dev/null
+
+          echo "Required fields (name, target, description):"
+          bad=$(jq -r '.libraries[] | select((.name // "") == "" or (.target // "") == "" or (.description // "") == "") | .name // "<no name>"' "$f")
+          if [ -n "$bad" ]; then echo "::error::entries missing name/target/description:"; echo "$bad"; exit 1; fi
+
+          echo "Names must be valid (letters, digits, - _ .) and unique:"
+          jq -r '.libraries[].name' "$f" | grep -Ev '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' && { echo "::error::invalid library name(s) above"; exit 1; } || true
+          dup=$(jq -r '.libraries[].name | ascii_downcase' "$f" | sort | uniq -d)
+          if [ -n "$dup" ]; then echo "::error::duplicate names:"; echo "$dup"; exit 1; fi
+
+          echo "Targets must be https:// URLs:"
+          jq -r '.libraries[].target' "$f" | grep -Ev '^https://' && { echo "::error::non-https target(s) above"; exit 1; } || true
+
+          echo "Optional lang must be hsharp | hackerlang | hackerscript:"
+          jq -r '.libraries[] | select(.lang != null) | select(.lang | IN("hsharp","hackerlang","hackerscript") | not) | .name' "$f" | grep . && { echo "::error::invalid lang on the entries above"; exit 1; } || true
+
+          echo "OK: $(jq '.libraries | length' "$f") libraries"
+
+  build:
+    name: Type-check & build
+    runs-on: ubuntu-latest
+    needs: validate-index
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Type-check (tsc --noEmit)
+        run: npm run typecheck
+
+      - name: Build (tsc → dist/js, copy public/ → dist/)
+        run: npm run build
+
+      # The site reads the same index bit does; ship a same-origin copy so the
+      # page works even if raw.githubusercontent.com is slow or rate-limited.
+      - name: Bundle the library index
+        run: cp ../index/repository.json dist/repository.json
+
+      - name: Sanity-check the build output
+        run: |
+          set -e
+          for f in index.html lib.html about.html 404.html styles.css repository.json \
+                   js/home.js js/lib.js js/about.js js/index-data.js images/icon.png; do
+            test -s "dist/$f" || { echo "::error::missing dist/$f"; exit 1; }
+          done
+          ! grep -R --include='*.js' -n 'localhost' dist/js || { echo "::error::localhost reference in build"; exit 1; }
+          du -sh dist
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'pull_request'
+        with:
+          name: bit-io-preview
+          path: website/dist
+          retention-days: 7
+
+      - uses: actions/configure-pages@v5
+        if: github.event_name != 'pull_request'
+
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
+        with:
+          path: website/dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
