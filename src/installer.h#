@@ -1,0 +1,368 @@
+mod util
+mod ui
+mod hk
+mod index
+mod checksum
+mod lock
+mod project
+mod build
+
+pub fn lib_root(name: string) -> string is return util::libs_dir() + "/" + name end
+
+pub fn lib_dir(name: string, commit: string) -> string is
+    return util::libs_dir() + "/" + name + "/" + commit
+end
+
+pub fn current_dir(name: string) -> string is return lib_root(name) + "/current" end
+
+pub fn is_installed(name: string) -> bool is
+    let l: lock::Lock = lock::lock_read(lock::global_lock_path())
+    let e: lock::Locked = lock::lock_get(l, name)
+    if lock::locked_name(e) == "" is return false end
+    return dir_exists(lib_dir(name, lock::locked_commit(e)))
+end
+
+;; ── Options ──────────────────────────────────────────────────────────────────
+
+pub struct InstallOpts is
+    pub io_force:    bool
+    pub io_build:    bool     ;; compile the library after fetching
+    pub io_output:   string   ;; "" = whatever the library's Bit.hk says (default hlib)
+    pub io_lang:     string   ;; "" = auto-detect
+    pub io_platform: string
+    pub io_release:  bool
+    pub io_verbose:  bool
+    pub io_depth:    int
+end
+
+pub fn iopts(force: bool, do_build: bool, output: string, target: string, platform: string,
+             release: bool, verbose: bool) -> InstallOpts is
+    return InstallOpts {
+        io_force: force, io_build: do_build, io_output: string_lower(output),
+        io_lang: index::normalize_lang(target),
+        io_platform: if platform != "" then platform else if index::normalize_lang(target) == "" then target else "",
+        io_release: release, io_verbose: verbose, io_depth: 0
+    }
+end
+
+fn deeper(o: InstallOpts) -> InstallOpts is
+    return InstallOpts { io_force: false, io_build: o.io_build, io_output: "", io_lang: "",
+                         io_platform: o.io_platform, io_release: o.io_release,
+                         io_verbose: o.io_verbose, io_depth: o.io_depth + 1 }
+end
+
+;; ── Fetching ─────────────────────────────────────────────────────────────────
+
+fn clone_cmd(url: string, rev: string, dest: string) -> string is
+    if rev == "" is
+        return "git clone --quiet --depth=1 " + util::sq(url) + " " + util::sq(dest)
+    end
+    ;; a branch/tag can be cloned shallow; a bare commit id needs a full fetch
+    return "git clone --quiet --depth=1 --branch " + util::sq(rev) + " " + util::sq(url) + " " + util::sq(dest) +
+           " 2>/dev/null || (rm -rf " + util::sq(dest) + " && git clone --quiet " + util::sq(url) + " " + util::sq(dest) +
+           " && git -C " + util::sq(dest) + " checkout --quiet " + util::sq(rev) + ")"
+end
+
+pub fn repo_name_from_url(url: string) -> string is
+    let mut base: string = util::basename(url)
+    if string_ends_with(base, ".git") is base = string_slice(base, 0, string_len(base) - 4) end
+    return base
+end
+
+;; ── Manifest of a fetched library ────────────────────────────────────────────
+;; bit reads Bit.hk; for libraries not migrated yet it also understands the
+;; predecessors' manifests (Bytes.hk = H#, Virus.hk = HackerScript, bit.hk).
+
+fn lib_manifest(dir: string) -> hk::Hk is
+    let candidates: [string] = ["Bit.hk", "bit.hk", "Bytes.hk", "bytes.hk", "Virus.hk"]
+    let mut i: int = 0
+    while i < array_len(candidates) is
+        if file_exists(dir + "/" + candidates[i]) is
+            return hk::hk_parse(file_read(dir + "/" + candidates[i]))
+        end
+        i += 1
+    end
+    return hk::hk_empty()
+end
+
+fn detect_lang(dir: string, h: hk::Hk, hint: string) -> string is
+    if hint != "" is return hint end
+    let declared: string = index::normalize_lang(util::or_default(hk::hk_pkg(h, "lang", ""), hk::hk_get(h, "build", "lang", "")))
+    if declared != "" is return declared end
+    if file_exists(dir + "/Virus.hk") is return "hackerscript" end
+    if file_exists(dir + "/Bytes.hk") || file_exists(dir + "/bytes.hk") is return "hsharp" end
+    let p: project::Project = project::load(dir)
+    let found: [string] = project::detect_langs(p)
+    if array_len(found) > 0 is return found[0] end
+    return ""
+end
+
+;; ── Building an installed library ────────────────────────────────────────────
+
+fn ext_of(output: string) -> string is
+    if output == "so" is return "so" end
+    if output == "a" is return "a" end
+    if output == "obj" is return "o" end
+    return "hlib"
+end
+
+;; Compiles the library in `dir` statically; artifacts land in dir/.bit/out.
+;; Returns the artifact path, or "" when nothing was built.
+fn build_installed(name: string, dir: string, lang: string, output: string, o: InstallOpts) -> string is
+    if !build::have_toolchain(lang) is
+        ui::warn(project::lang_label(lang) + " toolchain not found — " + name + " kept as source only")
+        return ""
+    end
+    let p: project::Project = project::load(dir)
+    let lib_entry: string = project::entry_for(p, lang, "lib")
+    if lib_entry == "" is
+        ui::note(name + ": no library entry point — nothing to compile")
+        return ""
+    end
+    let outdir: string = dir + "/.bit/out"
+    util::mkdir_p(outdir)
+    let bo: build::BuildOpts = build::opts_new(o.io_release, o.io_verbose, lang, o.io_platform, output)
+    ;; build_project uses cache/; keep the installed tree clean by building into .bit
+    let rc: int = build::build_project(project::load_with_cache(dir, dir + "/.bit"), bo)
+    if rc != 0 is
+        ui::warn(name + ": build failed — kept as source only")
+        return ""
+    end
+    let built_dir: string = dir + "/.bit/build/" + build::profile_name(bo)
+    let art_name: string = if output == "so" then "lib" + name + ".so"
+                           else if output == "a" then "lib" + name + ".a"
+                           else if output == "obj" then name + ".o"
+                           else name + ".hlib"
+    util::run("cp -f " + util::sq(built_dir + "/" + art_name) + " " + util::sq(outdir + "/" + art_name) + " 2>/dev/null")
+    if file_exists(outdir + "/" + art_name) is
+        util::run("ln -sfn " + util::sq(".bit/out/" + art_name) + " " + util::sq(dir + "/" + art_name))
+        return outdir + "/" + art_name
+    end
+    return ""
+end
+
+;; ── Install ──────────────────────────────────────────────────────────────────
+
+pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
+    if o.io_depth > 8 is
+        ui::fail("dependency chain too deep (cycle?) at " + spec)
+        return 1
+    end
+
+    ;; 1. resolve name + url
+    let mut name: string = spec
+    let mut url: string = ""
+    let mut rev: string = rev_in
+    let mut pinned: string = ""
+    let mut hint_lang: string = o.io_lang
+
+    if util::is_url(spec) is
+        url = spec
+        name = repo_name_from_url(spec)
+    else is
+        if !util::valid_name(spec) is
+            ui::fail("invalid library name '" + spec + "'")
+            return 1
+        end
+        let ix: index::Index = index::index_load()
+        let e: index::LibEntry = index::index_find(ix, spec)
+        if index::e_name(e) == "" is
+            ui::fail("library '" + spec + "' not found in the index")
+            ui::note("search:  bit search " + spec + "     or install a repo directly:  bit install <git-url>")
+            return 1
+        end
+        name = index::e_name(e)
+        url = index::e_target(e)
+        if rev == "" is rev = index::e_rev(e) end
+        pinned = index::e_checksum(e)
+        if hint_lang == "" is hint_lang = index::e_lang(e) end
+    end
+    if !util::valid_name(name) is
+        ui::fail("invalid library name '" + name + "'")
+        return 1
+    end
+
+    ;; already there? (no network needed)
+    if !o.io_force && is_installed(name) is
+        ui::note(name + " is already installed (bit upgrade " + name + " to refresh)")
+        return 0
+    end
+
+    ui::line(ui::dim("fetching") + " " + ui::bold(name) + "  " + ui::dim(url))
+    util::mkdir_p(util::tmp_dir())
+    let tmp: string = util::tmp_dir() + "/" + name + "-" + to_string(proc_id())
+    util::rm_rf(tmp)
+
+    ;; 2. clone
+    if util::run_retry(clone_cmd(url, rev, tmp), 3) != 0 is
+        ui::fail("git clone failed: " + url)
+        util::rm_rf(tmp)
+        return 1
+    end
+    let commit: string = util::capture("git -C " + util::sq(tmp) + " rev-parse HEAD 2>/dev/null")
+    if commit == "" is
+        ui::fail("not a git repository: " + url)
+        util::rm_rf(tmp)
+        return 1
+    end
+
+    ;; 3. place
+    let dest: string = lib_dir(name, util::short_hash(commit))
+    let version: string = util::short_hash(commit)
+    util::rm_rf(tmp + "/.git")
+    util::mkdir_p(lib_root(name))
+    if dir_exists(dest) is util::rm_rf(dest) end
+    if util::run("mv " + util::sq(tmp) + " " + util::sq(dest)) != 0 is
+        ui::fail("cannot move the library into " + dest)
+        util::rm_rf(tmp)
+        return 1
+    end
+
+    ;; 4. checksum (+ pin)
+    let sum: string = checksum::dir_checksum(dest)
+    if pinned != "" && !checksum::matches(pinned, sum) is
+        ui::fail(name + ": checksum mismatch — the index pins " + checksum::untag(pinned))
+        ui::note("got      " + sum)
+        util::rm_rf(dest)
+        return 1
+    end
+
+    ;; 5. manifest
+    let h: hk::Hk = lib_manifest(dest)
+    let lang: string = detect_lang(dest, h, hint_lang)
+    let out_choice: string = if o.io_output != "" then o.io_output
+                             else string_lower(util::or_default(hk::hk_get(h, "lib", "output", ""), "hlib"))
+
+    ;; static-linking policy
+    let offenders: string = build::static_offenders_in(dest)
+    if offenders != "" is
+        ui::warn(name + " uses `extern dynamic` — bit links libraries statically; these files will not link:")
+        write(offenders)
+    end
+
+    ;; current symlink, before the build so tools can already see the sources
+    util::run("ln -sfn " + util::sq(version) + " " + util::sq(current_dir(name)))
+
+    ;; 6. build
+    let mut artifact: string = ""
+    let mut out_used: string = "source"
+    if o.io_build && lang != "" is
+        artifact = build_installed(name, dest, lang, out_choice, o)
+        if artifact != "" is out_used = out_choice end
+    end
+
+    ;; 7. lock
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    lock::lock_write(lock::global_lock_path(), lock::lock_set(gl, lock::Locked {
+        lk_name: name, lk_version: version, lk_commit: commit, lk_url: url,
+        lk_checksum: checksum::tag(sum), lk_lang: lang, lk_output: out_used, lk_at: util::now_iso()
+    }))
+
+    ui::ok(ui::bold(name) + " " + ui::dim("@ " + version + "  " + project::lang_label(lang) + "  " + out_used +
+           "  sha256:" + util::short_hash(sum)))
+
+    ;; 8. dependencies of the library itself
+    let dep_keys: [string] = hk::hk_keys(h, "dependencies")
+    let mut failed: int = 0
+    let mut i: int = 0
+    while i < array_len(dep_keys) is
+        if !string_contains(dep_keys[i], ".") is
+            let d: project::Dep = project::parse_dep(dep_keys[i], hk::hk_get(h, "dependencies", dep_keys[i], ""), h)
+            if project::dep_kind(d) == "invalid" is
+                ui::warn(name + ": dependency '" + dep_keys[i] + "' is declared dynamic — ignored (bit links statically)")
+            else is
+                let dspec: string = if project::dep_kind(d) == "git" then project::dep_arg(d) else project::dep_name(d)
+                if install_lib(dspec, project::dep_rev(d), deeper(o)) != 0 is failed += 1 end
+            end
+        end
+        i += 1
+    end
+    if failed > 0 is return 1 end
+    return 0
+end
+
+;; ── Remove ───────────────────────────────────────────────────────────────────
+
+pub fn remove_lib(name: string) -> int is
+    if !util::valid_name(name) is
+        ui::fail("invalid library name '" + name + "'")
+        return 1
+    end
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    let known: bool = lock::lock_has(gl, name)
+    let dir: string = lib_root(name)
+    if !known && !dir_exists(dir) is
+        ui::fail(name + " is not installed")
+        return 1
+    end
+    if dir_exists(dir) && !util::rm_rf(dir) is
+        ui::fail("could not remove " + dir)
+        return 1
+    end
+    lock::lock_write(lock::global_lock_path(), lock::lock_del(gl, name))
+    ui::ok(name + " removed")
+    return 0
+end
+
+;; ── Verify ───────────────────────────────────────────────────────────────────
+;; Recomputes every installed library's checksum and compares with bit.lock.
+;; Returns the number of problems.
+
+pub fn verify_all(only: string) -> int is
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    let n: int = lock::lock_len(gl)
+    if n == 0 is
+        ui::note("no libraries installed")
+        return 0
+    end
+    let mut problems: int = 0
+    let mut i: int = 0
+    while i < n is
+        let e: lock::Locked = lock::lock_at(gl, i)
+        let name: string = lock::locked_name(e)
+        if only == "" || only == name is
+            let dir: string = lib_dir(name, util::short_hash(lock::locked_commit(e)))
+            if !dir_exists(dir) is
+                ui::bad(name + "  " + ui::red("missing") + " " + ui::dim(dir))
+                problems += 1
+            else is
+                let sum: string = checksum::dir_checksum(dir)
+                if checksum::matches(lock::locked_checksum(e), sum) is
+                    ui::ok(name + "  " + ui::dim("@ " + lock::locked_version(e) + "  checksum ok"))
+                else is
+                    ui::bad(name + "  " + ui::red("CHECKSUM MISMATCH") + " " + ui::dim("(modified or corrupted)"))
+                    problems += 1
+                end
+            end
+        end
+        i += 1
+    end
+    return problems
+end
+
+;; Deletes installed commits that are not the locked one, and stale temp clones.
+pub fn clean_old() -> int is
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    let mut removed: int = 0
+    let mut i: int = 0
+    while i < lock::lock_len(gl) is
+        let e: lock::Locked = lock::lock_at(gl, i)
+        let name: string = lock::locked_name(e)
+        let keep: string = util::short_hash(lock::locked_commit(e))
+        let olds: string = util::capture("find " + util::sq(lib_root(name)) + " -mindepth 1 -maxdepth 1 -type d ! -name " + util::sq(keep) + " 2>/dev/null")
+        if olds != "" is
+            let lines: [string] = string_split(olds, "\n")
+            let mut k: int = 0
+            while k < array_len(lines) is
+                if lines[k] != "" && util::rm_rf(lines[k]) is
+                    ui::line(ui::dim("removed " + lines[k]))
+                    removed += 1
+                end
+                k += 1
+            end
+        end
+        i += 1
+    end
+    util::run("rm -rf " + util::sq(util::tmp_dir()) + "/* 2>/dev/null")
+    return removed
+end
