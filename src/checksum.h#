@@ -1,0 +1,42 @@
+mod util
+
+fn sha_cmd() -> string is
+    if util::tool_exists("sha256sum") is return "sha256sum" end
+    return "shasum -a 256"
+end
+
+pub fn file_sha256(path: string) -> string is
+    let out: string = util::capture(sha_cmd() + " " + util::sq(path) + " 2>/dev/null | cut -d' ' -f1")
+    return out
+end
+
+pub fn dir_checksum(dir: string) -> string is
+    if !dir_exists(dir) is return "" end
+    let sha: string = sha_cmd()
+    let cmd: string = "cd " + util::sq(dir) + " && find . -type f -not -path './.git/*' -not -path './.bit/*' -print0 " +
+                      "| LC_ALL=C sort -z | xargs -0 " + sha + " 2>/dev/null | " + sha + " | cut -d' ' -f1"
+    return util::capture(cmd)
+end
+
+;; Number of files that went into `dir_checksum`.
+pub fn dir_file_count(dir: string) -> int is
+    let out: string = util::capture("cd " + util::sq(dir) +
+                       " && find . -type f -not -path './.git/*' -not -path './.bit/*' | wc -l")
+    return to_int(string_trim(out))
+end
+
+;; Lock entries store checksums as `sha256:<hex>`.
+pub fn tag(hex: string) -> string is
+    if hex == "" is return "" end
+    return "sha256:" + hex
+end
+
+pub fn untag(s: string) -> string is
+    if string_starts_with(s, "sha256:") is return string_slice(s, 7, string_len(s)) end
+    return s
+end
+
+pub fn matches(expected: string, actual_hex: string) -> bool is
+    if expected == "" || actual_hex == "" is return false end
+    return untag(expected) == actual_hex
+end
