@@ -1,0 +1,170 @@
+pub struct JsonPair is
+    pub jp_key:    string
+    pub jp_val:    string   ;; unquoted if it was a JSON string, raw text otherwise
+    pub jp_quoted: bool
+end
+
+pub struct JsonObj is
+    pub jo_pairs: [JsonPair]
+    pub jo_count: int
+end
+
+fn strip_outer(s: string, open: string, close: string) -> string is
+    let t: string = string_trim(s)
+    if string_starts_with(t, open) && string_ends_with(t, close) && string_len(t) >= 2 is
+        return string_trim(string_slice(t, 1, string_len(t) - 1))
+    end
+    return t
+end
+
+;; Splits on commas at nesting level 0, ignoring commas inside strings/brackets.
+fn split_top_level_commas(text: string) -> [string] is
+    let n: int = string_len(text)
+    let mut parts:  [string] = []
+    let mut depth:  int  = 0
+    let mut in_str: bool = false
+    let mut start:  int  = 0
+    let mut i:      int  = 0
+
+    while i < n is
+        let c: string = string_at(text, i)
+        if in_str is
+            if c == "\\" is
+                i += 1
+            else if c == "\"" is
+                in_str = false
+            end
+        else is
+            if c == "\"" is
+                in_str = true
+            else if c == "{" || c == "[" is
+                depth += 1
+            else if c == "}" || c == "]" is
+                depth -= 1
+            else if c == "," && depth == 0 is
+                parts = array_push(parts, string_trim(string_slice(text, start, i)))
+                start = i + 1
+            end
+        end
+        i += 1
+    end
+
+    let last: string = string_trim(string_slice(text, start, n))
+    if last != "" is parts = array_push(parts, last) end
+    return parts
+end
+
+;; `[ a, b, c ]` -> raw text of every element.
+pub fn split_array_items(json: string) -> [string] is
+    let inner: string = strip_outer(json, "[", "]")
+    if inner == "" is return [] end
+    return split_top_level_commas(inner)
+end
+
+;; Removes surrounding quotes and undoes the basic JSON escapes.
+pub fn json_unquote(s: string) -> string is
+    let t: string = string_trim(s)
+    if string_len(t) < 2 || !string_starts_with(t, "\"") || !string_ends_with(t, "\"") is
+        return t
+    end
+    let inner: string = string_slice(t, 1, string_len(t) - 1)
+    let r1: string = string_replace(inner, "\\\"", "\"")
+    let r2: string = string_replace(r1, "\\n", "\n")
+    let r3: string = string_replace(r2, "\\t", "\t")
+    return string_replace(r3, "\\\\", "\\")
+end
+
+;; `["a","b"]` -> ["a", "b"]
+pub fn json_string_array(raw: string) -> [string] is
+    let items: [string] = split_array_items(raw)
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(items) is
+        let v: string = json_unquote(items[i])
+        if v != "" is out = array_push(out, v) end
+        i += 1
+    end
+    return out
+end
+
+fn parse_pair(pair_text: string) -> JsonPair is
+    let n: int = string_len(pair_text)
+    let mut depth:    int  = 0
+    let mut in_str:   bool = false
+    let mut colon_at: int  = -1
+    let mut i:        int  = 0
+
+    while i < n && colon_at < 0 is
+        let c: string = string_at(pair_text, i)
+        if in_str is
+            if c == "\\" is
+                i += 1
+            else if c == "\"" is
+                in_str = false
+            end
+        else is
+            if c == "\"" is
+                in_str = true
+            else if c == "{" || c == "[" is
+                depth += 1
+            else if c == "}" || c == "]" is
+                depth -= 1
+            else if c == ":" && depth == 0 is
+                colon_at = i
+            end
+        end
+        i += 1
+    end
+
+    if colon_at < 0 is
+        return JsonPair { jp_key: "", jp_val: "", jp_quoted: false }
+    end
+
+    let key_raw: string = string_trim(string_slice(pair_text, 0, colon_at))
+    let val_raw: string = string_trim(string_slice(pair_text, colon_at + 1, n))
+    let quoted:  bool   = string_starts_with(val_raw, "\"")
+    let val:     string = if quoted then json_unquote(val_raw) else val_raw
+    return JsonPair { jp_key: json_unquote(key_raw), jp_val: val, jp_quoted: quoted }
+end
+
+pub fn parse_object(json: string) -> JsonObj is
+    let inner: string = strip_outer(json, "{", "}")
+    if inner == "" is return JsonObj { jo_pairs: [], jo_count: 0 } end
+
+    let items: [string] = split_top_level_commas(inner)
+    let mut pairs: [JsonPair] = []
+    let mut i: int = 0
+    while i < array_len(items) is
+        let p: JsonPair = parse_pair(items[i])
+        if p.jp_key != "" is pairs = array_push(pairs, p) end
+        i += 1
+    end
+    return JsonObj { jo_pairs: pairs, jo_count: array_len(pairs) }
+end
+
+pub fn obj_get(o: JsonObj, key: string) -> string is
+    let mut i: int = 0
+    while i < o.jo_count is
+        if o.jo_pairs[i].jp_key == key is return o.jo_pairs[i].jp_val end
+        i += 1
+    end
+    return ""
+end
+
+pub fn obj_has(o: JsonObj, key: string) -> bool is
+    let mut i: int = 0
+    while i < o.jo_count is
+        if o.jo_pairs[i].jp_key == key is return true end
+        i += 1
+    end
+    return false
+end
+
+;; First non-empty value among several key spellings (e.g. "target"/"url"/"git").
+pub fn obj_get_any(o: JsonObj, k1: string, k2: string, k3: string) -> string is
+    let a: string = obj_get(o, k1)
+    if a != "" is return a end
+    let b: string = obj_get(o, k2)
+    if b != "" is return b end
+    return obj_get(o, k3)
+end
