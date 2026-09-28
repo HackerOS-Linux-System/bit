@@ -231,6 +231,15 @@
       "author": "Bit Developers"
     },
     {
+      "name": "gui",
+      "target": "https://github.com/HackerOS-Linux-System/gui",
+      "description": "GUI library for Hacker Lang.",
+      "tags": [
+        "gui"
+      ],
+      "author": "Bit Developers"
+    },
+    {
       "name": "libfasttree",
       "target": "https://github.com/Zenit-Linux/libfasttree",
       "description": "A modern succesor for ostree.",
