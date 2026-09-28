@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Library — bit.io</title>
+  <meta name="description" content="Library details on bit.io" />
+  <meta name="theme-color" content="#ec4899" />
+  <link rel="icon" href="images/icon.png" type="image/png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <script>try{var t=localStorage.getItem("bitio:theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t);else if(matchMedia("(prefers-color-scheme: dark)").matches)document.documentElement.setAttribute("data-theme","dark")}catch(e){}</script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="nav">
+    <div class="wrap">
+      <a class="brand" href="index.html"><img src="images/icon.png" alt="" width="30" height="30" />bit.io</a>
+      <nav class="nav-links" aria-label="Main">
+        <a href="index.html">Libraries</a>
+        <a href="about.html">Docs</a>
+        <a href="https://github.com/HackerOS-Linux-System/bit" rel="noopener" target="_blank">GitHub ↗</a>
+      </nav>
+      <span class="grow"></span>
+      <button class="icon-btn" data-theme-toggle aria-label="Toggle dark mode" title="Toggle dark mode">◐</button>
+    </div>
+  </header>
+  <main id="main" class="wrap page">
+    <p><a href="index.html">← All libraries</a></p>
+    <div id="detail"><p class="muted">Loading…</p></div>
+  </main>
+  <footer class="site"><div class="wrap">
+    <span>bit — the package manager for H#, Hacker Lang and HackerScript.</span>
+    <span><a href="about.html">Docs</a> · <a href="https://github.com/HackerOS-Linux-System/bit" rel="noopener" target="_blank">GitHub</a></span>
+  </div></footer>
+  <script type="module" src="js/lib.js"></script>
+</body>
+</html>
