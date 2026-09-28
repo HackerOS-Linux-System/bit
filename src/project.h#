@@ -1,0 +1,378 @@
+mod util
+mod hk
+mod index
+
+pub struct Project is
+    pub pj_root:     string
+    pub pj_name:     string
+    pub pj_version:  string
+    pub pj_manifest: string
+    pub pj_hk:       hk::Hk
+    pub pj_cache:    string   ;; "" = <root>/cache
+end
+
+pub fn root_of(p: Project)     -> string is return p.pj_root end
+pub fn name_of(p: Project)     -> string is return p.pj_name end
+pub fn version_of(p: Project)  -> string is return p.pj_version end
+pub fn manifest_of(p: Project) -> string is return p.pj_manifest end
+pub fn hk_of(p: Project)       -> hk::Hk  is return p.pj_hk end
+
+;; ── Finding & loading ────────────────────────────────────────────────────────
+
+pub fn manifest_in(dir: string) -> string is
+    if file_exists(dir + "/Bit.hk") is return dir + "/Bit.hk" end
+    if file_exists(dir + "/bit.hk") is return dir + "/bit.hk" end
+    return ""
+end
+
+fn parent_of(dir: string) -> string is
+    let p: string = util::dirname(dir)
+    if p == dir is return "" end
+    return p
+end
+
+;; Nearest directory (walking up) that has a manifest, or "".
+pub fn nearest_manifest_dir(start: string) -> string is
+    let mut dir: string = start
+    let mut guard: int = 0
+    while dir != "" && guard < 64 is
+        if manifest_in(dir) != "" is return dir end
+        dir = parent_of(dir)
+        guard += 1
+    end
+    return ""
+end
+
+fn lists_member(ws_dir: string, member_dir: string) -> bool is
+    let m: string = manifest_in(ws_dir)
+    if m == "" is return false end
+    let h: hk::Hk = hk::hk_parse(file_read(m))
+    let members: [string] = hk::hk_list(hk::hk_get(h, "workspace", "members", ""))
+    let rel: string = string_slice(member_dir, string_len(ws_dir) + 1, string_len(member_dir))
+    let mut i: int = 0
+    while i < array_len(members) is
+        let mm: string = string_replace(members[i], "./", "")
+        if mm == rel || mm == util::basename(member_dir) is return true end
+        i += 1
+    end
+    return false
+end
+
+;; Project root: nearest manifest, promoted to the enclosing workspace if any.
+pub fn find_root(start: string) -> string is
+    let near: string = nearest_manifest_dir(start)
+    if near == "" is return "" end
+    let mut up: string = parent_of(near)
+    let mut guard: int = 0
+    while up != "" && guard < 64 is
+        if manifest_in(up) != "" && lists_member(up, near) is return up end
+        up = parent_of(up)
+        guard += 1
+    end
+    return near
+end
+
+pub fn load(root: string) -> Project is
+    let m: string = manifest_in(root)
+    let h: hk::Hk = if m == "" then hk::hk_empty() else hk::hk_parse(file_read(m))
+    return Project {
+        pj_root: root,
+        pj_name: hk::hk_pkg(h, "name", util::basename(root)),
+        pj_version: hk::hk_pkg(h, "version", "0.1.0"),
+        pj_manifest: m,
+        pj_hk: h,
+        pj_cache: ""
+    }
+end
+
+pub fn cwd() -> string is return fs_cwd() end
+
+;; Same as `load`, but with the cache directory relocated. Used when bit
+;; builds an installed library: the artifacts belong under <lib>/.bit/, never
+;; in a `cache/` inside the installed source tree.
+pub fn load_with_cache(root: string, cache_base: string) -> Project is
+    let base: Project = load(root)
+    return Project { pj_root: base.pj_root, pj_name: base.pj_name, pj_version: base.pj_version,
+                     pj_manifest: base.pj_manifest, pj_hk: base.pj_hk, pj_cache: cache_base }
+end
+
+;; Loads the project around the cwd; `root == ""` when there is none.
+pub fn load_here() -> Project is
+    let root: string = find_root(cwd())
+    if root == "" is
+        return Project { pj_root: "", pj_name: "", pj_version: "", pj_manifest: "", pj_hk: hk::hk_empty(), pj_cache: "" }
+    end
+    return load(root)
+end
+
+pub fn is_loaded(p: Project) -> bool is return p.pj_root != "" end
+
+pub fn get(p: Project, section: string, key: string, fallback: string) -> string is
+    return hk::hk_get(p.pj_hk, section, key, fallback)
+end
+
+pub fn has_section(p: Project, section: string) -> bool is
+    return hk::hk_has_section(p.pj_hk, section)
+end
+
+pub fn get_bool(p: Project, section: string, key: string, fallback: bool) -> bool is
+    let v: string = string_lower(get(p, section, key, ""))
+    if v == "true" || v == "yes" || v == "1" || v == "on" is return true end
+    if v == "false" || v == "no" || v == "0" || v == "off" is return false end
+    return fallback
+end
+
+pub fn members(p: Project) -> [string] is
+    return hk::hk_list(get(p, "workspace", "members", ""))
+end
+
+;; ── Cache dir (virus-style; replaces build/) ─────────────────────────────────
+;;   cache/libs/    links to the libraries this project uses (→ ~/.hackeros/libs)
+;;   cache/source/  fetched sources (git/path dependencies)
+;;   cache/env/     toolchain helpers
+;;   cache/build/   outputs: cache/build/<debug|release>/…
+
+pub fn cache_root(p: Project) -> string is
+    if p.pj_cache != "" is return p.pj_cache end
+    return p.pj_root + "/cache"
+end
+pub fn cache_libs(p: Project) -> string is return cache_root(p) + "/libs" end
+pub fn cache_source(p: Project) -> string is return cache_root(p) + "/source" end
+pub fn cache_env(p: Project) -> string is return cache_root(p) + "/env" end
+pub fn cache_build(p: Project) -> string is return cache_root(p) + "/build" end
+
+pub fn cache_ensure(p: Project) -> int is
+    let mut rc: int = util::mkdir_p(cache_libs(p))
+    rc = rc + util::mkdir_p(cache_source(p))
+    rc = rc + util::mkdir_p(cache_env(p))
+    rc = rc + util::mkdir_p(cache_build(p))
+    return rc
+end
+
+;; ── Languages & layout ───────────────────────────────────────────────────────
+
+fn first_existing(root: string, candidates: [string]) -> string is
+    let mut i: int = 0
+    while i < array_len(candidates) is
+        if file_exists(root + "/" + candidates[i]) is return candidates[i] end
+        i += 1
+    end
+    return ""
+end
+
+fn dir_has_files(root: string, dir: string, pattern: string) -> bool is
+    if !dir_exists(root + "/" + dir) is return false end
+    let out: string = util::capture("find " + util::sq(root + "/" + dir) + " -maxdepth 3 -type f -name " +
+                                    util::sq(pattern) + " 2>/dev/null | head -1")
+    return out != ""
+end
+
+pub fn src_dir(p: Project) -> string is return get(p, "layout", "src", "src") end
+pub fn cmd_dir(p: Project) -> string is return get(p, "layout", "cmd", "cmd") end
+pub fn lib_dir(p: Project) -> string is return get(p, "layout", "lib", "lib") end
+
+;; What auto-detection finds in the tree (no Bit.hk hints):
+;;   src/  *.h#   -> H#            cmd/ or lib/  *.hcs  -> HackerScript
+;;   Hacker Lang can NOT be auto-detected reliably — declare it (`lang => hl`,
+;;   or `[layout] -> hl-entry => path/main.hl`); bare main.hl files are a fallback.
+pub fn detect_langs(p: Project) -> [string] is
+    let mut out: [string] = []
+    if dir_has_files(p.pj_root, src_dir(p), "*.h#") is out = array_push(out, "hsharp") end
+    if dir_has_files(p.pj_root, cmd_dir(p), "*.hcs") || dir_has_files(p.pj_root, lib_dir(p), "*.hcs") is
+        out = array_push(out, "hackerscript")
+    end
+    let hl_cfg: string = get(p, "layout", "hl-entry", get(p, "layout", "hackerlang-entry", ""))
+    if hl_cfg != "" || first_existing(p.pj_root, ["main.hl", "src/main.hl", "source-code/main.hl"]) != "" is
+        out = array_push(out, "hackerlang")
+    end
+    return out
+end
+
+;; Languages to build: `[package] -> lang` (csv, "auto" = detect), else detected.
+pub fn langs(p: Project) -> [string] is
+    let declared: string = get(p, "package", "lang", get(p, "build", "lang", "auto"))
+    let mut out: [string] = []
+    if string_lower(declared) != "auto" && declared != "" is
+        let parts: [string] = util::csv_split(declared)
+        let mut i: int = 0
+        while i < array_len(parts) is
+            let l: string = index::normalize_lang(parts[i])
+            if l != "" && !util::array_has(out, l) is out = array_push(out, l) end
+            i += 1
+        end
+        if array_len(out) > 0 is return out end
+    end
+    return detect_langs(p)
+end
+
+pub fn lang_label(lang: string) -> string is
+    if lang == "hsharp" is return "H#" end
+    if lang == "hackerlang" is return "Hacker Lang" end
+    if lang == "hackerscript" is return "HackerScript" end
+    return lang
+end
+
+;; Entry file (relative to the root) of `lang` for kind "bin" | "lib";
+;; "" when the project has none.
+pub fn entry_for(p: Project, lang: string, kind: string) -> string is
+    let suffix: string = if kind == "lib" then "lib-entry" else "entry"
+    let short: string = if lang == "hackerlang" then "hl" else if lang == "hackerscript" then "hs" else "hsharp"
+    let explicit: string = get(p, "layout", short + "-" + suffix, get(p, "layout", lang + "-" + suffix, ""))
+    if explicit != "" is return explicit end
+
+    ;; a bare `entry`/`lib-entry` applies when the project has exactly one language
+    if array_len(langs(p)) == 1 is
+        let bare: string = get(p, "layout", suffix, "")
+        if bare != "" is return bare end
+    end
+
+    if lang == "hsharp" is
+        let f: string = if kind == "lib" then src_dir(p) + "/lib.h#" else src_dir(p) + "/main.h#"
+        if file_exists(p.pj_root + "/" + f) is return f end
+        return ""
+    end
+    if lang == "hackerscript" is
+        let f: string = if kind == "lib" then lib_dir(p) + "/mod.hcs" else cmd_dir(p) + "/main.hcs"
+        if file_exists(p.pj_root + "/" + f) is return f end
+        return ""
+    end
+    if kind == "lib" is
+        return first_existing(p.pj_root, ["lib.hl", "src/lib.hl", "source-code/lib.hl"])
+    end
+    return first_existing(p.pj_root, ["main.hl", "src/main.hl", "source-code/main.hl"])
+end
+
+;; ── [build] / [lib] / [default-build] ────────────────────────────────────────
+
+;; Static linking is not optional in bit. `link => dynamic` is rejected by build.
+pub fn link_mode(p: Project) -> string is
+    return string_lower(get(p, "build", "link", "static"))
+end
+
+;; Library output: hlib (default) | so | a | obj  (`lib`/`static` are aliases of `a`).
+pub fn lib_output(p: Project) -> string is
+    let v: string = string_lower(get(p, "lib", "output", get(p, "build", "lib-output", "hlib")))
+    if v == "lib" || v == "static" || v == "archive" is return "a" end
+    if v == "shared" || v == "dylib" is return "so" end
+    if v == "object" || v == "o" is return "obj" end
+    return v
+end
+
+;; ── Dependencies ─────────────────────────────────────────────────────────────
+
+pub struct Dep is
+    pub dp_name:   string
+    pub dp_kind:   string    ;; index | git | path | invalid
+    pub dp_arg:    string    ;; git url / path
+    pub dp_rev:    string
+    pub dp_output: string    ;; per-dependency lib output override ("" = the library's own)
+    pub dp_lang:   string
+end
+
+pub fn dep_name(d: Dep)   -> string is return d.dp_name end
+pub fn dep_kind(d: Dep)   -> string is return d.dp_kind end
+pub fn dep_arg(d: Dep)    -> string is return d.dp_arg end
+pub fn dep_rev(d: Dep)    -> string is return d.dp_rev end
+pub fn dep_output(d: Dep) -> string is return d.dp_output end
+pub fn dep_lang(d: Dep)   -> string is return d.dp_lang end
+
+fn first_word(s: string) -> string is
+    let t: string = string_trim(s)
+    let sp: int = string_find(t, " ")
+    if sp < 0 is return t end
+    return string_slice(t, 0, sp)
+end
+
+fn rest_words(s: string) -> string is
+    let t: string = string_trim(s)
+    let sp: int = string_find(t, " ")
+    if sp < 0 is return "" end
+    return string_trim(string_slice(t, sp + 1, string_len(t)))
+end
+
+pub fn parse_dep(name: string, value: string, h: hk::Hk) -> Dep is
+    let v: string = string_trim(value)
+    let w: string = string_lower(first_word(v))
+    let rest: string = rest_words(v)
+    let mut kind: string = "index"
+    let mut arg: string = ""
+    let mut rev: string = hk::hk_get(h, "dependencies", name + ".rev", "")
+
+    if v == "" || v == "*" || w == "newest" || w == "index" || w == "static" || w == "latest" is
+        kind = "index"
+    else if w == "dynamic" is
+        kind = "invalid"          ;; bit links everything statically
+    else if w == "git" is
+        kind = "git"
+        arg = first_word(rest)
+        if rev == "" is rev = rest_words(rest) end
+    else if w == "path" is
+        kind = "path"
+        arg = rest
+    else if w == "rev" || w == "tag" || w == "branch" is
+        kind = "index"
+        rev = rest
+    else if util::is_url(first_word(v)) is
+        kind = "git"
+        arg = first_word(v)
+        if rev == "" is rev = rest_words(v) end
+    else is
+        kind = "index"
+        rev = v                    ;; a bare `v1.2` / commit id is a rev of the index entry
+    end
+
+    let g: string = hk::hk_get(h, "dependencies", name + ".git", "")
+    let pth: string = hk::hk_get(h, "dependencies", name + ".path", "")
+    if g != "" is
+        kind = "git"
+        arg = g
+    end
+    if pth != "" is
+        kind = "path"
+        arg = pth
+    end
+
+    return Dep {
+        dp_name: name, dp_kind: kind, dp_arg: arg, dp_rev: rev,
+        dp_output: hk::hk_get(h, "dependencies", name + ".output", ""),
+        dp_lang: index::normalize_lang(hk::hk_get(h, "dependencies", name + ".lang", ""))
+    }
+end
+
+pub fn deps(p: Project) -> [Dep] is
+    let keys: [string] = hk::hk_keys(p.pj_hk, "dependencies")
+    let mut out: [Dep] = []
+    let mut i: int = 0
+    while i < array_len(keys) is
+        let k: string = keys[i]
+        ;; `name.rev` style keys are sub-entries of `name`, not dependencies
+        if !string_contains(k, ".") is
+            out = array_push(out, parse_dep(k, hk::hk_get(p.pj_hk, "dependencies", k, ""), p.pj_hk))
+        end
+        i += 1
+    end
+    return out
+end
+
+;; ── Custom commands ([commands]) ─────────────────────────────────────────────
+
+pub fn command_names(p: Project) -> [string] is
+    let keys: [string] = hk::hk_keys(p.pj_hk, "commands")
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(keys) is
+        if !string_contains(keys[i], ".") && !util::array_has(out, keys[i]) is
+            out = array_push(out, keys[i])
+        end
+        i += 1
+    end
+    return out
+end
+
+pub fn command_body(p: Project, name: string) -> string is
+    return get(p, "commands", name, "")
+end
+
+pub fn command_desc(p: Project, name: string) -> string is
+    return get(p, "commands", name + ".description", get(p, "commands", name + ".desc", ""))
+end
