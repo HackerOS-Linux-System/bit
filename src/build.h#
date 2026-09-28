@@ -1,0 +1,489 @@
+mod util
+mod ui
+mod hk
+mod index
+mod project
+
+pub struct BuildOpts is
+    pub bo_release:  bool
+    pub bo_verbose:  bool
+    pub bo_lang:     string     ;; "" = every language of the project
+    pub bo_platform: string
+    pub bo_emit:     string     ;; "" = auto | bin | lib | hlib | so | a | obj
+    pub bo_sign:     string     ;; path to an Ed25519 key for hlib signing
+end
+
+pub fn opts_new(release: bool, verbose: bool, target: string, platform: string, emit: string) -> BuildOpts is
+    let lang: string = index::normalize_lang(target)
+    let plat: string = if platform != "" then platform else if lang == "" then target else ""
+    return BuildOpts {
+        bo_release: release, bo_verbose: verbose, bo_lang: lang,
+        bo_platform: plat, bo_emit: string_lower(emit), bo_sign: ""
+    }
+end
+
+pub fn opts_with_sign(o: BuildOpts, key: string) -> BuildOpts is
+    return BuildOpts { bo_release: o.bo_release, bo_verbose: o.bo_verbose, bo_lang: o.bo_lang,
+                       bo_platform: o.bo_platform, bo_emit: o.bo_emit, bo_sign: key }
+end
+
+pub fn opts_release(o: BuildOpts) -> bool is return o.bo_release end
+pub fn opts_lang(o: BuildOpts)    -> string is return o.bo_lang end
+
+;; Options for `[default-build]` — what a bare `bit` (and `bit build` without
+;; flags) does. The section being present means release unless it says otherwise.
+pub fn opts_default(p: project::Project) -> BuildOpts is
+    let has: bool = project::has_section(p, "default-build")
+    let profile: string = string_lower(project::get(p, "default-build", "profile",
+                                       if has then "release" else "debug"))
+    let release: bool = profile == "release" || profile == "rel" || profile == "r"
+    let target: string = project::get(p, "default-build", "target", "")
+    let platform: string = project::get(p, "default-build", "platform", "")
+    let emit: string = project::get(p, "default-build", "emit", "")
+    return opts_new(release, false, target, platform, emit)
+end
+
+pub fn profile_name(o: BuildOpts) -> string is
+    if o.bo_release is return "release" end
+    return "debug"
+end
+
+pub fn out_dir(p: project::Project, o: BuildOpts) -> string is
+    return project::cache_build(p) + "/" + profile_name(o)
+end
+
+;; ── Effective settings (CLI flags win over Bit.hk) ───────────────────────────
+
+fn build_platform(p: project::Project, o: BuildOpts) -> string is
+    if o.bo_platform != "" is return o.bo_platform end
+    let explicit: string = project::get(p, "build", "platform", "")
+    if explicit != "" is return explicit end
+    let t: string = project::get(p, "build", "target", "")
+    if t != "" && index::normalize_lang(t) == "" is return t end
+    return ""
+end
+
+fn target_langs(p: project::Project, o: BuildOpts) -> [string] is
+    if o.bo_lang != "" is return [o.bo_lang] end
+    let t: string = index::normalize_lang(project::get(p, "build", "target", ""))
+    if t != "" is return [t] end
+    return project::langs(p)
+end
+
+fn short_lang(lang: string) -> string is
+    if lang == "hackerlang" is return "hl" end
+    if lang == "hackerscript" is return "hs" end
+    return "hsharp"
+end
+
+;; ── Toolchains ───────────────────────────────────────────────────────────────
+
+pub fn tool_for(lang: string) -> string is
+    if lang == "hsharp" is
+        let o: string = env_get("BIT_HSHARP")
+        if o != "" is return o end
+        return util::first_tool(["h#", "hsharp"])
+    end
+    if lang == "hackerlang" is
+        let o: string = env_get("BIT_HL")
+        if o != "" is return o end
+        return util::first_tool(["hl"])
+    end
+    let o: string = env_get("BIT_HACKERC")
+    if o != "" is return o end
+    return util::first_tool(["hackerc"])
+end
+
+pub fn missing_tool_hint(lang: string) -> string is
+    if lang == "hsharp" is return "install H#:  hacker unpack h#" end
+    if lang == "hackerlang" is return "install Hacker Lang:  hacker unpack hacker-lang" end
+    return "install HackerScript:  hacker unpack hackerscript   (needs hackerc + cargo)"
+end
+
+pub fn have_toolchain(lang: string) -> bool is
+    return tool_for(lang) != ""
+end
+
+;; ── Static-linking guard ─────────────────────────────────────────────────────
+
+;; Files of the project's own sources that use `extern dynamic` (H#).
+pub fn static_offenders(p: project::Project) -> string is
+    let dir: string = project::root_of(p) + "/" + project::src_dir(p)
+    if !dir_exists(dir) is return "" end
+    return util::capture("grep -rIl --include='*.h#' 'extern dynamic' " + util::sq(dir) + " 2>/dev/null")
+end
+
+;; Same check on an arbitrary source tree (used for installed dependencies).
+pub fn static_offenders_in(dir: string) -> string is
+    if !dir_exists(dir) is return "" end
+    return util::capture("grep -rIl --include='*.h#' 'extern dynamic' " + util::sq(dir) +
+                         " 2>/dev/null | grep -v '/.bit/' | head -5")
+end
+
+;; ── Platform mapping (HackerScript compiles through cargo) ───────────────────
+
+fn rust_triple(platform: string) -> string is
+    if platform == "linux-aarch64" is return "aarch64-unknown-linux-musl" end
+    if platform == "linux-riscv64" || platform == "linux-riscv64-musl" is return "riscv64gc-unknown-linux-musl" end
+    if platform == "linux-x86_64" || platform == "linux" || platform == "" is
+        return util::capture("uname -m") + "-unknown-linux-musl"
+    end
+    if platform == "windows-x86_64" || platform == "windows" is return "x86_64-pc-windows-gnu" end
+    if platform == "macos-aarch64" is return "aarch64-apple-darwin" end
+    if platform == "macos-x86_64" || platform == "macos" is return "x86_64-apple-darwin" end
+    return platform
+end
+
+;; ── Command runner ───────────────────────────────────────────────────────────
+
+fn env_prefix(p: project::Project) -> string is
+    return "BIT_ROOT=" + util::sq(project::root_of(p)) +
+           " BIT_NAME=" + util::sq(project::name_of(p)) +
+           " BIT_VERSION=" + util::sq(project::version_of(p)) +
+           " BIT_LIBS=" + util::sq(util::libs_dir()) +
+           " HLIB_PATH=" + util::sq(util::libs_dir()) + " "
+end
+
+fn in_root(p: project::Project, cmd: string) -> string is
+    return "cd " + util::sq(project::root_of(p)) + " && " + env_prefix(p) + cmd
+end
+
+fn run_step(p: project::Project, label: string, cmd: string, verbose: bool) -> int is
+    if verbose is ui::note("$ " + cmd) end
+    let t0: int = time_ms()
+    let rc: int = util::run(in_root(p, cmd))
+    let ms: int = time_ms() - t0
+    if rc == 0 is
+        ui::ok(label + "  " + ui::dim("(" + util::elapsed_str(ms) + ")"))
+    else is
+        ui::bad(label + "  " + ui::red("failed") + " " + ui::dim("(" + util::elapsed_str(ms) + ")"))
+    end
+    return rc
+end
+
+;; Runs a shell command in the project root with BIT_* variables exported.
+pub fn shell_in_root(p: project::Project, cmd: string) -> int is
+    return util::run(in_root(p, cmd))
+end
+
+pub fn run_hook(p: project::Project, key: string, verbose: bool) -> int is
+    let cmd: string = project::get(p, "hooks", key, "")
+    if cmd == "" is return 0 end
+    ui::line(ui::dim("hook " + key + ": " + cmd))
+    if verbose is ui::note("$ " + cmd) end
+    return util::run(in_root(p, cmd))
+end
+
+;; ── Per-language builders ────────────────────────────────────────────────────
+;; Each returns 0 on success. `suffix` keeps outputs apart when a project builds
+;; several languages at once ("" for a single language, "-hl"/"-hs" otherwise).
+
+fn flags_of(p: project::Project) -> string is
+    let f: string = project::get(p, "build", "flags", "")
+    if f == "" is return "" end
+    return " " + f
+end
+
+fn build_hsharp_bin(p: project::Project, o: BuildOpts, entry: string, out: string) -> int is
+    let tool: string = tool_for("hsharp")
+    let plat: string = build_platform(p, o)
+    let mem: string = project::get(p, "build", "mem-mode", project::get(p, "build", "mem_mode", ""))
+    let cmd: string = tool + " compile " + util::sq(entry) + " -o " + util::sq(out) +
+        (if o.bo_release then " --release" else "") +
+        (if plat != "" then " --target " + plat else "") +
+        (if mem != "" then " --mem-mode " + mem else "") +
+        (if o.bo_verbose then " --verbose" else "") + flags_of(p)
+    ;; NOTE: `--dynamic` is never passed — h# links statically by default.
+    return run_step(p, "H#  " + util::basename(out), cmd, o.bo_verbose)
+end
+
+fn build_hsharp_lib(p: project::Project, o: BuildOpts, entry: string, dir: string, output: string) -> int is
+    let tool: string = tool_for("hsharp")
+    let plat: string = build_platform(p, o)
+    let name: string = project::name_of(p)
+    if output == "hlib" is
+        let cmd: string = tool + " lib build " + util::sq(entry) + " -o " + util::sq(dir + "/" + name + ".hlib") +
+            " --lib-version " + util::sq(project::version_of(p)) +
+            (if plat != "" then " --target " + plat else "") +
+            (if o.bo_release then " --release" else "") +
+            (if o.bo_sign != "" then " --sign " + util::sq(o.bo_sign) else "")
+        return run_step(p, "H#  " + name + ".hlib", cmd, o.bo_verbose)
+    end
+    let emit: string = if output == "a" then "lib" else output
+    let file: string = if output == "so" then "lib" + name + ".so"
+                       else if output == "a" then "lib" + name + ".a"
+                       else name + ".o"
+    let cmd: string = tool + " compile " + util::sq(entry) + " --emit " + emit + " -o " + util::sq(dir + "/" + file) +
+        (if o.bo_release then " --release" else "") +
+        (if plat != "" then " --target " + plat else "") + flags_of(p)
+    return run_step(p, "H#  " + file, cmd, o.bo_verbose)
+end
+
+fn build_hl_bin(p: project::Project, o: BuildOpts, entry: string, out: string) -> int is
+    let cmd: string = tool_for("hackerlang") + " compile " + util::sq(entry) + " -o " + util::sq(out + ".bc")
+    if build_platform(p, o) != "" is
+        ui::warn("Hacker Lang bytecode is platform independent — platform ignored")
+    end
+    return run_step(p, "Hacker Lang  " + util::basename(out) + ".bc", cmd, o.bo_verbose)
+end
+
+fn build_hl_lib(p: project::Project, o: BuildOpts, entry: string, dir: string, output: string) -> int is
+    let tool: string = tool_for("hackerlang")
+    let name: string = project::name_of(p)
+    if output == "hlib" is
+        let cmd: string = tool + " hlib build " + util::sq(entry) + " -o " + util::sq(dir + "/" + name + ".hlib") +
+            " --lib-version " + util::sq(project::version_of(p)) + " --with-bytecode" +
+            (if o.bo_sign != "" then " --sign " + util::sq(o.bo_sign) else "")
+        return run_step(p, "Hacker Lang  " + name + ".hlib", cmd, o.bo_verbose)
+    end
+    if output == "so" is
+        let cmd: string = tool + " compile " + util::sq(entry) + " --shared -o " + util::sq(dir + "/lib" + name + ".so")
+        return run_step(p, "Hacker Lang  lib" + name + ".so", cmd, o.bo_verbose)
+    end
+    ui::fail("Hacker Lang libraries can be built as hlib or so, not '" + output + "'")
+    return 1
+end
+
+;; HackerScript = hackerc (→ cargo crate) + cargo. Static: crt-static + musl.
+fn build_hs_cargo(p: project::Project, o: BuildOpts, entry: string, dir: string, library: bool) -> int is
+    let name: string = project::name_of(p)
+    let crate: string = string_replace(name, "-", "_")
+    let crate_dir: string = dir + "/" + name + "-crate"
+    let target_dir: string = project::cache_build(p) + "/target"
+    let triple: string = rust_triple(build_platform(p, o))
+    let profile: string = profile_name(o)
+
+    let gen: string = tool_for("hackerscript") + " build " + util::sq(entry) + " -o " + util::sq(crate_dir) +
+        " --crate-name " + crate + (if library then " --library" else " --bin-name " + name) + flags_of(p)
+    let rc1: int = run_step(p, "HackerScript  transpile " + name, gen, o.bo_verbose)
+    if rc1 != 0 is return rc1 end
+
+    if !util::tool_exists("cargo") is
+        ui::fail("cargo is needed to compile HackerScript output (hackerc → Rust)")
+        return 1
+    end
+    let cargo: string = "RUSTFLAGS='-C target-feature=+crt-static' cargo build" +
+        (if o.bo_release then " --release" else "") + (if library then " --lib" else "") +
+        " --target " + triple + " --manifest-path " + util::sq(crate_dir + "/Cargo.toml") +
+        " --target-dir " + util::sq(target_dir)
+    let rc2: int = run_step(p, "HackerScript  cargo (static, " + triple + ")", cargo, o.bo_verbose)
+    if rc2 != 0 is return rc2 end
+
+    let built: string = target_dir + "/" + triple + "/" + profile
+    if library is
+        util::run("cp -f " + util::sq(built + "/lib" + crate + ".a") + " " + util::sq(dir + "/lib" + name + ".a") + " 2>/dev/null || " +
+                  "cp -f " + util::sq(built + "/lib" + crate + ".rlib") + " " + util::sq(dir + "/lib" + name + ".rlib"))
+    else is
+        return util::run("cp -f " + util::sq(built + "/" + name) + " " + util::sq(dir + "/" + name))
+    end
+    return 0
+end
+
+fn build_hs_lib(p: project::Project, o: BuildOpts, entry: string, dir: string, output: string) -> int is
+    let name: string = project::name_of(p)
+    if output == "hlib" is
+        let cmd: string = tool_for("hackerscript") + " hlib build " + util::sq(entry) + " -o " + util::sq(dir + "/" + name + ".hlib") +
+            " --lib-version " + util::sq(project::version_of(p)) +
+            (if o.bo_sign != "" then " --sign " + util::sq(o.bo_sign) else "")
+        return run_step(p, "HackerScript  " + name + ".hlib", cmd, o.bo_verbose)
+    end
+    if output == "a" is return build_hs_cargo(p, o, entry, dir, true) end
+    ui::fail("HackerScript libraries can be built as hlib or a, not '" + output + "'")
+    return 1
+end
+
+;; ── One language ─────────────────────────────────────────────────────────────
+
+fn want_bin(o: BuildOpts) -> bool is
+    return o.bo_emit == "" || o.bo_emit == "bin"
+end
+
+fn want_lib(o: BuildOpts) -> bool is
+    return o.bo_emit == "" || o.bo_emit == "lib" || o.bo_emit == "hlib" || o.bo_emit == "so" ||
+           o.bo_emit == "a" || o.bo_emit == "obj"
+end
+
+fn lib_format(p: project::Project, o: BuildOpts) -> string is
+    if o.bo_emit == "hlib" || o.bo_emit == "so" || o.bo_emit == "a" || o.bo_emit == "obj" is return o.bo_emit end
+    return project::lib_output(p)
+end
+
+pub fn bin_path(p: project::Project, o: BuildOpts, lang: string, suffix: string) -> string is
+    let base: string = out_dir(p, o) + "/" + project::name_of(p) + suffix
+    if lang == "hackerlang" is return base + ".bc" end
+    return base
+end
+
+fn build_lang(p: project::Project, o: BuildOpts, lang: string, suffix: string) -> int is
+    if !have_toolchain(lang) is
+        ui::fail(project::lang_label(lang) + " toolchain not found")
+        ui::note(missing_tool_hint(lang))
+        return 1
+    end
+    let root: string = project::root_of(p)
+    let dir: string = out_dir(p, o)
+    util::mkdir_p(dir)
+
+    let bin_entry: string = project::entry_for(p, lang, "bin")
+    let lib_entry: string = project::entry_for(p, lang, "lib")
+    let mut built: int = 0
+    let mut rc: int = 0
+
+    if want_bin(o) && bin_entry != "" is
+        let out: string = dir + "/" + project::name_of(p) + suffix
+        if lang == "hsharp" is rc = rc + build_hsharp_bin(p, o, bin_entry, out)
+        else if lang == "hackerlang" is rc = rc + build_hl_bin(p, o, bin_entry, out)
+        else is rc = rc + build_hs_cargo(p, o, bin_entry, dir, false)
+        end
+        built += 1
+    end
+
+    if want_lib(o) && lib_entry != "" is
+        let fmt: string = lib_format(p, o)
+        if lang == "hsharp" is rc = rc + build_hsharp_lib(p, o, lib_entry, dir, fmt)
+        else if lang == "hackerlang" is rc = rc + build_hl_lib(p, o, lib_entry, dir, fmt)
+        else is rc = rc + build_hs_lib(p, o, lib_entry, dir, fmt)
+        end
+        built += 1
+    end
+
+    if built == 0 is
+        ui::fail(project::lang_label(lang) + ": no entry point (" +
+                 (if lang == "hsharp" then project::src_dir(p) + "/main.h# or " + project::src_dir(p) + "/lib.h#"
+                  else if lang == "hackerscript" then project::cmd_dir(p) + "/main.hcs or " + project::lib_dir(p) + "/mod.hcs"
+                  else "declare [layout] -> hl-entry => path/to/main.hl") + ")")
+        return 1
+    end
+    if rc != 0 is return 1 end
+    return 0
+end
+
+;; ── Whole project ────────────────────────────────────────────────────────────
+
+pub fn build_project(p: project::Project, o: BuildOpts) -> int is
+    let name: string = project::name_of(p)
+    ui::blank()
+    ui::line(ui::bold("bit") + "  " + ui::dim("building") + " " + ui::bold(name) + " v" + project::version_of(p) +
+             (if o.bo_release then " " + ui::yellow("(release)") else " " + ui::dim("(debug)")))
+    ui::blank()
+
+    if project::link_mode(p) != "static" is
+        ui::fail("[build] link => " + project::link_mode(p) + " is not supported — bit links everything statically")
+        return 1
+    end
+
+    let bad: string = static_offenders(p)
+    if bad != "" is
+        ui::fail("`extern dynamic` is not allowed — bit builds statically linked programs only. Use `extern static`:")
+        write(bad)
+        return 1
+    end
+
+    let langs: [string] = target_langs(p, o)
+    if array_len(langs) == 0 is
+        ui::fail("nothing to build: no " + project::src_dir(p) + "/ (H#), " + project::cmd_dir(p) + "/ or " +
+                 project::lib_dir(p) + "/ (HackerScript) found")
+        ui::note("for Hacker Lang declare it in Bit.hk:  [layout] -> hl-entry => path/to/main.hl")
+        return 1
+    end
+
+    project::cache_ensure(p)
+    if run_hook(p, "pre-build", o.bo_verbose) != 0 is
+        ui::fail("pre-build hook failed")
+        return 1
+    end
+
+    let t0: int = time_ms()
+    let mut failed: int = 0
+    let mut i: int = 0
+    while i < array_len(langs) is
+        let sfx: string = if array_len(langs) > 1 && langs[i] != "hsharp" then "-" + short_lang(langs[i]) else ""
+        if build_lang(p, o, langs[i], sfx) != 0 is failed += 1 end
+        i += 1
+    end
+
+    ui::blank()
+    if failed == 0 is
+        run_hook(p, "post-build", o.bo_verbose)
+        ui::ok(name + " built  " + ui::dim("→ " + out_dir(p, o) + "  (" + util::elapsed_str(time_ms() - t0) + ")"))
+        ui::blank()
+        return 0
+    end
+    ui::fail(to_string(failed) + " language target(s) failed")
+    ui::blank()
+    return 1
+end
+
+;; ── check / run / clean ──────────────────────────────────────────────────────
+
+pub fn check_project(p: project::Project, verbose: bool) -> int is
+    let o: BuildOpts = opts_new(false, verbose, "", "", "")
+    let langs: [string] = target_langs(p, o)
+    if array_len(langs) == 0 is
+        ui::fail("nothing to check — no sources found")
+        return 1
+    end
+    let mut failed: int = 0
+    let mut i: int = 0
+    while i < array_len(langs) is
+        let lang: string = langs[i]
+        if !have_toolchain(lang) is
+            ui::bad(project::lang_label(lang) + "  toolchain not found")
+            ui::note(missing_tool_hint(lang))
+            failed += 1
+        else is
+            let tool: string = tool_for(lang)
+            let entry: string = project::entry_for(p, lang, "bin")
+            let lentry: string = project::entry_for(p, lang, "lib")
+            let mut cmd: string = ""
+            if lang == "hsharp" is
+                cmd = "find " + util::sq(project::src_dir(p)) + " -name '*.h#' -print0 | xargs -0 " + tool + " check"
+            else is
+                let e: string = if entry != "" then entry else lentry
+                cmd = tool + " check " + util::sq(e)
+            end
+            if run_step(p, project::lang_label(lang) + "  check", cmd, verbose) != 0 is failed += 1 end
+        end
+        i += 1
+    end
+    if failed > 0 is return 1 end
+    return 0
+end
+
+;; Builds (unless `no_build`) and runs the first language's binary.
+pub fn run_project(p: project::Project, o: BuildOpts, args: string, no_build: bool) -> int is
+    let langs: [string] = target_langs(p, o)
+    if array_len(langs) == 0 is
+        ui::fail("nothing to run — no sources found")
+        return 1
+    end
+    let mut lang: string = langs[0]
+    let mut i: int = 0
+    while i < array_len(langs) is
+        if project::entry_for(p, langs[i], "bin") != "" && project::entry_for(p, lang, "bin") == "" is lang = langs[i] end
+        i += 1
+    end
+    if project::entry_for(p, lang, "bin") == "" is
+        ui::fail("this project has no binary entry point (it is a library)")
+        return 1
+    end
+
+    if !no_build is
+        let only: BuildOpts = opts_new(o.bo_release, o.bo_verbose, lang, o.bo_platform, "bin")
+        if build_project(p, only) != 0 is return 1 end
+    end
+
+    ui::hr(50)
+    if lang == "hackerlang" is
+        return util::run(in_root(p, tool_for("hackerlang") + " run " + util::sq(project::entry_for(p, lang, "bin")) +
+                                    (if args != "" then " -- " + args else "")))
+    end
+    let sfx: string = if array_len(langs) > 1 && lang != "hsharp" then "-" + short_lang(lang) else ""
+    return util::run(in_root(p, util::sq(bin_path(p, o, lang, sfx)) + (if args != "" then " " + args else "")))
+end
+
+pub fn clean_project(p: project::Project) -> bool is
+    let dir: string = project::cache_root(p)
+    if !dir_exists(dir) is return true end
+    return util::rm_rf(dir)
+end
