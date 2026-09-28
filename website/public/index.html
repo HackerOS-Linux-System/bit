@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>bit.io — the library index for H#, Hacker Lang and HackerScript</title>
+  <meta name="description" content="bit.io is the open library index for H#, Hacker Lang and HackerScript. One package manager, statically linked libraries." />
+  <meta name="theme-color" content="#ec4899" />
+  <link rel="icon" href="images/icon.png" type="image/png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <script>try{var t=localStorage.getItem("bitio:theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t);else if(matchMedia("(prefers-color-scheme: dark)").matches)document.documentElement.setAttribute("data-theme","dark")}catch(e){}</script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="nav">
+    <div class="wrap">
+      <a class="brand" href="index.html"><img src="images/icon.png" alt="" width="30" height="30" />bit.io</a>
+      <nav class="nav-links" aria-label="Main">
+        <a href="index.html" aria-current="page">Libraries</a>
+        <a href="about.html">Docs</a>
+        <a href="https://github.com/HackerOS-Linux-System/bit" rel="noopener" target="_blank">GitHub ↗</a>
+      </nav>
+      <span class="grow"></span>
+      <button class="icon-btn" data-theme-toggle aria-label="Toggle dark mode" title="Toggle dark mode">◐</button>
+    </div>
+  </header>
+  <main id="main">
+    <section class="hero"><div class="wrap">
+      <h1><span class="grad">bit.io</span><br />one index for every HackerOS language</h1>
+      <p>Libraries for <b>H#</b>, <b>Hacker Lang</b> and <b>HackerScript</b>. One tool — <code>bit</code> — installs them checksummed, links them statically and builds your project from a single <code>Bit.hk</code>.</p>
+      <div class="install" id="hero-install"><span>$ bit install &lt;name&gt;</span></div>
+      <div class="stats">
+        <div><b id="stat-libs">–</b>libraries</div>
+        <div><b id="stat-langs">3</b>languages</div>
+        <div><b id="stat-updated">–</b>index updated</div>
+      </div>
+    </div></section>
+
+    <div class="wrap">
+      <div class="controls">
+        <input id="search" class="search" type="search" placeholder="Search libraries, tags, authors…   (press / to focus)" aria-label="Search libraries" autocomplete="off" />
+        <div class="chips" id="lang-filters" role="group" aria-label="Filter by language"></div>
+        <div class="chips" id="tag-filter"></div>
+        <div class="count" id="count" aria-live="polite">Loading…</div>
+      </div>
+      <div class="grid" id="grid" aria-live="polite"></div>
+    </div>
+  </main>
+  <footer class="site"><div class="wrap">
+    <span>bit — the package manager for H#, Hacker Lang and HackerScript.</span>
+    <span><a href="about.html">Docs</a> · <a href="https://github.com/HackerOS-Linux-System/bit" rel="noopener" target="_blank">GitHub</a></span>
+  </div></footer>
+  <script type="module" src="js/home.js"></script>
+</body>
+</html>
