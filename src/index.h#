@@ -1,0 +1,226 @@
+mod util
+mod json
+mod ui
+
+pub struct LibEntry is
+    pub ie_name:     string
+    pub ie_target:   string
+    pub ie_desc:     string
+    pub ie_tags:     [string]
+    pub ie_author:   string
+    pub ie_lang:     string
+    pub ie_rev:      string
+    pub ie_checksum: string
+end
+
+pub fn e_name(e: LibEntry)     -> string   is return e.ie_name end
+pub fn e_target(e: LibEntry)   -> string   is return e.ie_target end
+pub fn e_desc(e: LibEntry)     -> string   is return e.ie_desc end
+pub fn e_tags(e: LibEntry)     -> [string] is return e.ie_tags end
+pub fn e_author(e: LibEntry)   -> string   is return e.ie_author end
+pub fn e_lang(e: LibEntry)     -> string   is return e.ie_lang end
+pub fn e_rev(e: LibEntry)      -> string   is return e.ie_rev end
+pub fn e_checksum(e: LibEntry) -> string   is return e.ie_checksum end
+
+pub struct Index is
+    pub ix_items: [LibEntry]
+    pub ix_count: int
+end
+
+pub fn ix_len(ix: Index)          -> int      is return ix.ix_count end
+pub fn ix_at(ix: Index, i: int)   -> LibEntry is return ix.ix_items[i] end
+
+pub fn default_index_url() -> string is
+    return "https://raw.githubusercontent.com/HackerOS-Linux-System/bit/main/index/repository.json"
+end
+
+pub fn index_url() -> string is
+    let o: string = env_get("BIT_INDEX_URL")
+    if o != "" is return o end
+    return default_index_url()
+end
+
+fn cache_file() -> string is return util::cache_dir() + "/repository.json" end
+fn extra_cache_file(n: int) -> string is
+    return util::cache_dir() + "/repository-extra-" + to_string(n) + ".json"
+end
+
+;; Downloads `url` into `dest` (retrying). Returns true on success.
+fn download(url: string, dest: string) -> bool is
+    util::mkdir_p(util::dirname(dest))
+    let tmp: string = dest + ".part"
+    let cmd: string = "curl -fsSL --max-time 20 " + util::sq(url) + " -o " + util::sq(tmp)
+    if util::run_retry(cmd, 3) != 0 is
+        util::run("rm -f " + util::sq(tmp))
+        return false
+    end
+    ;; refuse an empty / HTML error page masquerading as an index
+    let body: string = file_read(tmp)
+    if string_len(body) < 2 || !string_contains(body, "libraries") is
+        util::run("rm -f " + util::sq(tmp))
+        return false
+    end
+    util::run("mv -f " + util::sq(tmp) + " " + util::sq(dest))
+    return true
+end
+
+;; Fetches the main index (and extra ones). Returns 0 on success.
+pub fn index_fetch() -> int is
+    let local: string = env_get("BIT_INDEX_FILE")
+    if local != "" is
+        if !file_exists(local) is
+            ui::fail("BIT_INDEX_FILE does not exist: " + local)
+            return 1
+        end
+        util::mkdir_p(util::cache_dir())
+        util::run("cp -f " + util::sq(local) + " " + util::sq(cache_file()))
+        return 0
+    end
+
+    if !download(index_url(), cache_file()) is
+        ui::fail("could not download the library index from " + index_url())
+        if file_exists(cache_file()) is ui::note("using the previously cached index") end
+        return 1
+    end
+
+    let extras: [string] = util::csv_split(env_get("BIT_EXTRA_INDEXES"))
+    let mut i: int = 0
+    while i < array_len(extras) is
+        if !download(extras[i], extra_cache_file(i)) is
+            ui::warn("extra index unreachable: " + extras[i])
+        end
+        i += 1
+    end
+    return 0
+end
+
+;; Fetch when missing or older than 6 hours.
+pub fn index_ensure() -> int is
+    if env_get("BIT_INDEX_FILE") != "" is return index_fetch() end
+    if !file_exists(cache_file()) is return index_fetch() end
+    let stale: string = util::capture("find " + util::sq(cache_file()) + " -mmin +360 2>/dev/null")
+    if stale != "" is
+        let rc: int = index_fetch()
+        if rc != 0 && file_exists(cache_file()) is return 0 end
+        return rc
+    end
+    return 0
+end
+
+fn guess_lang(tags: [string], explicit: string) -> string is
+    if explicit != "" is return normalize_lang(explicit) end
+    let mut i: int = 0
+    while i < array_len(tags) is
+        let t: string = string_lower(tags[i])
+        if t == "h#" || t == "hsharp" || t == "h-sharp" is return "hsharp" end
+        if t == "hacker-lang" || t == "hackerlang" || t == "hl" is return "hackerlang" end
+        if t == "hackerscript" || t == "hcs" is return "hackerscript" end
+        i += 1
+    end
+    return ""
+end
+
+;; Accepts every spelling users type: "h#", "H#", "hsharp", "hl", "hacker lang", "hs"…
+pub fn normalize_lang(raw: string) -> string is
+    let t: string = string_replace(string_replace(string_lower(string_trim(raw)), " ", ""), "-", "")
+    if t == "h#" || t == "hsharp" || t == "hsh" is return "hsharp" end
+    if t == "hl" || t == "hackerlang" is return "hackerlang" end
+    if t == "hs" || t == "hcs" || t == "hackerscript" is return "hackerscript" end
+    return ""
+end
+
+fn parse_entries(text: string) -> [LibEntry] is
+    let top: json::JsonObj = json::parse_object(text)
+    let raw: string = json::obj_get(top, "libraries")
+    let mut src: string = raw
+    if src == "" is src = text end          ;; a bare `[ … ]` index
+    let items: [string] = json::split_array_items(src)
+    let mut out: [LibEntry] = []
+    let mut i: int = 0
+    while i < array_len(items) is
+        let o: json::JsonObj = json::parse_object(items[i])
+        let name: string = json::obj_get(o, "name")
+        let tags: [string] = json::json_string_array(json::obj_get(o, "tags"))
+        if name != "" is
+            out = array_push(out, LibEntry {
+                ie_name:     name,
+                ie_target:   json::obj_get_any(o, "target", "url", "git"),
+                ie_desc:     json::obj_get(o, "description"),
+                ie_tags:     tags,
+                ie_author:   json::obj_get(o, "author"),
+                ie_lang:     guess_lang(tags, json::obj_get(o, "lang")),
+                ie_rev:      json::obj_get(o, "rev"),
+                ie_checksum: json::obj_get(o, "checksum")
+            })
+        end
+        i += 1
+    end
+    return out
+end
+
+pub fn index_load() -> Index is
+    index_ensure()
+    let mut all: [LibEntry] = []
+    if file_exists(cache_file()) is
+        all = parse_entries(file_read(cache_file()))
+    end
+    ;; extra indexes: first hit of a name wins, so the main index always has priority
+    let extras: [string] = util::csv_split(env_get("BIT_EXTRA_INDEXES"))
+    let mut x: int = 0
+    while x < array_len(extras) is
+        if file_exists(extra_cache_file(x)) is
+            let more: [LibEntry] = parse_entries(file_read(extra_cache_file(x)))
+            let mut m: int = 0
+            while m < array_len(more) is
+                let mut dup: bool = false
+                let mut k: int = 0
+                while k < array_len(all) is
+                    if all[k].ie_name == more[m].ie_name is dup = true end
+                    k += 1
+                end
+                if !dup is all = array_push(all, more[m]) end
+                m += 1
+            end
+        end
+        x += 1
+    end
+    return Index { ix_items: all, ix_count: array_len(all) }
+end
+
+pub fn index_find(ix: Index, name: string) -> LibEntry is
+    let want: string = string_lower(name)
+    let mut i: int = 0
+    while i < ix.ix_count is
+        if string_lower(ix.ix_items[i].ie_name) == want is return ix.ix_items[i] end
+        i += 1
+    end
+    return LibEntry { ie_name: "", ie_target: "", ie_desc: "", ie_tags: [], ie_author: "",
+                      ie_lang: "", ie_rev: "", ie_checksum: "" }
+end
+
+fn entry_matches(e: LibEntry, q: string) -> bool is
+    if q == "" || q == "all" is return true end
+    let needle: string = string_lower(q)
+    if string_contains(string_lower(e.ie_name), needle) is return true end
+    if string_contains(string_lower(e.ie_desc), needle) is return true end
+    if string_contains(string_lower(e.ie_author), needle) is return true end
+    let mut i: int = 0
+    while i < array_len(e.ie_tags) is
+        if string_contains(string_lower(e.ie_tags[i]), needle) is return true end
+        i += 1
+    end
+    return false
+end
+
+;; Matching entries; `lang` ("" = any) narrows to one language.
+pub fn index_search(ix: Index, q: string, lang: string) -> [LibEntry] is
+    let mut out: [LibEntry] = []
+    let mut i: int = 0
+    while i < ix.ix_count is
+        let e: LibEntry = ix.ix_items[i]
+        let lang_ok: bool = lang == "" || e.ie_lang == lang || e.ie_lang == ""
+        if lang_ok && entry_matches(e, q) is out = array_push(out, e) end
+        i += 1
+    end
+    return out
+end
