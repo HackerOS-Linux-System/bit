@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Docs — bit.io</title>
+  <meta name="description" content="How bit works: Bit.hk, commands, static linking, publishing libraries." />
+  <meta name="theme-color" content="#ec4899" />
+  <link rel="icon" href="images/icon.png" type="image/png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <script>try{var t=localStorage.getItem("bitio:theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t);else if(matchMedia("(prefers-color-scheme: dark)").matches)document.documentElement.setAttribute("data-theme","dark")}catch(e){}</script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="nav">
+    <div class="wrap">
+      <a class="brand" href="index.html"><img src="images/icon.png" alt="" width="30" height="30" />bit.io</a>
+      <nav class="nav-links" aria-label="Main">
+        <a href="index.html">Libraries</a>
+        <a href="about.html" aria-current="page">Docs</a>
+        <a href="https://github.com/HackerOS-Linux-System/bit" rel="noopener" target="_blank">GitHub ↗</a>
+      </nav>
+      <span class="grow"></span>
+      <button class="icon-btn" data-theme-toggle aria-label="Toggle dark mode" title="Toggle dark mode">◐</button>
+    </div>
+  </header>
+  <main id="main" class="wrap page">
+    <h1>bit <span class="grad">docs</span></h1>
+    <p class="lead">bit is the package manager for H#, Hacker Lang and HackerScript. It is written 100% in H# and statically linked.</p>
+
+    <h2>Quick start</h2>
+    <div class="snippet"><pre>bit init myapp --lang h#     # or hl, hs
+cd myapp
+bit                           # does everything Bit.hk describes</pre></div>
+    <p>A bare <code>bit</code> reads <code>Bit.hk</code>, installs the missing dependencies, builds with <code>[default-build]</code> and, if you asked for it, runs the result.</p>
+
+    <h2>Bit.hk</h2>
+    <div class="snippet"><pre>[package]
+-> name        =&gt; myapp
+-> version     =&gt; 0.1.0
+-> lang        =&gt; h#            ;; h# | hl | hs   (several: h#, hs)
+
+[build]
+-> link   =&gt; static             ;; the only mode
+-> target =&gt; h#                 ;; language toolchain (or a platform like linux-aarch64)
+
+[lib]
+-> output =&gt; hlib               ;; hlib | so | a | obj
+
+[default-build]                 ;; what a bare `bit` does
+-> profile =&gt; release
+-> run     =&gt; true
+
+[dependencies]
+-> mold =&gt; *
+-> tui  =&gt; rev v1.0
+-> mine =&gt; path ../mine
+
+[commands]                      ;; your own `bit deploy`
+-> deploy =&gt; scp cache/build/release/myapp server:/opt/
+--&gt; description =&gt; Copy the release build to the server</pre></div>
+    <table>
+      <tr><th>Section</th><th>Purpose</th></tr>
+      <tr><td><code>[package]</code></td><td>name, version, description, authors, license, <code>lang</code></td></tr>
+      <tr><td><code>[layout]</code></td><td>where the code is. Auto-detected: <code>src/</code> = H#, <code>cmd/</code> + <code>lib/</code> = HackerScript. Hacker Lang needs <code>hl-entry</code>.</td></tr>
+      <tr><td><code>[build]</code></td><td><code>target</code> (h# / hl / hs), <code>platform</code>, <code>link</code> (static), <code>mem-mode</code>, <code>flags</code></td></tr>
+      <tr><td><code>[lib]</code></td><td>library output: hlib (default), so, a, obj</td></tr>
+      <tr><td><code>[default-build]</code></td><td><code>profile</code>, <code>target</code>, <code>platform</code>, <code>emit</code>, <code>run</code>, <code>args</code>, <code>before</code>, <code>after</code></td></tr>
+      <tr><td><code>[dependencies]</code></td><td><code>*</code>, <code>rev X</code>, <code>git URL [rev]</code>, <code>path DIR</code></td></tr>
+      <tr><td><code>[commands]</code></td><td>custom commands, run as <code>bit &lt;name&gt;</code> (extra args are appended or fill <code>{args}</code>)</td></tr>
+      <tr><td><code>[hooks]</code></td><td><code>pre-build</code>, <code>post-build</code></td></tr>
+      <tr><td><code>[workspace]</code></td><td><code>members</code> — the workspace root's <code>cache/</code> is shared</td></tr>
+    </table>
+
+    <h2>Where things live</h2>
+    <table>
+      <tr><td><code>~/.hackeros/libs/&lt;name&gt;/&lt;commit&gt;/</code></td><td>installed libraries (<code>current</code> → active commit)</td></tr>
+      <tr><td><code>~/.hackeros/bit/bit.lock</code></td><td>what is installed, with checksums</td></tr>
+      <tr><td><code>&lt;project&gt;/cache/</code></td><td>build outputs and links (no <code>build/</code> directory — same idea as virus)</td></tr>
+      <tr><td><code>&lt;project&gt;/Bit.lock</code></td><td>the commits + checksums your project resolved to — commit it</td></tr>
+    </table>
+
+    <h2>Statically linked, checksummed</h2>
+    <p>Every library is built and linked statically; <code>link =&gt; dynamic</code> and <code>extern dynamic</code> are rejected. On install, bit hashes the library's files (<code>sha256</code> over the sorted per-file hashes, independent of install location) and stores the result in <code>bit.lock</code>. <code>bit verify</code> re-checks it, and a <code>Bit.lock</code> pin that no longer matches fails the build instead of being trusted.</p>
+
+    <h2>Commands</h2>
+    <div class="snippet"><pre>bit init [name] [--lang h#|hl|hs] [--lib]
+bit build [--release] [--target h#|hl|hs] [--platform linux-aarch64] [--emit bin|hlib|so|a|obj]
+bit run [-- args]        bit check        bit clean [--all]
+bit install [name|git-url] [--output hlib|so|a|obj] [--no-build]
+bit add &lt;name&gt; [rev]     bit remove &lt;name&gt;    bit upgrade [name]
+bit search [text|all] [--lang hl]     bit info &lt;name&gt;     bit list
+bit update       bit verify       bit doctor      bit langs
+bit publish      bit commands     bit x &lt;custom&gt;</pre></div>
+
+    <h2>Publishing a library</h2>
+    <p>There is no upload step. Run <code>bit publish</code> in your library — it validates <code>Bit.hk</code> and prints an index entry. Add it to <a href="https://github.com/HackerOS-Linux-System/bit/blob/main/index/repository.json" rel="noopener" target="_blank"><code>index/repository.json</code></a> and open a pull request; CI checks it before it lands.</p>
+    <div class="snippet"><pre>{
+  "name": "mylib",
+  "target": "https://github.com/you/mylib",
+  "description": "What it does.",
+  "tags": ["tui"],
+  "lang": "hsharp",
+  "author": "You"
+}</pre></div>
+  </main>
+  <footer class="site"><div class="wrap">
+    <span>bit — the package manager for H#, Hacker Lang and HackerScript.</span>
+    <span><a href="about.html">Docs</a> · <a href="https://github.com/HackerOS-Linux-System/bit" rel="noopener" target="_blank">GitHub</a></span>
+  </div></footer>
+  <script type="module" src="js/about.js"></script>
+</body>
+</html>
