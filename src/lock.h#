@@ -1,0 +1,126 @@
+mod util
+mod json
+
+pub struct Locked is
+    pub lk_name:     string
+    pub lk_version:  string
+    pub lk_commit:   string
+    pub lk_url:      string
+    pub lk_checksum: string
+    pub lk_lang:     string
+    pub lk_output:   string
+    pub lk_at:       string
+end
+
+pub struct Lock is
+    pub lock_items: [Locked]
+    pub lock_count: int
+end
+
+pub fn locked_name(p: Locked)     -> string is return p.lk_name end
+pub fn locked_version(p: Locked)  -> string is return p.lk_version end
+pub fn locked_commit(p: Locked)   -> string is return p.lk_commit end
+pub fn locked_url(p: Locked)      -> string is return p.lk_url end
+pub fn locked_checksum(p: Locked) -> string is return p.lk_checksum end
+pub fn locked_lang(p: Locked)     -> string is return p.lk_lang end
+pub fn locked_output(p: Locked)   -> string is return p.lk_output end
+pub fn locked_at(p: Locked)       -> string is return p.lk_at end
+
+pub fn lock_len(l: Lock)              -> int    is return l.lock_count end
+pub fn lock_at(l: Lock, i: int)       -> Locked is return l.lock_items[i] end
+
+pub fn empty_lock() -> Lock is
+    return Lock { lock_items: [], lock_count: 0 }
+end
+
+pub fn global_lock_path() -> string is
+    return util::bit_dir() + "/bit.lock"
+end
+
+pub fn lock_read(path: string) -> Lock is
+    if !file_exists(path) is return empty_lock() end
+    let top: json::JsonObj = json::parse_object(file_read(path))
+    let mut items: [Locked] = []
+    let mut i: int = 0
+    let n: int = json::obj_count(top)
+    while i < n is
+        let pair: json::JsonPair = json::obj_pair_at(top, i)
+        let body: json::JsonObj = json::parse_object(json::pair_val(pair))
+        items = array_push(items, Locked {
+            lk_name:     json::pair_key(pair),
+            lk_version:  json::obj_get(body, "version"),
+            lk_commit:   json::obj_get(body, "commit"),
+            lk_url:      json::obj_get(body, "url"),
+            lk_checksum: json::obj_get(body, "checksum"),
+            lk_lang:     json::obj_get(body, "lang"),
+            lk_output:   json::obj_get(body, "output"),
+            lk_at:       json::obj_get(body, "installed_at")
+        })
+        i += 1
+    end
+    return Lock { lock_items: items, lock_count: array_len(items) }
+end
+
+pub fn lock_write(path: string, l: Lock) is
+    util::mkdir_p(util::dirname(path))
+    let mut out: string = "{\n"
+    let mut i: int = 0
+    while i < l.lock_count is
+        let p: Locked = l.lock_items[i]
+        let comma: string = if i < l.lock_count - 1 then "," else ""
+        out = out + "  \"" + util::json_esc(p.lk_name) + "\": {\n" +
+              "    \"version\": \""      + util::json_esc(p.lk_version)  + "\",\n" +
+              "    \"commit\": \""       + util::json_esc(p.lk_commit)   + "\",\n" +
+              "    \"url\": \""          + util::json_esc(p.lk_url)      + "\",\n" +
+              "    \"checksum\": \""     + util::json_esc(p.lk_checksum) + "\",\n" +
+              "    \"lang\": \""         + util::json_esc(p.lk_lang)     + "\",\n" +
+              "    \"output\": \""       + util::json_esc(p.lk_output)   + "\",\n" +
+              "    \"installed_at\": \"" + util::json_esc(p.lk_at)       + "\"\n" +
+              "  }" + comma + "\n"
+        i += 1
+    end
+    out = out + "}\n"
+    file_write(path, out)
+end
+
+pub fn lock_get(l: Lock, name: string) -> Locked is
+    let mut i: int = 0
+    while i < l.lock_count is
+        if l.lock_items[i].lk_name == name is return l.lock_items[i] end
+        i += 1
+    end
+    return Locked { lk_name: "", lk_version: "", lk_commit: "", lk_url: "", lk_checksum: "",
+                    lk_lang: "", lk_output: "", lk_at: "" }
+end
+
+pub fn lock_has(l: Lock, name: string) -> bool is
+    return locked_name(lock_get(l, name)) != ""
+end
+
+;; Insert or replace (by name), keeping the original position when replacing.
+pub fn lock_set(l: Lock, entry: Locked) -> Lock is
+    let mut items: [Locked] = []
+    let mut found: bool = false
+    let mut i: int = 0
+    while i < l.lock_count is
+        if l.lock_items[i].lk_name == entry.lk_name is
+            items = array_push(items, entry)
+            found = true
+        else is
+            items = array_push(items, l.lock_items[i])
+        end
+        i += 1
+    end
+    if !found is items = array_push(items, entry) end
+    return Lock { lock_items: items, lock_count: array_len(items) }
+end
+
+pub fn lock_del(l: Lock, name: string) -> Lock is
+    let mut items: [Locked] = []
+    let mut i: int = 0
+    while i < l.lock_count is
+        if l.lock_items[i].lk_name != name is items = array_push(items, l.lock_items[i]) end
+        i += 1
+    end
+    return Lock { lock_items: items, lock_count: array_len(items) }
+end
