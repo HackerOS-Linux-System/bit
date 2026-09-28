@@ -1,1 +1,27 @@
+[package]
+-> name        => bit
+-> version     => 0.0.1
+-> description => Package manager for H#, Hacker Lang and HackerScript
+-> authors     => ["HackerOS Team <hackeros068@gmail.com>"]
+-> license     => Apache-2.0
+-> lang        => h#
 
+[layout]
+-> src => src
+
+[build]
+-> link => static
+
+[default-build]         ! a bare `bit` in this repo builds a release binary
+-> profile => release
+
+[commands]
+-> check => bit check
+--> description => Type-check every module
+-> site => cd website && npm ci && npm run build
+--> description => Build the bit.io website (TypeScript) into website/dist
+-> install-local => install -Dm755 cache/build/release/bit /usr/local/bin/bit
+--> description => Install the release binary to /usr/local/bin
+
+[hooks]
+-> pre-build => echo "building bit (static)"
