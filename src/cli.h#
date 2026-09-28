@@ -1,0 +1,590 @@
+mod util
+mod ui
+mod hk
+mod index
+mod checksum
+mod lock
+mod project
+mod build
+mod installer
+mod workflow
+mod commands
+mod scaffold
+
+pub fn version() -> string is return "1.0.0" end
+
+pub fn print_version() is
+    write("bit " + version() + " — package manager for H#, Hacker Lang and HackerScript")
+end
+
+pub fn print_help() is
+    write("")
+    write("  " + ui::bold("bit") + " " + version() + "  " + ui::dim("package manager for every HackerOS language (H#, Hacker Lang, HackerScript)"))
+    write("")
+    write("  " + ui::bold("USAGE"))
+    write("    bit                          do everything Bit.hk says: dependencies → [default-build] → run")
+    write("    bit <command> [options]")
+    write("")
+    write("  " + ui::bold("PROJECT"))
+    write("    init [name] [--lang h#|hl|hs] [--lib]   new project (or initialise the current directory)")
+    write("    build [--release] [--target h#|hl|hs] [--platform P] [--emit bin|hlib|so|a|obj]")
+    write("                                 without flags: uses [default-build] from Bit.hk")
+    write("    run [-- args]                build and run          check   syntax + type check")
+    write("    clean [--all]                remove cache/ (--all: also old installed versions)")
+    write("    cache                        show / create the project cache/ directories")
+    write("    x <name> [args]              run a custom command from [commands] (also: bit <name>)")
+    write("    commands                     list custom commands")
+    write("    publish                      validate Bit.hk and print the index entry to submit")
+    write("")
+    write("  " + ui::bold("LIBRARIES") + "  " + ui::dim("installed to ~/.hackeros/libs/, checksummed, linked statically"))
+    write("    install [name|git-url ...]   install libraries (no name: the project's [dependencies])")
+    write("      [--output hlib|so|a|obj] [--target h#|hl|hs] [--no-build] [--release] [--force]")
+    write("    add <name> [rev]             install + add to [dependencies] in Bit.hk")
+    write("    remove <name> [--global]     remove from the project (or uninstall)")
+    write("    upgrade [name]               re-fetch the newest version, refresh Bit.lock")
+    write("    list                         installed libraries")
+    write("    search [text|all] [--lang h#|hl|hs]")
+    write("    info <name>                  index entry + install state")
+    write("    update                       refresh the library index")
+    write("    verify [name]                re-check installed checksums against bit.lock")
+    write("    doctor                       toolchains, tools, index, checksums")
+    write("    langs                        which language toolchains are installed")
+    write("")
+    write("  " + ui::bold("OPTIONS"))
+    write("    -r, --release   -v, --verbose   -f, --force   --no-lock   --sign <key>   -V, --version   -h, --help")
+    write("")
+    write("  " + ui::dim("Index: " + index::index_url()))
+    write("")
+end
+
+;; ── init ─────────────────────────────────────────────────────────────────────
+
+;; bare `bit`: everything Bit.hk describes.
+pub fn cmd_auto(verbose: bool) -> int is
+    return workflow::auto(verbose)
+end
+
+pub fn cmd_init(name: string, lang: string, is_lib: bool) -> int is
+    return scaffold::init_project(name, lang, is_lib)
+end
+
+fn need_project() -> project::Project is
+    return project::load_here()
+end
+
+fn no_project_error() -> int is
+    ui::fail("no Bit.hk found in " + project::cwd() + " or any parent directory")
+    ui::note("create one:  bit init <name>")
+    return 1
+end
+
+;; ── build / run / check / clean / cache ──────────────────────────────────────
+
+fn flags_given(release: bool, target: string, platform: string, emit: string) -> bool is
+    return release || target != "" || platform != "" || emit != ""
+end
+
+fn effective_opts(p: project::Project, release: bool, debug: bool, verbose: bool, target: string,
+                  platform: string, emit: string, sign: string) -> build::BuildOpts is
+    let mut o: build::BuildOpts = build::opts_default(p)
+    if flags_given(release, target, platform, emit) || debug is
+        o = build::opts_new(release, verbose, target, platform, emit)
+    else is
+        o = build::opts_new(build::opts_release(o), verbose, project::get(p, "default-build", "target", ""),
+                            project::get(p, "default-build", "platform", ""),
+                            project::get(p, "default-build", "emit", ""))
+    end
+    if sign != "" is o = build::opts_with_sign(o, sign) end
+    return o
+end
+
+pub fn cmd_build(release: bool, debug: bool, verbose: bool, target: string, platform: string, emit: string,
+                 sign: string, use_lock: bool) -> int is
+    let p: project::Project = need_project()
+    if !project::is_loaded(p) is return no_project_error() end
+    let o: build::BuildOpts = effective_opts(p, release, debug, verbose, target, platform, emit, sign)
+    if workflow::ensure_deps(p, verbose, build::opts_release(o), use_lock, false) != 0 is
+        ui::fail("some dependencies could not be installed")
+        return 1
+    end
+    return build::build_project(p, o)
+end
+
+pub fn cmd_run(release: bool, debug: bool, verbose: bool, target: string, platform: string, args: string,
+               use_lock: bool) -> int is
+    let p: project::Project = need_project()
+    if !project::is_loaded(p) is return no_project_error() end
+    let o: build::BuildOpts = effective_opts(p, release, debug, verbose, target, platform, "", "")
+    if workflow::ensure_deps(p, verbose, build::opts_release(o), use_lock, false) != 0 is
+        ui::fail("some dependencies could not be installed")
+        return 1
+    end
+    return build::run_project(p, o, args, false)
+end
+
+pub fn cmd_check(verbose: bool) -> int is
+    let p: project::Project = need_project()
+    if !project::is_loaded(p) is return no_project_error() end
+    ui::blank()
+    let rc: int = build::check_project(p, verbose)
+    ui::blank()
+    return rc
+end
+
+pub fn cmd_clean(everything: bool) -> int is
+    let p: project::Project = need_project()
+    if !project::is_loaded(p) is return no_project_error() end
+    if build::clean_project(p) is
+        ui::ok("removed " + project::cache_root(p))
+    else is
+        ui::fail("could not remove " + project::cache_root(p))
+        return 1
+    end
+    if everything is
+        let n: int = installer::clean_old()
+        ui::ok("removed " + to_string(n) + " old library version(s)")
+    end
+    return 0
+end
+
+pub fn cmd_cache() -> int is
+    let p: project::Project = need_project()
+    if !project::is_loaded(p) is return no_project_error() end
+    project::cache_ensure(p)
+    ui::heading("cache/  " + ui::dim(project::cache_root(p)))
+    ui::line(string_pad_right("libs/", 10) + ui::dim("links to the libraries this project uses"))
+    ui::line(string_pad_right("source/", 10) + ui::dim("fetched sources"))
+    ui::line(string_pad_right("env/", 10) + ui::dim("toolchain helpers"))
+    ui::line(string_pad_right("build/", 10) + ui::dim("outputs: build/<debug|release>/"))
+    ui::blank()
+    ui::line(ui::dim("libraries live in " + util::libs_dir()))
+    ui::blank()
+    return 0
+end
+
+;; ── Custom commands ──────────────────────────────────────────────────────────
+
+pub fn cmd_x(name: string, args: string) -> int is
+    let p: project::Project = need_project()
+    if !project::is_loaded(p) is return no_project_error() end
+    return commands::run_command(p, name, args)
+end
+
+pub fn cmd_commands() -> int is
+    return commands::list_commands(need_project())
+end
+
+;; Used by main for `bit <unknown>`: runs it when Bit.hk defines it.
+pub fn try_custom(name: string, args: string) -> int is
+    let p: project::Project = need_project()
+    if commands::has_command(p, name) is return commands::run_command(p, name, args) end
+    return -1
+end
+
+;; ── Bit.hk editing ───────────────────────────────────────────────────────────
+
+fn write_lines(path: string, lines: [string]) is
+    file_write(path, util::join(lines, "\n"))
+end
+
+fn manifest_add_dep(p: project::Project, name: string, value: string) -> bool is
+    let path: string = project::manifest_of(p)
+    if path == "" is return false end
+    let lines: [string] = string_split(file_read(path), "\n")
+    let mut out: [string] = []
+    let mut done: bool = false
+    let mut i: int = 0
+    while i < array_len(lines) is
+        out = array_push(out, lines[i])
+        let t: string = string_trim(lines[i])
+        if !done && string_starts_with(t, "[") && hk::norm_section(string_slice(t, 1, string_len(t) - 1)) == "dependencies" is
+            out = array_push(out, "-> " + name + " => " + value)
+            done = true
+        end
+        i += 1
+    end
+    if !done is
+        out = array_push(out, "")
+        out = array_push(out, "[dependencies]")
+        out = array_push(out, "-> " + name + " => " + value)
+        out = array_push(out, "")
+    end
+    write_lines(path, out)
+    return true
+end
+
+fn manifest_remove_dep(p: project::Project, name: string) -> bool is
+    let path: string = project::manifest_of(p)
+    if path == "" is return false end
+    let lines: [string] = string_split(file_read(path), "\n")
+    let mut out: [string] = []
+    let mut in_deps: bool = false
+    let mut skipping: bool = false
+    let mut removed: bool = false
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let t: string = string_trim(lines[i])
+        let mut keep: bool = true
+        if string_starts_with(t, "[") && string_ends_with(t, "]") is
+            in_deps = hk::norm_section(string_slice(t, 1, string_len(t) - 1)) == "dependencies"
+            skipping = false
+        else if in_deps && string_starts_with(t, "-->") && skipping is
+            keep = false
+        else if in_deps && string_starts_with(t, "->") is
+            let body: string = string_trim(string_slice(t, 2, string_len(t)))
+            let arrow: int = string_find(body, "=>")
+            let key: string = if arrow >= 0 then string_trim(string_slice(body, 0, arrow)) else body
+            if key == name is
+                keep = false
+                skipping = true
+                removed = true
+            else is
+                skipping = false
+            end
+        end
+        if keep is out = array_push(out, lines[i]) end
+        i += 1
+    end
+    if removed is write_lines(path, out) end
+    return removed
+end
+
+;; ── install / add / remove / upgrade ─────────────────────────────────────────
+
+pub fn cmd_install(names: [string], output: string, target: string, platform: string, no_build: bool,
+                   release: bool, force: bool, verbose: bool, use_lock: bool) -> int is
+    if array_len(names) == 0 is
+        let p: project::Project = need_project()
+        if !project::is_loaded(p) is
+            ui::fail("name a library to install:  bit install <name>")
+            return 1
+        end
+        let rc: int = workflow::ensure_deps(p, verbose, release, use_lock, force)
+        if rc != 0 is return 1 end
+        ui::ok("dependencies installed")
+        return 0
+    end
+    ui::blank()
+    let mut failed: int = 0
+    let mut i: int = 0
+    while i < array_len(names) is
+        let o: installer::InstallOpts = installer::iopts(force, !no_build, output, target, platform, release, verbose)
+        if installer::install_lib(names[i], "", o) != 0 is failed += 1 end
+        i += 1
+    end
+    ui::blank()
+    if failed > 0 is return 1 end
+    return 0
+end
+
+pub fn cmd_add(name: string, rev: string, output: string, target: string, no_build: bool, release: bool,
+               verbose: bool) -> int is
+    if name == "" is
+        ui::fail("usage: bit add <name|git-url> [rev]")
+        return 1
+    end
+    let p: project::Project = need_project()
+    if !project::is_loaded(p) is return no_project_error() end
+
+    let is_git: bool = util::is_url(name)
+    let dep_key: string = if is_git then installer::repo_name_from_url(name) else name
+    if hk::hk_has(project::hk_of(p), "dependencies", dep_key) is
+        ui::note(dep_key + " is already in [dependencies]")
+    else is
+        let value: string = if is_git then "git " + name + (if rev != "" then " " + rev else "")
+                            else if rev != "" then "rev " + rev else "*"
+        manifest_add_dep(p, dep_key, value)
+    end
+
+    let o: installer::InstallOpts = installer::iopts(false, !no_build, output, target, "", release, verbose)
+    ui::blank()
+    let rc: int = installer::install_lib(name, rev, o)
+    ui::blank()
+    if rc != 0 is return 1 end
+    let fresh: project::Project = project::load(project::root_of(p))
+    return workflow::ensure_deps(fresh, verbose, release, false, false)
+end
+
+pub fn cmd_remove(name: string, global: bool) -> int is
+    if name == "" is
+        ui::fail("usage: bit remove <name> [--global]")
+        return 1
+    end
+    let p: project::Project = need_project()
+    let mut touched: bool = false
+    if project::is_loaded(p) && hk::hk_has(project::hk_of(p), "dependencies", name) is
+        if manifest_remove_dep(p, name) is
+            util::run("rm -f " + util::sq(project::cache_libs(p) + "/" + name))
+            let pl: string = project::root_of(p) + "/Bit.lock"
+            lock::lock_write(pl, lock::lock_del(lock::lock_read(pl), name))
+            ui::ok(name + " removed from [dependencies]")
+            touched = true
+        end
+    end
+    if global || !touched is
+        return installer::remove_lib(name)
+    end
+    return 0
+end
+
+pub fn cmd_upgrade(name: string, verbose: bool, release: bool) -> int is
+    let p: project::Project = need_project()
+    if name == "" && project::is_loaded(p) && array_len(project::deps(p)) > 0 is
+        ui::blank()
+        let rc: int = workflow::ensure_deps(p, verbose, release, false, true)
+        return if rc != 0 then 1 else 0
+    end
+
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    let ix: index::Index = index::index_load()
+    let mut failed: int = 0
+    let mut i: int = 0
+    ui::blank()
+    while i < lock::lock_len(gl) is
+        let e: lock::Locked = lock::lock_at(gl, i)
+        let n: string = lock::locked_name(e)
+        if name == "" || name == n is
+            let in_index: bool = index::e_name(index::index_find(ix, n)) != ""
+            let spec: string = if in_index then n else lock::locked_url(e)
+            let o: installer::InstallOpts = installer::iopts(true, true, "", "", "", release, verbose)
+            if installer::install_lib(spec, "", o) != 0 is failed += 1 end
+        end
+        i += 1
+    end
+    ui::blank()
+    if failed > 0 is return 1 end
+    return 0
+end
+
+;; ── list / search / info / update ────────────────────────────────────────────
+
+pub fn cmd_list() -> int is
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    ui::heading("Installed libraries  " + ui::dim(util::libs_dir()))
+    if lock::lock_len(gl) == 0 is
+        ui::note("nothing installed yet — try:  bit install <name>     (bit search all)")
+        ui::blank()
+        return 0
+    end
+    let mut i: int = 0
+    while i < lock::lock_len(gl) is
+        let e: lock::Locked = lock::lock_at(gl, i)
+        let n: string = lock::locked_name(e)
+        let there: bool = dir_exists(installer::lib_dir(n, util::short_hash(lock::locked_commit(e))))
+        let mark: string = if there then ui::green("✓") else ui::red("✗")
+        ui::line(mark + " " + string_pad_right(n, 20) + ui::dim("@ " + string_pad_right(lock::locked_version(e), 9)) +
+                 " " + ui::lang_tag(lock::locked_lang(e)) + "  " + ui::dim(lock::locked_output(e) + "  " + lock::locked_at(e)))
+        i += 1
+    end
+    ui::blank()
+    return 0
+end
+
+pub fn cmd_search(q: string, lang: string) -> int is
+    let want: string = if lang == "" then "" else index::normalize_lang(lang)
+    if lang != "" && want == "" is
+        ui::fail("unknown language '" + lang + "' (h#, hl, hs)")
+        return 1
+    end
+    let ix: index::Index = index::index_load()
+    if index::ix_len(ix) == 0 is
+        ui::fail("the library index is empty or unreachable — try:  bit update")
+        return 1
+    end
+    let found: [index::LibEntry] = index::index_search(ix, q, want)
+    ui::heading((if q == "" || q == "all" then "All libraries" else "Results for '" + q + "'") + "  " + ui::dim(to_string(array_len(found)) + " of " + to_string(index::ix_len(ix))))
+    if array_len(found) == 0 is
+        ui::note("no matches — list everything with:  bit search all")
+        ui::blank()
+        return 0
+    end
+    let mut i: int = 0
+    while i < array_len(found) is
+        let e: index::LibEntry = found[i]
+        let tag: string = if index::e_lang(e) == "" then ui::dim("any") else ui::lang_tag(index::e_lang(e))
+        let mark: string = if installer::is_installed(index::e_name(e)) then ui::green("✓") else " "
+        ui::line(mark + " " + ui::bold(string_pad_right(index::e_name(e), 16)) + " " + tag + "  " + ui::dim(index::e_desc(e)))
+        i += 1
+    end
+    ui::blank()
+    return 0
+end
+
+pub fn cmd_info(name: string) -> int is
+    if name == "" is
+        ui::fail("usage: bit info <name>")
+        return 1
+    end
+    let ix: index::Index = index::index_load()
+    let e: index::LibEntry = index::index_find(ix, name)
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    let l: lock::Locked = lock::lock_get(gl, name)
+    if index::e_name(e) == "" && lock::locked_name(l) == "" is
+        ui::fail("'" + name + "' is neither in the index nor installed")
+        return 1
+    end
+    ui::heading(ui::bold(name))
+    if index::e_name(e) != "" is
+        ui::line(string_pad_right("description", 14) + index::e_desc(e))
+        ui::line(string_pad_right("language", 14) + (if index::e_lang(e) == "" then "any / detected on install" else project::lang_label(index::e_lang(e))))
+        ui::line(string_pad_right("repository", 14) + index::e_target(e))
+        ui::line(string_pad_right("author", 14) + index::e_author(e))
+        ui::line(string_pad_right("tags", 14) + util::join(index::e_tags(e), ", "))
+        if index::e_rev(e) != "" is ui::line(string_pad_right("rev", 14) + index::e_rev(e)) end
+        if index::e_checksum(e) != "" is ui::line(string_pad_right("pinned sum", 14) + index::e_checksum(e)) end
+    end
+    ui::blank()
+    if lock::locked_name(l) != "" is
+        ui::line(ui::green("installed") + "  " + ui::dim(util::libs_dir() + "/" + name + "/" + lock::locked_version(l)))
+        ui::line(string_pad_right("commit", 14) + lock::locked_commit(l))
+        ui::line(string_pad_right("checksum", 14) + lock::locked_checksum(l))
+        ui::line(string_pad_right("output", 14) + lock::locked_output(l) + "   (statically linked)")
+        ui::line(string_pad_right("installed at", 14) + lock::locked_at(l))
+    else is
+        ui::line(ui::dim("not installed —  bit install " + name))
+    end
+    ui::blank()
+    return 0
+end
+
+pub fn cmd_update() -> int is
+    ui::line(ui::dim("fetching " + index::index_url()))
+    let rc: int = index::index_fetch()
+    if rc == 0 is
+        let ix: index::Index = index::index_load()
+        ui::ok("index updated — " + to_string(index::ix_len(ix)) + " libraries")
+    end
+    return rc
+end
+
+;; ── verify / doctor / langs ──────────────────────────────────────────────────
+
+pub fn cmd_verify(name: string) -> int is
+    ui::heading("Verifying installed libraries")
+    let problems: int = installer::verify_all(name)
+    ui::blank()
+    if problems == 0 is
+        ui::ok("all checksums match bit.lock")
+        return 0
+    end
+    ui::fail(to_string(problems) + " problem(s) — reinstall with:  bit upgrade <name>")
+    return 1
+end
+
+fn tool_line(label: string, present: bool, hint: string) is
+    if present is
+        ui::ok(string_pad_right(label, 14) + ui::dim("found"))
+    else is
+        ui::bad(string_pad_right(label, 14) + ui::red("missing") + "  " + ui::dim(hint))
+    end
+end
+
+pub fn cmd_langs() -> int is
+    ui::heading("Language toolchains")
+    let langs: [string] = ["hsharp", "hackerlang", "hackerscript"]
+    let mut i: int = 0
+    while i < array_len(langs) is
+        let l: string = langs[i]
+        let path: string = build::tool_for(l)
+        if path != "" is
+            ui::ok(string_pad_right(project::lang_label(l), 14) + ui::dim(path))
+        else is
+            ui::bad(string_pad_right(project::lang_label(l), 14) + ui::red("missing") + "  " + ui::dim(build::missing_tool_hint(l)))
+        end
+        i += 1
+    end
+    ui::blank()
+    return 0
+end
+
+pub fn cmd_doctor() -> int is
+    ui::heading("bit doctor")
+    let mut bad: int = 0
+    if !util::tool_exists("git") is
+        bad += 1
+    end
+    tool_line("git", util::tool_exists("git"), "needed to fetch libraries")
+    if !util::tool_exists("curl") is bad += 1 end
+    tool_line("curl", util::tool_exists("curl"), "needed to fetch the index")
+    let sha_ok: bool = util::tool_exists("sha256sum") || util::tool_exists("shasum")
+    if !sha_ok is bad += 1 end
+    tool_line("sha256sum", sha_ok, "needed for checksums")
+
+    ui::blank()
+    let mut i: int = 0
+    let langs: [string] = ["hsharp", "hackerlang", "hackerscript"]
+    while i < array_len(langs) is
+        let has: bool = build::have_toolchain(langs[i])
+        tool_line(project::lang_label(langs[i]), has, build::missing_tool_hint(langs[i]))
+        i += 1
+    end
+
+    ui::blank()
+    ui::line(ui::dim("index     " + index::index_url()))
+    ui::line(ui::dim("libraries " + util::libs_dir()))
+    ui::line(ui::dim("state     " + util::bit_dir()))
+    ui::blank()
+    let problems: int = installer::verify_all("")
+    ui::blank()
+    if bad + problems == 0 is
+        ui::ok("everything looks good")
+        return 0
+    end
+    ui::fail("found problems above")
+    return 1
+end
+
+;; ── publish ──────────────────────────────────────────────────────────────────
+;; There is no upload step: a library is "published" by adding an entry to
+;; index/repository.json in the bit repository (pull request).
+
+pub fn cmd_publish() -> int is
+    let p: project::Project = need_project()
+    if !project::is_loaded(p) is return no_project_error() end
+    let h: hk::Hk = project::hk_of(p)
+    let name: string = project::name_of(p)
+    let mut problems: [string] = []
+    if !util::valid_name(name) is problems = array_push(problems, "package name '" + name + "' is not valid") end
+    if hk::hk_pkg(h, "description", "") == "" is problems = array_push(problems, "[package] description is empty") end
+    if hk::hk_pkg(h, "license", "") == "" is problems = array_push(problems, "[package] license is empty") end
+    let langs: [string] = project::langs(p)
+    if array_len(langs) == 0 is problems = array_push(problems, "no language detected (set [package] lang)") end
+    let mut has_lib: bool = false
+    let mut li: int = 0
+    while li < array_len(langs) is
+        if project::entry_for(p, langs[li], "lib") != "" is has_lib = true end
+        li += 1
+    end
+    if !has_lib is problems = array_push(problems, "no library entry point (src/lib.h#, lib/mod.hcs or [layout] lib-entry)") end
+    if project::link_mode(p) != "static" is problems = array_push(problems, "[build] link must be static") end
+    let bad: string = build::static_offenders(p)
+    if bad != "" is problems = array_push(problems, "uses `extern dynamic`") end
+    let origin: string = util::capture("git -C " + util::sq(project::root_of(p)) + " remote get-url origin 2>/dev/null")
+
+    ui::blank()
+    if array_len(problems) > 0 is
+        let mut i: int = 0
+        while i < array_len(problems) is
+            ui::bad(problems[i])
+            i += 1
+        end
+        ui::blank()
+        return 1
+    end
+
+    ui::ok(name + " is ready to be listed")
+    ui::blank()
+    ui::line("Add this to " + ui::bold("index/repository.json") + " (\"libraries\") in " +
+             "https://github.com/HackerOS-Linux-System/bit  and open a pull request:")
+    ui::blank()
+    write("    {")
+    write("      \"name\": \"" + util::json_esc(name) + "\",")
+    write("      \"target\": \"" + util::json_esc(util::or_default(origin, "https://github.com/<you>/" + name)) + "\",")
+    write("      \"description\": \"" + util::json_esc(hk::hk_pkg(h, "description", "")) + "\",")
+    write("      \"tags\": [],")
+    write("      \"lang\": \"" + langs[0] + "\",")
+    write("      \"author\": \"" + util::json_esc(util::or_default(hk::hk_pkg(h, "author", ""), hk::hk_pkg(h, "authors", "you"))) + "\"")
+    write("    }")
+    ui::blank()
+    return 0
+end
