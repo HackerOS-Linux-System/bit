@@ -12,16 +12,20 @@
 [build]
 -> link => static
 
-[default-build]         ! a bare `bit` in this repo builds a release binary
+! a bare `bit` in this repo builds a release binary
+[default-build]
 -> profile => release
 
 [commands]
--> check => bit check
+-> check
+--> run => bit check
 --> description => Type-check every module
--> site => cd website && npm ci && npm run build
+-> site
+--> run => cd website && npm ci && npm run build
 --> description => Build the bit.io website (TypeScript) into website/dist
--> install-local => install -Dm755 cache/build/release/bit /usr/local/bin/bit
---> description => Install the release binary to /usr/local/bin
+-> install-local
+--> run => install -Dm755 cache/build/release/bit /usr/bin/bit
+--> description => Install the release binary to /usr/bin
 
 [hooks]
 -> pre-build => echo "building bit (static)"
