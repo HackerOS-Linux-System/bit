@@ -1,1 +1,190 @@
+name: Test bit
 
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Bit.hk"
+      - "scripts/**"
+      - "index/**"
+      - ".github/workflows/test.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "Bit.hk"
+      - "scripts/**"
+      - "index/**"
+      - ".github/workflows/test.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scripts:
+    name: CI scripts (Lua + shell)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install lua and jq
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lua5.4 jq
+      - name: Syntax
+        run: |
+          set -e
+          for f in scripts/*.lua; do luac5.4 -p "$f" && echo "ok  $f"; done
+          for f in scripts/*.sh; do bash -n "$f" && echo "ok  $f"; done
+      - name: Index pin policy on this checkout
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: lua5.4 scripts/validate-index.lua --offline
+
+      - name: The Lua helpers read the real index
+        run: |
+          set -e
+          lua5.4 - <<'LUA'
+          package.path = "scripts/?.lua;" .. package.path
+          local C = require("common")
+          local idx = C.read_index({ file = "index/repository.json" })
+          assert(#idx > 0, "index is empty")
+          for _, e in ipairs(idx) do
+            assert(e.name ~= "" and e.target:match("^https://"), "bad entry: " .. e.name)
+          end
+          print(#idx .. " index entries parsed")
+          assert(C.sq("a'b") == "'a'\\''b'")
+          LUA
+
+  check:
+    name: Type-check and smoke-test bit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install H# and bit's libraries
+        run: bash scripts/bootstrap-ci.sh
+
+      - name: Type-check every module (h# check)
+        run: |
+          set -e
+          'h#' check src/main.h#
+          for f in src/*.h#; do 'h#' check "$f"; done
+
+      - name: Build bit
+        run: |
+          mkdir -p cache/build/release
+          'h#' compile src/main.h# -o cache/build/release/bit --release
+
+      - name: bit works end to end
+        run: |
+          set -euo pipefail
+          BIT="$PWD/cache/build/release/bit"
+          export BIT_HOME="$RUNNER_TEMP/libs" BIT_DIR="$RUNNER_TEMP/state" NO_COLOR=1
+          "$BIT" --version
+          "$BIT" doctor
+          "$BIT" langs
+
+          # a fresh project: init → check → build → run a custom command
+          mkdir "$RUNNER_TEMP/demo" && cd "$RUNNER_TEMP/demo"
+          "$BIT" init demo --lang h#
+          test -f Bit.hk
+          "$BIT" check
+          "$BIT" build
+          test -n "$(find cache/build -maxdepth 2 -type f | head -1)"
+
+          # a command declared in Bit.hk (hk-parser grammar: key = map with `run`)
+          printf '\n[commands]\n-> hello\n--> run => echo hello-from-bit\n--> description => Say hello\n' >> Bit.hk
+          "$BIT" x hello | grep -q hello-from-bit
+          "$BIT" commands | grep -q hello
+
+      - name: Old Bit.hk / old lock are migrated (bit migrate)
+        run: |
+          set -euo pipefail
+          BIT="$PWD/cache/build/release/bit"
+          export BIT_HOME="$RUNNER_TEMP/libs3" BIT_DIR="$RUNNER_TEMP/state3" NO_COLOR=1
+          mkdir "$RUNNER_TEMP/old" && cd "$RUNNER_TEMP/old"
+          mkdir src && printf 'fn main() is\nend\n' > 'src/main.h#'
+          cat > Bit.hk <<'HK'
+          ;; a manifest in the old dialect
+          [package]
+          -> name = old-demo
+          -> version => 0.1.0   ;; trailing comment
+          [commands]
+          -> hi => echo hi-from-old
+          --> description => Say hi
+          HK
+          # the old syntax still works (compatibility mode) ...
+          "$BIT" x hi | grep -q hi-from-old
+          # ... --check reports it (exit 1), migrate fixes it, second --check is clean
+          if "$BIT" migrate --check; then echo "::error::--check should have failed"; exit 1; fi
+          "$BIT" migrate
+          test -f Bit.hk.bak
+          "$BIT" migrate --check
+          grep -q -- '--> value => echo hi-from-old' Bit.hk
+          "$BIT" x hi | grep -q hi-from-old
+
+          # an old-format lock file is converted on first read
+          printf '{\n  "mold": {\n    "version": "abc123abc123",\n    "commit": "abc123abc123abc123",\n    "url": "https://github.com/bit-io/mold",\n    "checksum": "sha256:00",\n    "lang": "hsharp",\n    "output": "hlib",\n    "installed_at": "2026-01-01T00:00:00Z"\n  }\n}\n' > Bit.lock
+          "$BIT" migrate
+          head -c 9 Bit.lock | grep -q '{"name":'
+          grep -q '"mold"' Bit.lock && test -f Bit.lock.old
+
+      - name: Version ranges, Bit.lock, outdated, --locked, --offline
+        run: |
+          set -euo pipefail
+          BIT="$PWD/cache/build/release/bit"
+          export BIT_HOME="$RUNNER_TEMP/libs4" BIT_DIR="$RUNNER_TEMP/state4" NO_COLOR=1
+          git config --global user.email ci@example.com && git config --global user.name ci
+          # a library with three released versions
+          LIB="$RUNNER_TEMP/mylib"; mkdir -p "$LIB/src" && cd "$LIB" && git init -q
+          printf '[package]\n-> name => mylib\n-> version => 1.0.0\n-> lang => h#\n' > Bit.hk
+          for v in 1.0.0 1.2.0 2.0.0; do
+            printf 'pub fn version() -> string is\n    return "%s"\nend\n' "$v" > 'src/lib.h#'
+            git add -A && git commit -qm "v$v" && git tag "v$v"
+          done
+          # an app that wants ^1.0
+          APP="$RUNNER_TEMP/app"; mkdir -p "$APP/src" && cd "$APP"
+          printf 'fn main() is\nend\n' > 'src/main.h#'
+          printf '[package]\n-> name => app\n-> version => 0.1.0\n\n[dependencies]\n-> mylib\n--> git => file://%s\n--> version => ^1.0\n' "$LIB" > Bit.hk
+          "$BIT" install
+          grep -q '"tag":"v1.2.0"' Bit.lock          # newest in ^1.0, not v2.0.0
+          grep -q '"range":"^1.0"' Bit.lock
+          "$BIT" outdated | grep -q mylib
+          # --locked reproduces exactly what Bit.lock says, --offline needs no network
+          "$BIT" install --locked
+          "$BIT" install --offline
+          # a new release inside the range is picked up by upgrade, not by install
+          cd "$LIB" && printf 'pub fn version() -> string is\n    return "1.3.0"\nend\n' > 'src/lib.h#' && git add -A && git commit -qm v1.3.0 && git tag v1.3.0
+          cd "$APP" && "$BIT" install && grep -q '"tag":"v1.2.0"' Bit.lock
+          "$BIT" upgrade --dry-run | grep -q mylib
+          "$BIT" upgrade && grep -q '"tag":"v1.3.0"' Bit.lock
+          # --locked without a lock entry must fail
+          rm Bit.lock
+          if "$BIT" install --locked; then echo "::error::--locked must fail without Bit.lock"; exit 1; fi
+
+      - name: Native part of a library ([build] native)
+        run: |
+          set -euo pipefail
+          BIT="$PWD/cache/build/release/bit"
+          export BIT_HOME="$RUNNER_TEMP/libs5" BIT_DIR="$RUNNER_TEMP/state5" NO_COLOR=1
+          mkdir "$RUNNER_TEMP/nat" && cd "$RUNNER_TEMP/nat" && mkdir src
+          printf 'fn main() is\nend\n' > 'src/main.h#'
+          printf '[package]\n-> name => nat\n-> version => 0.1.0\n\n[build]\n-> native => mkdir -p out && touch out/libnat.a && echo native-ran > out/log\n-> native-lib-path => out\n' > Bit.hk
+          "$BIT" build
+          grep -q native-ran out/log
+          test -f .bit/native.ok
+
+      - name: Index lookups use the repository in this checkout
+        run: |
+          set -euo pipefail
+          BIT="$PWD/cache/build/release/bit"
+          export BIT_HOME="$RUNNER_TEMP/libs2" BIT_DIR="$RUNNER_TEMP/state2" NO_COLOR=1
+          export BIT_INDEX_FILE="$PWD/index/repository.json"
+          "$BIT" search regex | grep -qi regex
+          "$BIT" info json-parser | grep -qi json
