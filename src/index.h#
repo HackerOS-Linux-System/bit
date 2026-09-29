@@ -1,6 +1,7 @@
 mod util
-mod json
 mod ui
+mod net
+use "std -> json" from "json"
 
 pub struct LibEntry is
     pub ie_name:     string
@@ -49,8 +50,10 @@ end
 fn download(url: string, dest: string) -> bool is
     util::mkdir_p(util::dirname(dest))
     let tmp: string = dest + ".part"
-    let cmd: string = "curl -fsSL --max-time 20 " + util::sq(url) + " -o " + util::sq(tmp)
-    if util::run_retry(cmd, 3) != 0 is
+    let limit: int = if net::timeout_s() > 0 then net::timeout_s() else 0
+    let cmd: string = "curl -fsSL --connect-timeout 15" + (if limit > 0 then " --max-time " + to_string(limit) else "") +
+                      " " + util::sq(url) + " -o " + util::sq(tmp)
+    if net::run_retry(cmd) != 0 is
         util::run("rm -f " + util::sq(tmp))
         return false
     end
@@ -66,6 +69,14 @@ end
 
 ;; Fetches the main index (and extra ones). Returns 0 on success.
 pub fn index_fetch() -> int is
+    if net::offline() && env_get("BIT_INDEX_FILE") == "" is
+        if file_exists(cache_file()) is
+            ui::note("offline: using the cached library index")
+            return 0
+        end
+        ui::fail("offline and no cached library index — run `bit update` once while online")
+        return 1
+    end
     let local: string = env_get("BIT_INDEX_FILE")
     if local != "" is
         if !file_exists(local) is
@@ -97,6 +108,7 @@ end
 ;; Fetch when missing or older than 6 hours.
 pub fn index_ensure() -> int is
     if env_get("BIT_INDEX_FILE") != "" is return index_fetch() end
+    if net::offline() is return index_fetch() end
     if !file_exists(cache_file()) is return index_fetch() end
     let stale: string = util::capture("find " + util::sq(cache_file()) + " -mmin +360 2>/dev/null")
     if stale != "" is
@@ -129,28 +141,96 @@ pub fn normalize_lang(raw: string) -> string is
     return ""
 end
 
+;; std `json` on the compiled (AOT) backend reads *flat* objects only (no nested
+;; values, no arrays). repository.json is `{ "libraries": [ {flat}, {flat}, … ] }`,
+;; so all that is done by hand is cutting the text into one chunk per library
+;; object; every field is then read with std `json::get_str`.
+fn chop_objects(text: string) -> [string] is
+    let n: int = string_len(text)
+    let mut start: int = string_find(text, "\"libraries\"")
+    if start < 0 is start = 0 end
+    let mut out: [string] = []
+    let mut depth: int = 0
+    let mut in_str: bool = false
+    let mut from: int = -1
+    let mut seen_array: bool = false
+    let mut i: int = start
+    while i < n is
+        let c: string = string_at(text, i)
+        if in_str is
+            if c == "\\" is
+                i += 1
+            else if c == "\"" is
+                in_str = false
+            end
+        else if c == "\"" is
+            in_str = true
+        else if c == "[" is
+            if !seen_array is seen_array = true end
+        else if c == "{" is
+            if depth == 0 is from = i end
+            depth += 1
+        else if c == "}" is
+            depth -= 1
+            if depth == 0 && from >= 0 is
+                out = array_push(out, string_slice(text, from, i + 1))
+                from = -1
+            end
+        end
+        i += 1
+    end
+    return out
+end
+
+;; `"tags": ["a", "b"]` — arrays are outside what std json can read, so the
+;; bracket contents are cut out and split on commas.
+fn tags_of(obj: string) -> [string] is
+    let k: int = string_find(obj, "\"tags\"")
+    if k < 0 is return [] end
+    let rest: string = string_slice(obj, k, string_len(obj))
+    let open: int = string_find(rest, "[")
+    let close: int = string_find(rest, "]")
+    if open < 0 || close < open is return [] end
+    let parts: [string] = util::csv_split(string_slice(rest, open + 1, close))
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(parts) is
+        let mut t: string = string_trim(parts[i])
+        if string_len(t) >= 2 && string_starts_with(t, "\"") && string_ends_with(t, "\"") is
+            t = string_slice(t, 1, string_len(t) - 1)
+        end
+        if t != "" is out = array_push(out, t) end
+        i += 1
+    end
+    return out
+end
+
+fn first_of(obj: string, k1: string, k2: string, k3: string) -> string is
+    let a: string = json::get_str(obj, k1)
+    if a != "" is return a end
+    let b: string = json::get_str(obj, k2)
+    if b != "" is return b end
+    return json::get_str(obj, k3)
+end
+
 fn parse_entries(text: string) -> [LibEntry] is
-    let top: json::JsonObj = json::parse_object(text)
-    let raw: string = json::obj_get(top, "libraries")
-    let mut src: string = raw
-    if src == "" is src = text end          ;; a bare `[ … ]` index
-    let items: [string] = json::split_array_items(src)
+    let items: [string] = chop_objects(text)
     let mut out: [LibEntry] = []
     let mut i: int = 0
     while i < array_len(items) is
-        let o: json::JsonObj = json::parse_object(items[i])
-        let name: string = json::obj_get(o, "name")
-        let tags: [string] = json::json_string_array(json::obj_get(o, "tags"))
+        let o: string = items[i]
+        let name: string = json::get_str(o, "name")
+        let tags: [string] = tags_of(o)
         if name != "" is
             out = array_push(out, LibEntry {
                 ie_name:     name,
-                ie_target:   json::obj_get_any(o, "target", "url", "git"),
-                ie_desc:     json::obj_get(o, "description"),
+                ie_target:   first_of(o, "target", "url", "git"),
+                ie_desc:     json::get_str(o, "description"),
                 ie_tags:     tags,
-                ie_author:   json::obj_get(o, "author"),
-                ie_lang:     guess_lang(tags, json::obj_get(o, "lang")),
-                ie_rev:      json::obj_get(o, "rev"),
-                ie_checksum: json::obj_get(o, "checksum")
+                ie_author:   json::get_str(o, "author"),
+                ie_lang:     guess_lang(tags, json::get_str(o, "lang")),
+                ie_rev:      json::get_str(o, "rev"),
+                ie_checksum: json::get_str(o, "checksum")
             })
         end
         i += 1
