@@ -1,42 +1,12 @@
+use "bit -> hk-parser" from "hkp"
 mod util
 
-pub struct HkEntry is
-    pub he_section: string
-    pub he_key:     string
-    pub he_value:   string
-end
-
 pub struct Hk is
-    pub hk_entries: [HkEntry]
-    pub hk_count:   int
+    pub hk_cfg: hkp::HkConfig
 end
 
 pub fn hk_empty() -> Hk is
-    return Hk { hk_entries: [], hk_count: 0 }
-end
-
-;; Cuts a trailing `;;` comment, respecting double-quoted strings.
-fn strip_comment(v: string) -> string is
-    let n: int = string_len(v)
-    let mut in_str: bool = false
-    let mut i: int = 0
-    while i < n - 1 is
-        let c: string = string_at(v, i)
-        if c == "\"" is in_str = !in_str end
-        if !in_str && c == ";" && string_at(v, i + 1) == ";" is
-            return string_trim(string_slice(v, 0, i))
-        end
-        i += 1
-    end
-    return v
-end
-
-fn unquote(v: string) -> string is
-    let t: string = string_trim(v)
-    if string_len(t) >= 2 && string_starts_with(t, "\"") && string_ends_with(t, "\"") is
-        return string_slice(t, 1, string_len(t) - 1)
-    end
-    return t
+    return Hk { hk_cfg: hkp::parse("") }
 end
 
 ;; `[Default build]`, `[default_build]` and `[default-build]` are the same section.
@@ -45,112 +15,91 @@ pub fn norm_section(raw: string) -> string is
     return string_replace(string_replace(t, " ", "-"), "_", "-")
 end
 
+fn warned_old_syntax() -> bool is return env_get("BIT_WARNED_OLD_HK") != "" end
+
+;; Parses manifest text. Manifests written in bit's old dialect (`;;` comments,
+;; `key = value`, a value plus `-->` sub-keys, trailing comments) are rewritten in
+;; memory to hk-parser's grammar first — with a warning pointing at `bit migrate`,
+;; which rewrites the file for good. A real syntax error is reported once and
+;; yields an empty document, so callers fall back to their defaults.
 pub fn hk_parse(text: string) -> Hk is
-    let lines: [string] = string_split(string_replace(text, "\r", ""), "\n")
-    let mut entries:  [HkEntry] = []
-    let mut section:  string = ""
-    let mut last_key: string = ""
-    let mut i: int = 0
-
-    ;; NOTE: no `continue` here on purpose — H# codegen has had trouble with
-    ;; `continue` skipping later `let`s (see bytes' config.h# history), so the
-    ;; loop body is a plain if / else-if chain.
-    while i < array_len(lines) is
-        let line: string = string_trim(lines[i])
-        i += 1
-
-        let is_skip: bool = line == "" || string_starts_with(line, ";;") ||
-                            string_starts_with(line, "!") || string_starts_with(line, "#")
-        let is_section: bool = string_starts_with(line, "[") && string_ends_with(line, "]")
-
-        if is_skip is
-            section = section
-        else if is_section is
-            section = norm_section(string_slice(line, 1, string_len(line) - 1))
-            last_key = ""
-        else is
-            let mut body: string = line
-            let mut sub:  bool   = false
-            if string_starts_with(body, "-->") is
-                body = string_trim(string_slice(body, 3, string_len(body)))
-                sub = true
-            else if string_starts_with(body, "->") is
-                body = string_trim(string_slice(body, 2, string_len(body)))
-            end
-
-            let arrow: int = string_find(body, "=>")
-            let eq:    int = string_find(body, "=")
-            let mut key: string = ""
-            let mut val: string = ""
-
-            if arrow >= 0 is
-                key = string_trim(string_slice(body, 0, arrow))
-                val = string_slice(body, arrow + 2, string_len(body))
-            else if eq >= 0 is
-                key = string_trim(string_slice(body, 0, eq))
-                val = string_slice(body, eq + 1, string_len(body))
-            else is
-                key = string_trim(body)
-            end
-
-            key = unquote(key)
-            if key != "" is
-                if sub && last_key != "" is
-                    key = last_key + "." + key
-                else if !sub is
-                    last_key = key
-                end
-                entries = array_push(entries, HkEntry {
-                    he_section: section, he_key: key,
-                    he_value: unquote(strip_comment(string_trim(val)))
-                })
-            end
+    let fixed: string = migrate_text(text)
+    if fixed != text is
+        if !warned_old_syntax() is
+            write("  warning: Bit.hk uses the old syntax — read in compatibility mode. Run `bit migrate` to rewrite it.")
+            env_set("BIT_WARNED_OLD_HK", "1")
         end
     end
+    let cfg: hkp::HkConfig = hkp::parse(fixed)
+    if !cfg.is_valid() is
+        write("bit: cannot parse manifest: " + hkp::last_error())
+        return hk_empty()
+    end
+    return Hk { hk_cfg: cfg }
+end
 
-    return Hk { hk_entries: entries, hk_count: array_len(entries) }
+;; `section.key` (key may itself be dotted: `name.rev`).
+fn path_of(section: string, key: string) -> string is
+    if key == "" is return section end
+    return section + "." + key
+end
+
+;; Section names in the file are matched after normalisation, so `[default_build]`
+;; still answers to "default-build".
+fn real_section(h: Hk, section: string) -> string is
+    let names: [string] = h.hk_cfg.keys("")
+    let mut i: int = 0
+    while i < array_len(names) is
+        if names[i] == section is return names[i] end
+        i += 1
+    end
+    i = 0
+    while i < array_len(names) is
+        if norm_section(names[i]) == section is return names[i] end
+        i += 1
+    end
+    return section
+end
+
+;; Arrays come back in the `[a, b, "c"]` text form that hk_list understands.
+fn array_text(h: Hk, path: string) -> string is
+    let n: int = h.hk_cfg.array_len(path)
+    let mut out: string = "["
+    let mut i: int = 0
+    while i < n is
+        if i > 0 is out = out + ", " end
+        out = out + "\"" + h.hk_cfg.array_get(path, i) + "\""
+        i += 1
+    end
+    return out + "]"
 end
 
 pub fn hk_get(h: Hk, section: string, key: string, fallback: string) -> string is
-    let mut i: int = 0
-    while i < h.hk_count is
-        if h.hk_entries[i].he_section == section && h.hk_entries[i].he_key == key is
-            return h.hk_entries[i].he_value
-        end
-        i += 1
+    let path: string = path_of(real_section(h, section), key)
+    if !h.hk_cfg.has(path) is return fallback end
+    let t: string = h.hk_cfg.type_of(path)
+    if t == "array" is return array_text(h, path) end
+    if t == "map" is
+        ;; a key that is both a value and has options is stored as a map with `value`
+        if h.hk_cfg.has(path + ".value") is return h.hk_cfg.get(path + ".value") end
+        return fallback
     end
-    return fallback
+    let v: string = h.hk_cfg.get(path)
+    if v == "" is return fallback end
+    return v
 end
 
 pub fn hk_has(h: Hk, section: string, key: string) -> bool is
-    let mut i: int = 0
-    while i < h.hk_count is
-        if h.hk_entries[i].he_section == section && h.hk_entries[i].he_key == key is return true end
-        i += 1
-    end
-    return false
+    return h.hk_cfg.has(path_of(real_section(h, section), key))
 end
 
 pub fn hk_has_section(h: Hk, section: string) -> bool is
-    let mut i: int = 0
-    while i < h.hk_count is
-        if h.hk_entries[i].he_section == section is return true end
-        i += 1
-    end
-    return false
+    return h.hk_cfg.has(real_section(h, section))
 end
 
-;; Keys (in file order) of a section.
+;; Keys (in file order) of a section — direct children only.
 pub fn hk_keys(h: Hk, section: string) -> [string] is
-    let mut out: [string] = []
-    let mut i: int = 0
-    while i < h.hk_count is
-        if h.hk_entries[i].he_section == section is
-            out = array_push(out, h.hk_entries[i].he_key)
-        end
-        i += 1
-    end
-    return out
+    return h.hk_cfg.keys(real_section(h, section))
 end
 
 ;; `[a, b, "c"]` -> ["a", "b", "c"]   (a bare `a, b` list works too)
@@ -163,16 +112,141 @@ pub fn hk_list(value: string) -> [string] is
     let mut out: [string] = []
     let mut i: int = 0
     while i < array_len(parts) is
-        let v: string = unquote(parts[i])
+        let p: string = string_trim(parts[i])
+        let mut v: string = p
+        if string_len(p) >= 2 && string_starts_with(p, "\"") && string_ends_with(p, "\"") is
+            v = string_slice(p, 1, string_len(p) - 1)
+        end
         if v != "" is out = array_push(out, v) end
         i += 1
     end
     return out
 end
 
-;; `[package]` first, then `[project]` (bit.hk / Hacker Lang spelling).
+;; `[package]` first, then `[project]` (Hacker Lang spelling).
 pub fn hk_pkg(h: Hk, key: string, fallback: string) -> string is
     let a: string = hk_get(h, "package", key, "")
     if a != "" is return a end
     return hk_get(h, "project", key, fallback)
+end
+
+
+;; ── Migration from bit's old Bit.hk dialect ──────────────────────────────────
+
+;; Cuts a trailing `;;` comment (outside double quotes). Returns [value, comment].
+fn split_trailing(v: string) -> [string] is
+    let n: int = string_len(v)
+    let mut in_str: bool = false
+    let mut i: int = 0
+    while i < n - 1 is
+        let c: string = string_at(v, i)
+        if c == "\"" is in_str = !in_str end
+        if !in_str && c == ";" && string_at(v, i + 1) == ";" is
+            return [string_trim(string_slice(v, 0, i)), string_trim(string_slice(v, i + 2, n))]
+        end
+        i += 1
+    end
+    return [v, ""]
+end
+
+fn unquote(v: string) -> string is
+    let t: string = string_trim(v)
+    if string_len(t) >= 2 && string_starts_with(t, "\"") && string_ends_with(t, "\"") is
+        return string_slice(t, 1, string_len(t) - 1)
+    end
+    return t
+end
+
+fn is_skip_line(t: string) -> bool is
+    return t == "" || string_starts_with(t, ";;") || string_starts_with(t, "!") || string_starts_with(t, "#")
+end
+
+;; Does the next entry line (skipping blanks/comments) start with `-->`?
+fn next_is_sub(lines: [string], from: int) -> bool is
+    let mut j: int = from
+    while j < array_len(lines) is
+        let t: string = string_trim(lines[j])
+        if !is_skip_line(t) is
+            return string_starts_with(t, "-->") && !string_starts_with(t, "--->")
+        end
+        j += 1
+    end
+    return false
+end
+
+;; Rewrites old-dialect text into hk-parser's grammar. Lines that are already
+;; fine are copied verbatim, so text that needs no change comes back unchanged
+;; (`migrate_text(t) == t`), which is how `bit migrate --check` decides.
+pub fn migrate_text(text: string) -> string is
+    let lines: [string] = string_split(string_replace(text, "\r", ""), "\n")
+    let mut out: [string] = []
+    let mut changed: bool = false
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let raw: string = lines[i]
+        let t: string = string_trim(raw)
+        i += 1
+        if string_starts_with(t, ";;") is
+            out = array_push(out, "! " + string_trim(string_slice(t, 2, string_len(t))))
+            changed = true
+        else if string_starts_with(t, "#") is
+            out = array_push(out, "! " + string_trim(string_slice(t, 1, string_len(t))))
+            changed = true
+        else if t == "" || string_starts_with(t, "!") || (string_starts_with(t, "[") && string_ends_with(t, "]")) is
+            out = array_push(out, raw)
+        else if string_starts_with(t, "--->") is
+            out = array_push(out, raw)          ;; deeper nesting is hk-parser native
+        else is
+            let sub: bool = string_starts_with(t, "-->")
+            let mut body: string = t
+            if sub is body = string_trim(string_slice(t, 3, string_len(t)))
+            else if string_starts_with(t, "->") is body = string_trim(string_slice(t, 2, string_len(t)))
+            end
+            let had_arrow_prefix: bool = string_starts_with(t, "->")
+            let arrow: int = string_find(body, "=>")
+            let eq: int = string_find(body, "=")
+            let mut key: string = ""
+            let mut val: string = ""
+            let mut dirty: bool = !(sub || had_arrow_prefix)
+            if arrow >= 0 is
+                key = string_trim(string_slice(body, 0, arrow))
+                val = string_slice(body, arrow + 2, string_len(body))
+            else if eq >= 0 is
+                key = string_trim(string_slice(body, 0, eq))
+                val = string_slice(body, eq + 1, string_len(body))
+                dirty = true
+            else is
+                key = string_trim(body)
+            end
+            let parts: [string] = split_trailing(string_trim(val))
+            let comment: string = parts[1]
+            if comment != "" is dirty = true end
+            let value: string = string_trim(parts[0])
+            let has_children: bool = !sub && value != "" && next_is_sub(lines, i)
+            if has_children is dirty = true end
+
+            if !dirty is
+                out = array_push(out, raw)
+            else is
+                changed = true
+                if comment != "" is out = array_push(out, "! " + comment) end
+                let k: string = unquote(key)
+                if sub is
+                    out = array_push(out, if value == "" then "--> " + k else "--> " + k + " => " + unquote(value))
+                else if has_children is
+                    out = array_push(out, "-> " + k)
+                    out = array_push(out, "--> value => " + unquote(value))
+                else is
+                    out = array_push(out, if value == "" then "-> " + k else "-> " + k + " => " + unquote(value))
+                end
+            end
+        end
+    end
+    if !changed is return text end
+    return util::join(out, "\n")
+end
+
+;; Would this text parse (after migration)?
+pub fn hk_valid(text: string) -> bool is
+    return hkp::parse(migrate_text(text)).is_valid()
 end
