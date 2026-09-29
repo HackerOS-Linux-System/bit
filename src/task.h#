@@ -1,0 +1,64 @@
+use "bit -> progress-bar" from "pb"
+mod util
+mod ui
+
+pub fn is_tty() -> bool is
+    if env_get("NO_COLOR") != "" || env_get("BIT_PLAIN") != "" || env_get("CI") != "" is return false end
+    return util::run("test -t 1") == 0
+end
+
+fn scratch(kind: string) -> string is
+    util::mkdir_p(util::tmp_dir())
+    return util::tmp_dir() + "/" + kind + "-" + to_string(proc_id()) + "-" + to_string(time_ms())
+end
+
+;; Last `n` lines of a log, for an error message.
+fn tail_of(path: string, n: int) -> string is
+    return util::capture("tail -n " + to_string(n) + " " + util::sq(path) + " 2>/dev/null")
+end
+
+;; Percentage git prints while cloning ("Receiving objects:  45% (…)") — 0 if none yet.
+fn git_percent(log: string) -> int is
+    let txt: string = util::capture("tr '\\r' '\\n' < " + util::sq(log) +
+                                    " 2>/dev/null | grep -o '[0-9]*%' | tail -n 1 | tr -d '%'")
+    if txt == "" is return 0 end
+    return str_to_int(txt)
+end
+
+;; Runs `cmd` (a shell line) while a spinner turns. `show_git` adds git's clone
+;; percentage to the message. Returns 0 on success; on failure the tail of the
+;; command's output is printed. Nothing is drawn without a TTY.
+pub fn run(label: string, cmd: string, verbose: bool, show_git: bool) -> int is
+    if verbose || !is_tty() is
+        if !verbose is ui::note(label + " …") end
+        return util::run(cmd)
+    end
+
+    let log: string = scratch("task") + ".log"
+    let rcf: string = scratch("task") + ".rc"
+    ;; run detached; the exit status lands in rcf when the command is done
+    util::run("( " + cmd + " ) >" + util::sq(log) + " 2>&1 ; echo $? >" + util::sq(rcf) + " &")
+
+    let mut sp = pb::quick_spinner(label)
+    let t0: int = time_ms()
+    while !file_exists(rcf) is
+        if show_git is
+            let pct: int = git_percent(log)
+            if pct > 0 is sp = sp.set_message(label + "  " + to_string(pct) + "%") end
+        end
+        sp = sp.tick()
+        sp.draw()
+        sleep_ms(90)
+    end
+    let rc: int = str_to_int(util::capture("cat " + util::sq(rcf)))
+    let took: string = util::elapsed_str(time_ms() - t0)
+    if rc == 0 is
+        sp.finish(label + "  " + took)
+    else is
+        sp.fail(label + "  failed (" + took + ")")
+        let tail: string = tail_of(log, 30)
+        if tail != "" is write(tail) end
+    end
+    util::run("rm -f " + util::sq(log) + " " + util::sq(rcf))
+    return rc
+end
