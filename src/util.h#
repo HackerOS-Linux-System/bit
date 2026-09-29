@@ -45,3 +45,167 @@ pub fn first_tool(names: [string]) -> string is
     end
     return ""
 end
+
+;; ── Strings ──────────────────────────────────────────────────────────────────
+
+pub fn or_default(v: string, fallback: string) -> string is
+    if v != "" is return v end
+    return fallback
+end
+
+pub fn join(items: [string], sep: string) -> string is
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < array_len(items) is
+        if i > 0 is out = out + sep end
+        out = out + items[i]
+        i += 1
+    end
+    return out
+end
+
+pub fn array_has(items: [string], needle: string) -> bool is
+    let mut i: int = 0
+    while i < array_len(items) is
+        if items[i] == needle is return true end
+        i += 1
+    end
+    return false
+end
+
+;; `a, b ,c` -> ["a", "b", "c"]   (empty parts are dropped, quotes are kept)
+pub fn csv_split(s: string) -> [string] is
+    let parts: [string] = string_split(s, ",")
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(parts) is
+        let t: string = string_trim(parts[i])
+        if t != "" is out = array_push(out, t) end
+        i += 1
+    end
+    return out
+end
+
+;; Escapes a value for use inside a JSON string literal (bit only *writes* JSON
+;; by hand for the lock file / index snippets; reading goes through std json).
+pub fn json_esc(s: string) -> string is
+    let a: string = string_replace(s, "\\", "\\\\")
+    let b: string = string_replace(a, "\"", "\\\"")
+    let c: string = string_replace(b, "\n", "\\n")
+    let d: string = string_replace(c, "\r", "\\r")
+    return string_replace(d, "\t", "\\t")
+end
+
+pub fn is_url(s: string) -> bool is
+    return string_starts_with(s, "https://") || string_starts_with(s, "http://") ||
+           string_starts_with(s, "git@") || string_starts_with(s, "ssh://") ||
+           string_starts_with(s, "git://") || string_starts_with(s, "file://")
+end
+
+;; First 12 characters of a commit id (the directory name of an installed lib).
+pub fn short_hash(h: string) -> string is
+    if string_len(h) <= 12 is return h end
+    return string_slice(h, 0, 12)
+end
+
+;; Library / package names: letters, digits, `-`, `_`, `.`; must start with a
+;; letter or digit; at most 64 characters (same rule the index CI enforces).
+pub fn valid_name(name: string) -> bool is
+    let n: int = string_len(name)
+    if n == 0 || n > 64 is return false end
+    let alnum: string = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    if !string_contains(alnum, string_at(name, 0)) is return false end
+    let allowed: string = alnum + "._-"
+    let mut i: int = 1
+    while i < n is
+        if !string_contains(allowed, string_at(name, i)) is return false end
+        i += 1
+    end
+    return true
+end
+
+;; 950 -> "950ms", 12345 -> "12.3s", 125000 -> "2m05s"
+pub fn elapsed_str(ms: int) -> string is
+    if ms < 1000 is return to_string(ms) + "ms" end
+    if ms < 60000 is
+        let tenths: int = (ms % 1000) / 100
+        return to_string(ms / 1000) + "." + to_string(tenths) + "s"
+    end
+    let secs: int = (ms / 1000) % 60
+    let pad: string = if secs < 10 then "0" else ""
+    return to_string(ms / 60000) + "m" + pad + to_string(secs) + "s"
+end
+
+;; ── Paths ────────────────────────────────────────────────────────────────────
+
+;; "/a/b/c" -> "c"      "/a/b/" -> "b"
+pub fn basename(path: string) -> string is
+    let mut p: string = path
+    while string_len(p) > 1 && string_ends_with(p, "/") is
+        p = string_slice(p, 0, string_len(p) - 1)
+    end
+    let mut cut: int = -1
+    let mut i: int = 0
+    while i < string_len(p) is
+        if string_at(p, i) == "/" is cut = i end
+        i += 1
+    end
+    if cut < 0 is return p end
+    return string_slice(p, cut + 1, string_len(p))
+end
+
+;; "/a/b/c" -> "/a/b"    "/a" -> "/"    "a" -> "."
+pub fn dirname(path: string) -> string is
+    let mut p: string = path
+    while string_len(p) > 1 && string_ends_with(p, "/") is
+        p = string_slice(p, 0, string_len(p) - 1)
+    end
+    let mut cut: int = -1
+    let mut i: int = 0
+    while i < string_len(p) is
+        if string_at(p, i) == "/" is cut = i end
+        i += 1
+    end
+    if cut < 0 is return "." end
+    if cut == 0 is return "/" end
+    return string_slice(p, 0, cut)
+end
+
+pub fn mkdir_p(dir: string) -> int is
+    return system("mkdir -p " + sq(dir))
+end
+
+pub fn rm_rf(dir: string) -> bool is
+    if dir == "" || dir == "/" is return false end
+    return system("rm -rf " + sq(dir)) == 0
+end
+
+;; UTC timestamp, e.g. 2026-09-28T18:42:23Z
+pub fn now_iso() -> string is
+    return capture("date -u +%Y-%m-%dT%H:%M:%SZ")
+end
+
+;; ── bit's own directories ────────────────────────────────────────────────────
+;;   libs   ~/.hackeros/libs/<name>/<commit>/     override: BIT_HOME
+;;   state  ~/.hackeros/bit/  (bit.lock, cache/, tmp/)   override: BIT_DIR
+
+fn home() -> string is
+    let h: string = env_get("HOME")
+    if h != "" is return h end
+    return "/tmp"
+end
+
+pub fn libs_dir() -> string is
+    let o: string = env_get("BIT_HOME")
+    if o != "" is return o end
+    return home() + "/.hackeros/libs"
+end
+
+pub fn bit_dir() -> string is
+    let o: string = env_get("BIT_DIR")
+    if o != "" is return o end
+    return home() + "/.hackeros/bit"
+end
+
+pub fn cache_dir() -> string is return bit_dir() + "/cache" end
+pub fn tmp_dir() -> string is return bit_dir() + "/tmp" end
