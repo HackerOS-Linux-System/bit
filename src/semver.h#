@@ -1,0 +1,203 @@
+mod util
+
+pub fn pack(major: int, minor: int, patch: int) -> int is
+    return major * 1000000000 + minor * 1000000 + patch
+end
+
+fn digits(s: string) -> int is
+    if s == "" is return 0 end
+    let mut n: int = 0
+    let mut i: int = 0
+    while i < string_len(s) is
+        let c: string = string_at(s, i)
+        if !string_contains("0123456789", c) is return n end
+        n = n * 10 + string_find("0123456789", c)
+        i += 1
+    end
+    return n
+end
+
+;; "v1.2.3" -> packed int, or -1 when the string is not a version.
+;; Pre-releases (1.2.3-rc1) are not versions bit will pick automatically.
+pub fn parse(tag: string) -> int is
+    let mut t: string = string_trim(tag)
+    if string_starts_with(t, "v") || string_starts_with(t, "V") is t = string_slice(t, 1, string_len(t)) end
+    if t == "" || !string_contains("0123456789", string_at(t, 0)) is return -1 end
+    if string_contains(t, "-") || string_contains(t, "+") is return -1 end
+    let parts: [string] = string_split(t, ".")
+    if array_len(parts) > 3 is return -1 end
+    let mut i: int = 0
+    while i < array_len(parts) is
+        if parts[i] == "" is return -1 end
+        let mut k: int = 0
+        while k < string_len(parts[i]) is
+            if !string_contains("0123456789", string_at(parts[i], k)) is return -1 end
+            k += 1
+        end
+        i += 1
+    end
+    let ma: int = digits(parts[0])
+    let mi: int = if array_len(parts) > 1 then digits(parts[1]) else 0
+    let pa: int = if array_len(parts) > 2 then digits(parts[2]) else 0
+    return pack(ma, mi, pa)
+end
+
+pub fn show(v: int) -> string is
+    return to_string(v / 1000000000) + "." + to_string((v / 1000000) % 1000) + "." + to_string(v % 1000000)
+end
+
+;; Does a dependency value look like a range (as opposed to a git ref / url / "git ...")?
+pub fn is_range(s: string) -> bool is
+    let t: string = string_trim(s)
+    if t == "" || t == "*" is return false end     ;; "*" = newest, handled as "no constraint"
+    let c: string = string_at(t, 0)
+    if c == "^" || c == "~" || c == ">" || c == "<" || c == "=" is return true end
+    ;; `1.x`, `1.2.*`, `1.2.3`, `v1.2` — digits and dots, optionally an x / * wildcard.
+    ;; A bare number (`1234567`) is a commit id, not a version.
+    if !string_contains(t, ".") && !string_contains(t, "x") && !string_contains(t, "X") && !string_contains(t, "*") is
+        return false
+    end
+    let mut i: int = 0
+    let mut saw_digit: bool = false
+    let start: int = if c == "v" then 1 else 0
+    i = start
+    while i < string_len(t) is
+        let d: string = string_at(t, i)
+        if string_contains("0123456789", d) is saw_digit = true
+        else if d == "." || d == "x" || d == "X" || d == "*" is saw_digit = saw_digit
+        else is return false end
+        i += 1
+    end
+    return saw_digit
+end
+
+;; One comparator: op is one of  >=  >  <=  <  =
+pub struct Cmp is
+    pub cm_op: string
+    pub cm_v:  int
+end
+
+;; Fills missing parts with `fill`: "1.2" with fill 0 -> 1.2.0.
+fn parse_partial(s: string, fill: int) -> int is
+    let mut t: string = string_trim(s)
+    if string_starts_with(t, "v") is t = string_slice(t, 1, string_len(t)) end
+    let parts: [string] = string_split(t, ".")
+    let ma: int = if array_len(parts) > 0 then digits(parts[0]) else 0
+    let mi: int = if array_len(parts) > 1 && digits_ok(parts[1]) then digits(parts[1]) else fill
+    let pa: int = if array_len(parts) > 2 && digits_ok(parts[2]) then digits(parts[2]) else fill
+    return pack(ma, mi, pa)
+end
+
+fn digits_ok(p: string) -> bool is
+    return p != "" && string_contains("0123456789", string_at(p, 0))
+end
+
+fn count_parts(s: string) -> int is
+    let mut t: string = string_trim(s)
+    if string_starts_with(t, "v") is t = string_slice(t, 1, string_len(t)) end
+    let parts: [string] = string_split(t, ".")
+    let mut n: int = 0
+    let mut i: int = 0
+    while i < array_len(parts) is
+        if digits_ok(parts[i]) is n += 1 else is return n end
+        i += 1
+    end
+    return n
+end
+
+;; Range text -> comparators (all must hold).
+;;   ^1.2.3  >=1.2.3 <2.0.0     ^0.2.3 >=0.2.3 <0.3.0     ^0.0.3 >=0.0.3 <0.0.4
+;;   ~1.2.3  >=1.2.3 <1.3.0     ~1.2 >=1.2.0 <1.3.0       ~1 >=1.0.0 <2.0.0
+;;   1.x / 1.2.x / 1.*  -> the matching span               1.2.3 / =1.2.3 -> exactly
+pub fn parse_range(text: string) -> [Cmp] is
+    let mut out: [Cmp] = []
+    let words: [string] = string_split(string_replace(string_trim(text), ",", " "), " ")
+    let mut i: int = 0
+    while i < array_len(words) is
+        let w: string = string_trim(words[i])
+        i += 1
+        if w != "" && w != "*" is
+            if string_starts_with(w, "^") is
+                let body: string = string_slice(w, 1, string_len(w))
+                let lo: int = parse_partial(body, 0)
+                let ma: int = lo / 1000000000
+                let mi: int = (lo / 1000000) % 1000
+                let hi: int = if ma > 0 then pack(ma + 1, 0, 0)
+                              else if mi > 0 || count_parts(body) < 3 && count_parts(body) >= 2 then pack(0, mi + 1, 0)
+                              else if count_parts(body) < 2 then pack(1, 0, 0)
+                              else pack(0, 0, lo % 1000000 + 1)
+                out = array_push(out, Cmp { cm_op: ">=", cm_v: lo })
+                out = array_push(out, Cmp { cm_op: "<",  cm_v: hi })
+            else if string_starts_with(w, "~") is
+                let body: string = string_slice(w, 1, string_len(w))
+                let lo: int = parse_partial(body, 0)
+                let ma: int = lo / 1000000000
+                let mi: int = (lo / 1000000) % 1000
+                let hi: int = if count_parts(body) <= 1 then pack(ma + 1, 0, 0) else pack(ma, mi + 1, 0)
+                out = array_push(out, Cmp { cm_op: ">=", cm_v: lo })
+                out = array_push(out, Cmp { cm_op: "<",  cm_v: hi })
+            else if string_starts_with(w, ">=") is
+                out = array_push(out, Cmp { cm_op: ">=", cm_v: parse_partial(string_slice(w, 2, string_len(w)), 0) })
+            else if string_starts_with(w, "<=") is
+                out = array_push(out, Cmp { cm_op: "<=", cm_v: parse_partial(string_slice(w, 2, string_len(w)), 0) })
+            else if string_starts_with(w, ">") is
+                out = array_push(out, Cmp { cm_op: ">",  cm_v: parse_partial(string_slice(w, 1, string_len(w)), 0) })
+            else if string_starts_with(w, "<") is
+                out = array_push(out, Cmp { cm_op: "<",  cm_v: parse_partial(string_slice(w, 1, string_len(w)), 0) })
+            else is
+                ;; exact, `=1.2.3`, or a wildcard span
+                let body: string = if string_starts_with(w, "=") then string_slice(w, 1, string_len(w)) else w
+                let wild: bool = string_contains(body, "x") || string_contains(body, "X") || string_contains(body, "*")
+                let n: int = count_parts(body)
+                let lo: int = parse_partial(body, 0)
+                if wild || n < 3 is
+                    let ma: int = lo / 1000000000
+                    let mi: int = (lo / 1000000) % 1000
+                    let hi: int = if n <= 1 then pack(ma + 1, 0, 0) else pack(ma, mi + 1, 0)
+                    out = array_push(out, Cmp { cm_op: ">=", cm_v: lo })
+                    out = array_push(out, Cmp { cm_op: "<",  cm_v: hi })
+                else is
+                    out = array_push(out, Cmp { cm_op: "=", cm_v: lo })
+                end
+            end
+        end
+    end
+    return out
+end
+
+pub fn satisfies(v: int, cs: [Cmp]) -> bool is
+    let mut i: int = 0
+    while i < array_len(cs) is
+        let c: Cmp = cs[i]
+        if c.cm_op == ">=" && !(v >= c.cm_v) is return false end
+        if c.cm_op == ">"  && !(v >  c.cm_v) is return false end
+        if c.cm_op == "<=" && !(v <= c.cm_v) is return false end
+        if c.cm_op == "<"  && !(v <  c.cm_v) is return false end
+        if c.cm_op == "="  && !(v == c.cm_v) is return false end
+        i += 1
+    end
+    return true
+end
+
+;; Newest tag (from `tags`, e.g. the lines of `git ls-remote --tags`) that satisfies
+;; `range`. Returns the tag exactly as written ("v1.4.2"), or "" when none fits.
+pub fn best_tag(tags: [string], range: string) -> string is
+    let cs: [Cmp] = parse_range(range)
+    let mut best: int = -1
+    let mut best_tag: string = ""
+    let mut i: int = 0
+    while i < array_len(tags) is
+        let v: int = parse(tags[i])
+        if v >= 0 && satisfies(v, cs) && v > best is
+            best = v
+            best_tag = tags[i]
+        end
+        i += 1
+    end
+    return best_tag
+end
+
+;; Newest version tag overall ("" if the repo has none).
+pub fn newest_tag(tags: [string]) -> string is
+    return best_tag(tags, "")
+end
