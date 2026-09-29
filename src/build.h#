@@ -3,6 +3,8 @@ mod ui
 mod hk
 mod index
 mod project
+mod task
+mod native
 
 pub struct BuildOpts is
     pub bo_release:  bool
@@ -151,7 +153,10 @@ end
 fn run_step(p: project::Project, label: string, cmd: string, verbose: bool) -> int is
     if verbose is ui::note("$ " + cmd) end
     let t0: int = time_ms()
-    let rc: int = util::run(in_root(p, cmd))
+    let animated: bool = !verbose && task::is_tty()
+    ;; on a TTY the spinner reports the result itself; without one, print it here
+    let rc: int = task::run(label, in_root(p, cmd), verbose, false)
+    if animated is return rc end
     let ms: int = time_ms() - t0
     if rc == 0 is
         ui::ok(label + "  " + ui::dim("(" + util::elapsed_str(ms) + ")"))
@@ -390,6 +395,15 @@ pub fn build_project(p: project::Project, o: BuildOpts) -> int is
     project::cache_ensure(p)
     if run_hook(p, "pre-build", o.bo_verbose) != 0 is
         ui::fail("pre-build hook failed")
+        return 1
+    end
+
+    ;; native parts (`[build] native => …`) of this project and of every dependency,
+    ;; built before anything links against them; LIBRARY_PATH is exported by native::prepare
+    let plat: string = build_platform(p, o)
+    let triple: string = if plat != "" then rust_triple(plat) else ""
+    if native::prepare(p, o.bo_verbose, triple) != 0 is
+        ui::fail("native build failed")
         return 1
     end
 
