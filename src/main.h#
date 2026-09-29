@@ -35,6 +35,8 @@ fn main() is
     let mut global:    bool   = false
     let mut everything: bool  = false
     let mut is_lib:    bool   = false
+    let mut dry_run:   bool   = false
+    let mut check_only: bool  = false
     let mut target:    string = ""
     let mut platform:  string = ""
     let mut emit:      string = ""
@@ -64,6 +66,14 @@ fn main() is
                 "--global"  | "-g" => is global = true end
                 "--all"            => is everything = true end
                 "--lib"            => is is_lib = true end
+                "--dry-run" | "-n" => is dry_run = true end
+                "--check"          => is check_only = true end
+                "--locked"         => is env_set("BIT_LOCKED", "1") end
+                "--offline"        => is env_set("BIT_OFFLINE", "1") end
+                "--jobs" | "-j"    => is
+                    i += 1
+                    env_set("BIT_JOBS", arg_at(args, i))
+                end
                 "--target"  | "-t" => is
                     i += 1
                     target = arg_at(args, i)
@@ -134,7 +144,9 @@ fn main() is
                 rc = cli::cmd_add(first, arg_at(pos, 1), output, target, no_build, release, verbose)
             end
             "remove" | "rm" | "uninstall" => is rc = cli::cmd_remove(first, global) end
-            "upgrade" => is rc = cli::cmd_upgrade(first, verbose, release) end
+            "upgrade" => is rc = cli::cmd_upgrade(first, verbose, release, dry_run) end
+            "outdated" => is rc = cli::cmd_outdated() end
+            "migrate" => is rc = cli::cmd_migrate(check_only, first) end
             "list" | "ls" | "installed" => is rc = cli::cmd_list() end
             "search" => is rc = cli::cmd_search(first, lang) end
             "info" => is rc = cli::cmd_info(first) end
