@@ -1,5 +1,5 @@
 mod util
-mod json
+use "std -> json" from "json"
 
 pub struct Locked is
     pub lk_name:     string
@@ -10,6 +10,8 @@ pub struct Locked is
     pub lk_lang:     string
     pub lk_output:   string
     pub lk_at:       string
+    pub lk_range:    string   ;; constraint the entry was resolved from (`^1.2`), "" = none
+    pub lk_tag:      string   ;; git tag it resolved to (`v1.4.2`), "" = a branch / commit
 end
 
 pub struct Lock is
@@ -25,6 +27,8 @@ pub fn locked_checksum(p: Locked) -> string is return p.lk_checksum end
 pub fn locked_lang(p: Locked)     -> string is return p.lk_lang end
 pub fn locked_output(p: Locked)   -> string is return p.lk_output end
 pub fn locked_at(p: Locked)       -> string is return p.lk_at end
+pub fn locked_range(p: Locked)    -> string is return p.lk_range end
+pub fn locked_tag(p: Locked)      -> string is return p.lk_tag end
 
 pub fn lock_len(l: Lock)              -> int    is return l.lock_count end
 pub fn lock_at(l: Lock, i: int)       -> Locked is return l.lock_items[i] end
@@ -37,50 +41,120 @@ pub fn global_lock_path() -> string is
     return util::bit_dir() + "/bit.lock"
 end
 
+;; bit.lock / Bit.lock are JSON Lines: one flat object per library, e.g.
+;;   {"name":"mold","version":"a1b2c3d4e5f6","commit":"…","url":"…","checksum":"sha256:…",…}
+;; (flat objects are exactly what std `json` reads and writes in compiled H#).
+;;
+;; Files written by older bit versions (one pretty-printed object of objects) are
+;; recognised and rewritten in this format on first read.
+
+fn locked_from(o: string, name: string) -> Locked is
+    return Locked {
+        lk_name:     name,
+        lk_version:  json::get_str(o, "version"),
+        lk_commit:   json::get_str(o, "commit"),
+        lk_url:      json::get_str(o, "url"),
+        lk_checksum: json::get_str(o, "checksum"),
+        lk_lang:     json::get_str(o, "lang"),
+        lk_output:   json::get_str(o, "output"),
+        lk_at:       json::get_str(o, "installed_at"),
+        lk_range:    json::get_str(o, "range"),
+        lk_tag:      json::get_str(o, "tag")
+    }
+end
+
+;; Old format:   {
+;;                 "name": {
+;;                   "version": "…",
+;;                   …
+;;                 },
+;;               }
+pub fn is_old_format(text: string) -> bool is
+    let t: string = string_trim(text)
+    if !string_starts_with(t, "{") is return false end
+    let first: string = string_trim(string_split(t, "\n")[0])
+    return first == "{"
+end
+
+fn parse_old(text: string) -> [Locked] is
+    let lines: [string] = string_split(string_replace(text, "\r", ""), "\n")
+    let mut items: [Locked] = []
+    let mut name: string = ""
+    let mut cur: string = ""
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let t: string = string_trim(lines[i])
+        i += 1
+        if name == "" is
+            ;; entry start:   "mold": {
+            if string_starts_with(t, "\"") && string_ends_with(t, "{") is
+                let close: int = string_find(string_slice(t, 1, string_len(t)), "\"")
+                if close > 0 is
+                    name = string_slice(t, 1, close + 1)
+                    cur = "{"
+                end
+            end
+        else if t == "}" || t == "}," is
+            items = array_push(items, locked_from(cur + "}", name))
+            name = ""
+            cur = ""
+        else if t != "" is
+            cur = cur + t
+        end
+    end
+    return items
+end
+
+fn write_items(path: string, items: [Locked]) is
+    util::mkdir_p(util::dirname(path))
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < array_len(items) is
+        let p: Locked = items[i]
+        let mut o: string = json::empty_object()
+        o = json::set_str(o, "name", p.lk_name)
+        o = json::set_str(o, "version", p.lk_version)
+        o = json::set_str(o, "commit", p.lk_commit)
+        o = json::set_str(o, "url", p.lk_url)
+        o = json::set_str(o, "checksum", p.lk_checksum)
+        o = json::set_str(o, "lang", p.lk_lang)
+        o = json::set_str(o, "output", p.lk_output)
+        o = json::set_str(o, "installed_at", p.lk_at)
+        o = json::set_str(o, "range", p.lk_range)
+        o = json::set_str(o, "tag", p.lk_tag)
+        out = out + o + "\n"
+        i += 1
+    end
+    ;; write next to the target and rename — a crash never leaves a half-written lock
+    let tmp: string = path + ".tmp"
+    file_write(tmp, out)
+    util::run("mv -f " + util::sq(tmp) + " " + util::sq(path))
+end
+
 pub fn lock_read(path: string) -> Lock is
     if !file_exists(path) is return empty_lock() end
-    let top: json::JsonObj = json::parse_object(file_read(path))
+    let text: string = file_read(path)
+    if is_old_format(text) is
+        let old: [Locked] = parse_old(text)
+        util::run("cp -f " + util::sq(path) + " " + util::sq(path + ".old"))
+        write_items(path, old)
+        write("  note: converted " + path + " to the current lock format (old copy: " + path + ".old)")
+        return Lock { lock_items: old, lock_count: array_len(old) }
+    end
+    let lines: [string] = string_split(string_replace(text, "\r", ""), "\n")
     let mut items: [Locked] = []
     let mut i: int = 0
-    let n: int = json::obj_count(top)
-    while i < n is
-        let pair: json::JsonPair = json::obj_pair_at(top, i)
-        let body: json::JsonObj = json::parse_object(json::pair_val(pair))
-        items = array_push(items, Locked {
-            lk_name:     json::pair_key(pair),
-            lk_version:  json::obj_get(body, "version"),
-            lk_commit:   json::obj_get(body, "commit"),
-            lk_url:      json::obj_get(body, "url"),
-            lk_checksum: json::obj_get(body, "checksum"),
-            lk_lang:     json::obj_get(body, "lang"),
-            lk_output:   json::obj_get(body, "output"),
-            lk_at:       json::obj_get(body, "installed_at")
-        })
+    while i < array_len(lines) is
+        let line: string = string_trim(lines[i])
+        let name: string = if line == "" then "" else json::get_str(line, "name")
+        if name != "" is items = array_push(items, locked_from(line, name)) end
         i += 1
     end
     return Lock { lock_items: items, lock_count: array_len(items) }
 end
 
 pub fn lock_write(path: string, l: Lock) is
-    util::mkdir_p(util::dirname(path))
-    let mut out: string = "{\n"
-    let mut i: int = 0
-    while i < l.lock_count is
-        let p: Locked = l.lock_items[i]
-        let comma: string = if i < l.lock_count - 1 then "," else ""
-        out = out + "  \"" + util::json_esc(p.lk_name) + "\": {\n" +
-              "    \"version\": \""      + util::json_esc(p.lk_version)  + "\",\n" +
-              "    \"commit\": \""       + util::json_esc(p.lk_commit)   + "\",\n" +
-              "    \"url\": \""          + util::json_esc(p.lk_url)      + "\",\n" +
-              "    \"checksum\": \""     + util::json_esc(p.lk_checksum) + "\",\n" +
-              "    \"lang\": \""         + util::json_esc(p.lk_lang)     + "\",\n" +
-              "    \"output\": \""       + util::json_esc(p.lk_output)   + "\",\n" +
-              "    \"installed_at\": \"" + util::json_esc(p.lk_at)       + "\"\n" +
-              "  }" + comma + "\n"
-        i += 1
-    end
-    out = out + "}\n"
-    file_write(path, out)
+    write_items(path, l.lock_items)
 end
 
 pub fn lock_get(l: Lock, name: string) -> Locked is
@@ -90,7 +164,7 @@ pub fn lock_get(l: Lock, name: string) -> Locked is
         i += 1
     end
     return Locked { lk_name: "", lk_version: "", lk_commit: "", lk_url: "", lk_checksum: "",
-                    lk_lang: "", lk_output: "", lk_at: "" }
+                    lk_lang: "", lk_output: "", lk_at: "", lk_range: "", lk_tag: "" }
 end
 
 pub fn lock_has(l: Lock, name: string) -> bool is
