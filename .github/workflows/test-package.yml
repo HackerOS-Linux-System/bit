@@ -1,1 +1,119 @@
+name: Test packages
 
+# Health check of the libraries listed in index/repository.json, with the
+# freshly built `bit`: clone → Bit.hk present → bit check → bit build → bit test.
+# The work is done by scripts/test-package.lua.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "index/repository.json"
+      - "scripts/test-package.lua"
+      - "scripts/common.lua"
+      - "src/**"
+      - "scripts/bootstrap-ci.sh"
+      - ".github/workflows/test-package.yml"
+  pull_request:
+    paths:
+      - "index/repository.json"
+      - "scripts/test-package.lua"
+      - "scripts/common.lua"
+      - "src/**"
+      - "scripts/bootstrap-ci.sh"
+      - ".github/workflows/test-package.yml"
+  schedule:
+    - cron: "17 4 * * 1"          # weekly: the whole index (libraries change without this repo changing)
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: "Comma-separated library names to test (empty = see 'scope')"
+        required: false
+        default: ""
+      scope:
+        description: "Without names: test the whole index or only new/changed entries"
+        type: choice
+        options: [all, changed]
+        default: all
+      strict:
+        description: "Legacy manifests and unreachable repositories fail instead of warning/skipping"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fork PRs can add an index entry that points at arbitrary code, and building it
+  # runs that code (compilers, `[build] native`, hooks). Same-repo PRs and pushes
+  # to main run right away; a PR from a fork waits for a maintainer to approve the
+  # `external-packages` environment (Settings → Environments → Required reviewers).
+  gate:
+    name: Who is asking?
+    runs-on: ubuntu-latest
+    outputs:
+      external: ${{ steps.who.outputs.external }}
+    steps:
+      - id: who
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+        run: |
+          if [ "$EVENT" = "pull_request" ] && [ "$HEAD_REPO" != "$THIS_REPO" ]; then
+            echo "external=true" >> "$GITHUB_OUTPUT"
+            echo "PR from a fork ($HEAD_REPO): the build waits for maintainer approval." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "external=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  test-packages:
+    needs: gate
+    environment: ${{ needs.gate.outputs.external == 'true' && 'external-packages' || 'internal' }}
+    name: Test libraries
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install lua and jq
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lua5.4 jq
+
+      - name: Install H# and bit's libraries
+        run: bash scripts/bootstrap-ci.sh
+
+      - name: Build bit
+        run: |
+          mkdir -p cache/build/release
+          'h#' compile src/main.h# -o cache/build/release/bit --release
+
+      - name: Decide the scope
+        id: scope
+        run: |
+          case "${{ github.event_name }}" in
+            pull_request) echo "mode=--changed" >> "$GITHUB_OUTPUT"; echo "base=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT" ;;
+            push)         echo "mode=--changed" >> "$GITHUB_OUTPUT"; echo "base=${{ github.event.before }}" >> "$GITHUB_OUTPUT" ;;
+            schedule)     echo "mode=--all"     >> "$GITHUB_OUTPUT"; echo "base=" >> "$GITHUB_OUTPUT" ;;
+            *)            echo "mode=--${{ github.event.inputs.scope || 'all' }}" >> "$GITHUB_OUTPUT"; echo "base=" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Test the libraries (scripts/test-package.lua)
+        env:
+          BASE_SHA: ${{ steps.scope.outputs.base }}
+          PACKAGES: ${{ github.event.inputs.packages }}
+          STRICT: ${{ github.event.inputs.strict == 'true' && '1' || '' }}
+          BIT_BIN: ${{ github.workspace }}/cache/build/release/bit
+        run: |
+          if [ -n "$PACKAGES" ]; then
+            lua5.4 scripts/test-package.lua
+          else
+            lua5.4 scripts/test-package.lua ${{ steps.scope.outputs.mode }}
+          fi
