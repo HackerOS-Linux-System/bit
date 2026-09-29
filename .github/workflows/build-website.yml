@@ -6,11 +6,17 @@ on:
     paths:
       - "website/**"
       - "index/**"
+      - "images/**"
+      - "scripts/validate-index.lua"
+      - "scripts/common.lua"
       - ".github/workflows/build-website.yml"
   pull_request:
     paths:
       - "website/**"
       - "index/**"
+      - "images/**"
+      - "scripts/validate-index.lua"
+      - "scripts/common.lua"
       - ".github/workflows/build-website.yml"
   workflow_dispatch:
 
@@ -28,6 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # the pin policy compares against the base revision
       - name: Strict JSON + schema checks
         run: |
           set -euo pipefail
@@ -52,6 +60,16 @@ jobs:
           jq -r '.libraries[] | select(.lang != null) | select(.lang | IN("hsharp","hackerlang","hackerscript") | not) | .name' "$f" | grep . && { echo "::error::invalid lang on the entries above"; exit 1; } || true
 
           echo "OK: $(jq '.libraries | length' "$f") libraries"
+
+      - name: Install lua
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lua5.4
+
+      # New entries (and entries whose target changed) must be pinned to a tag or a
+      # full commit id; existing unpinned entries only warn.
+      - name: Pin policy (scripts/validate-index.lua)
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: lua5.4 scripts/validate-index.lua
 
   build:
     name: Type-check & build
@@ -82,6 +100,13 @@ jobs:
       # page works even if raw.githubusercontent.com is slow or rate-limited.
       - name: Bundle the library index
         run: cp ../index/repository.json dist/repository.json
+
+      # The pages reference /images/*.png, which live in the repository root
+      # (images/), not in website/public — copy them next to the build.
+      - name: Bundle images
+        run: |
+          mkdir -p dist/images
+          cp -r ../images/. dist/images/
 
       - name: Sanity-check the build output
         run: |
