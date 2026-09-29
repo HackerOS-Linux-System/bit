@@ -232,7 +232,7 @@
     },
     {
       "name": "gui",
-      "target": "https://github.com/HackerOS-Linux-System/gui",
+      "target": "https://github.com/bit-io/gui",
       "description": "GUI library for Hacker Lang.",
       "tags": [
         "gui"
@@ -250,6 +250,34 @@
         "Zenit-Linux"
       ],
       "author": "Bit Developers"
+    },
+    {
+      "name": "libhammer",
+      "target": "https://github.com/HackerOS-Linux-System/hammer/tree/main/libhammer",
+      "description": "libhammer library for package manager - hammer",
+      "tags": [
+        "ostree",
+        "fasttree",
+        "immuntable",
+        "HackerOS",
+        "HackerOS-Linux-System",
+        "Debian",
+        "libsolv"
+      ],
+      "author": "HackerOS Team"
+    },
+    {
+      "name": "blue-api",
+      "target": "https://github.com/HackerOS-Linux-System/Blue-Environment/tree/main/api",
+      "description": "Library bindings for Blue Environment official api library.",
+      "tags": [
+        "webview",
+        "graphical-environment",
+        "Blue-Environment",
+        "HackerOS",
+        "HackerOS-Linux-System"
+      ],
+      "author": "HackerOS Team"
     }
   ]
 }
