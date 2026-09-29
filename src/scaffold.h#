@@ -5,30 +5,36 @@ mod project
 
 fn manifest(name: string, lang: string, is_lib: bool) -> string is
     let lang_key: string = if lang == "hackerlang" then "hl" else if lang == "hackerscript" then "hs" else "h#"
+    ;; Bit.hk is read by the hk-parser library: comments are whole lines starting
+    ;; with `!`, and a key is either a value or a map (never both).
     let mut m: string = "[package]\n" +
         "-> name        => " + name + "\n" +
         "-> version     => 0.1.0\n" +
         "-> description => " + name + "\n" +
         "-> authors     => [\"" + util::or_default(env_get("USER"), "you") + "\"]\n" +
         "-> license     => MIT\n" +
-        "-> lang        => " + lang_key + "         ;; h# | hl | hs  (several: h#, hs)\n\n"
+        "! lang: h# | hl | hs  (several: h#, hs)\n" +
+        "-> lang        => " + lang_key + "\n\n"
     if lang == "hackerlang" is
         m = m + "[layout]\n" +
-            "-> hl-entry => " + (if is_lib then "lib.hl" else "main.hl") + "     ;; Hacker Lang must be told where its code is\n\n"
+            "! Hacker Lang must be told where its code is\n" +
+            "-> hl-entry => " + (if is_lib then "lib.hl" else "main.hl") + "\n\n"
     end
     m = m + "[build]\n" +
-        "-> link => static          ;; bit links everything statically\n" +
-        ";; -> target   => h#        ;; language toolchain to build with\n" +
-        ";; -> platform => linux-aarch64   ;; cross-compilation platform\n\n"
+        "! bit links everything statically\n" +
+        "-> link => static\n" +
+        "! -> target   => h#              language toolchain to build with\n" +
+        "! -> platform => linux-aarch64   cross-compilation platform\n\n"
     if is_lib is
-        m = m + "[lib]\n-> output => hlib          ;; hlib | so | a | obj\n\n"
+        m = m + "[lib]\n! output: hlib | so | a | obj\n-> output => hlib\n\n"
     end
-    m = m + "[default-build]          ;; what a bare `bit` does\n" +
+    m = m + "! what a bare `bit` does\n" +
+        "[default-build]\n" +
         "-> profile => release\n" +
-        ";; -> run    => true\n" +
-        ";; -> before => echo starting\n\n" +
-        "[dependencies]\n;; -> mold => *\n;; -> tui  => rev v1.0\n;; -> mine => path ../mine\n\n" +
-        "[commands]\n;; -> hello => echo hello from bit\n;; --> description => Say hello\n"
+        "! -> run    => true\n" +
+        "! -> before => echo starting\n\n" +
+        "[dependencies]\n! -> mold => *\n! -> tui  => rev v1.0\n! -> mine => path ../mine\n\n" +
+        "[commands]\n! -> hello\n! --> run => echo hello from bit\n! --> description => Say hello\n"
     return m
 end
 
