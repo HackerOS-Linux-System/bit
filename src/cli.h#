@@ -39,9 +39,12 @@ pub fn print_help() is
     write("  " + ui::bold("LIBRARIES") + "  " + ui::dim("installed to ~/.hackeros/libs/, checksummed, linked statically"))
     write("    install [name|git-url ...]   install libraries (no name: the project's [dependencies])")
     write("      [--output hlib|so|a|obj] [--target h#|hl|hs] [--no-build] [--release] [--force]")
+    write("      versions in [dependencies]:  -> regex => ^1.2   ~1.2.3   >=1.0 <2.0   1.x   rev <tag|branch|commit>")
     write("    add <name> [rev]             install + add to [dependencies] in Bit.hk")
     write("    remove <name> [--global]     remove from the project (or uninstall)")
-    write("    upgrade [name]               re-fetch the newest version, refresh Bit.lock")
+    write("    upgrade [name] [--dry-run]   re-resolve version ranges, fetch the newest matches, refresh Bit.lock")
+    write("    outdated                     locked → newest-in-range → newest version of every dependency")
+    write("    migrate [--check] [file]     rewrite an old-syntax Bit.hk / old lock file (--check: CI, exit 1 if needed)")
     write("    list                         installed libraries")
     write("    search [text|all] [--lang h#|hl|hs]")
     write("    info <name>                  index entry + install state")
@@ -52,6 +55,9 @@ pub fn print_help() is
     write("")
     write("  " + ui::bold("OPTIONS"))
     write("    -r, --release   -v, --verbose   -f, --force   --no-lock   --sign <key>   -V, --version   -h, --help")
+    write("    --locked        install exactly what Bit.lock says (fails if it is out of date) — for CI")
+    write("    --offline       never use the network (installed libraries + cached index only)     BIT_OFFLINE=1")
+    write("    --jobs <n>      parallel clones (default 4)      BIT_JOBS   BIT_TIMEOUT=<s>   BIT_RETRIES=<n>")
     write("")
     write("  " + ui::dim("Index: " + index::index_url()))
     write("")
@@ -327,7 +333,8 @@ pub fn cmd_remove(name: string, global: bool) -> int is
     return 0
 end
 
-pub fn cmd_upgrade(name: string, verbose: bool, release: bool) -> int is
+pub fn cmd_upgrade(name: string, verbose: bool, release: bool, dry_run: bool) -> int is
+    if dry_run is return cmd_outdated() end
     let p: project::Project = need_project()
     if name == "" && project::is_loaded(p) && array_len(project::deps(p)) > 0 is
         ui::blank()
@@ -353,6 +360,78 @@ pub fn cmd_upgrade(name: string, verbose: bool, release: bool) -> int is
     end
     ui::blank()
     if failed > 0 is return 1 end
+    return 0
+end
+
+pub fn cmd_outdated() -> int is
+    let p: project::Project = project::load_here()
+    if !project::is_loaded(p) is return no_project_error() end
+    ui::blank()
+    let n: int = workflow::outdated(p)
+    ui::blank()
+    if n < 0 is return 1 end
+    if n > 0 is
+        ui::note(to_string(n) + " dependenc" + (if n == 1 then "y" else "ies") + " can be upgraded:  bit upgrade [name]")
+    end
+    return 0
+end
+
+;; `bit migrate [--check] [file]` — rewrites a Bit.hk written in bit's old dialect
+;; (`;;` comments, `key = value`, a value plus `-->` sub-keys, trailing comments)
+;; into the hk-parser grammar, and converts old lock files. --check changes nothing
+;; and exits 1 when something would be rewritten (for CI).
+pub fn cmd_migrate(check_only: bool, path_arg: string) -> int is
+    let mut manifest: string = path_arg
+    let mut root: string = ""
+    if manifest == "" is
+        let p: project::Project = project::load_here()
+        if !project::is_loaded(p) is return no_project_error() end
+        manifest = project::manifest_of(p)
+        root = project::root_of(p)
+    end
+    ui::blank()
+    let mut pending: int = 0
+    let mut broken: int = 0
+
+    let text: string = file_read(manifest)
+    let fixed: string = hk::migrate_text(text)
+    if fixed == text is
+        ui::ok(manifest + "  " + ui::dim("already uses the current syntax"))
+    else if !hk::hk_valid(text) is
+        ui::bad(manifest + "  " + ui::red("cannot be parsed even after migration — fix it by hand"))
+        broken += 1
+    else if check_only is
+        ui::warn(manifest + " uses the old syntax — run `bit migrate`")
+        pending += 1
+    else is
+        util::run("cp -f " + util::sq(manifest) + " " + util::sq(manifest + ".bak"))
+        file_write(manifest, fixed)
+        ui::ok(manifest + "  " + ui::dim("migrated (backup: " + manifest + ".bak)"))
+    end
+
+    ;; lock files: the project's Bit.lock and the global bit.lock
+    let locks: [string] = if root != "" then [root + "/Bit.lock", lock::global_lock_path()] else [lock::global_lock_path()]
+    let mut i: int = 0
+    while i < array_len(locks) is
+        let lp: string = locks[i]
+        if file_exists(lp) is
+            if lock::is_old_format(file_read(lp)) is
+                if check_only is
+                    ui::warn(lp + " is in the old lock format — run `bit migrate`")
+                    pending += 1
+                else is
+                    lock::lock_read(lp)      ;; converts and rewrites (keeps <lock>.old)
+                    ui::ok(lp + "  " + ui::dim("converted to the current format"))
+                end
+            else is
+                ui::ok(lp + "  " + ui::dim("current format"))
+            end
+        end
+        i += 1
+    end
+    ui::blank()
+    if broken > 0 is return 2 end
+    if check_only && pending > 0 is return 1 end
     return 0
 end
 
