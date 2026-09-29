@@ -1,6 +1,7 @@
 mod util
 mod hk
 mod index
+mod semver
 
 pub struct Project is
     pub pj_root:     string
@@ -267,6 +268,7 @@ pub struct Dep is
     pub dp_rev:    string
     pub dp_output: string    ;; per-dependency lib output override ("" = the library's own)
     pub dp_lang:   string
+    pub dp_range:  string    ;; version range (`^1.2`, `~1.2.3`, `>=1 <2`, `1.x`), "" = none
 end
 
 pub fn dep_name(d: Dep)   -> string is return d.dp_name end
@@ -275,6 +277,7 @@ pub fn dep_arg(d: Dep)    -> string is return d.dp_arg end
 pub fn dep_rev(d: Dep)    -> string is return d.dp_rev end
 pub fn dep_output(d: Dep) -> string is return d.dp_output end
 pub fn dep_lang(d: Dep)   -> string is return d.dp_lang end
+pub fn dep_range(d: Dep)  -> string is return d.dp_range end
 
 fn first_word(s: string) -> string is
     let t: string = string_trim(s)
@@ -297,9 +300,14 @@ pub fn parse_dep(name: string, value: string, h: hk::Hk) -> Dep is
     let mut kind: string = "index"
     let mut arg: string = ""
     let mut rev: string = hk::hk_get(h, "dependencies", name + ".rev", "")
+    let mut range: string = hk::hk_get(h, "dependencies", name + ".version", "")
 
     if v == "" || v == "*" || w == "newest" || w == "index" || w == "static" || w == "latest" is
         kind = "index"
+    else if semver::is_range(v) is
+        ;; `-> regex => ^1.2` — a version range over the library's git tags
+        kind = "index"
+        range = v
     else if w == "dynamic" is
         kind = "invalid"          ;; bit links everything statically
     else if w == "git" is
@@ -332,8 +340,19 @@ pub fn parse_dep(name: string, value: string, h: hk::Hk) -> Dep is
         arg = pth
     end
 
+    ;; `git <url> ^1.2` — a range as the "rev" of a git dependency
+    if kind == "git" && rev != "" && range == "" && semver::is_range(rev) && string_contains("^~<>=", string_slice(rev, 0, 1)) is
+        range = rev
+        rev = ""
+    end
+    ;; an explicit `rev` wins over a range
+    if rev != "" && string_contains("^~<>=", string_slice(rev, 0, 1)) is
+        range = rev
+        rev = ""
+    end
+
     return Dep {
-        dp_name: name, dp_kind: kind, dp_arg: arg, dp_rev: rev,
+        dp_name: name, dp_kind: kind, dp_arg: arg, dp_rev: rev, dp_range: range,
         dp_output: hk::hk_get(h, "dependencies", name + ".output", ""),
         dp_lang: index::normalize_lang(hk::hk_get(h, "dependencies", name + ".lang", ""))
     }
@@ -369,8 +388,9 @@ pub fn command_names(p: Project) -> [string] is
     return out
 end
 
+;; `-> name => shell line`, or the map form   -> name / --> run => shell line
 pub fn command_body(p: Project, name: string) -> string is
-    return get(p, "commands", name, "")
+    return get(p, "commands", name, get(p, "commands", name + ".run", ""))
 end
 
 pub fn command_desc(p: Project, name: string) -> string is
