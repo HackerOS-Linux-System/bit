@@ -1,0 +1,124 @@
+mod util
+mod ui
+mod hk
+mod project
+mod task
+
+pub fn native_cmd(p: project::Project) -> string is
+    return project::get(p, "build", "native", "")
+end
+
+pub fn has_native(p: project::Project) -> bool is
+    return native_cmd(p) != ""
+end
+
+;; Directory with the native library. `triple` is the Rust target triple when
+;; cross-compiling ("" = host).
+pub fn native_dir(p: project::Project, triple: string) -> string is
+    let root: string = project::root_of(p)
+    let raw: string = project::get(p, "build", "native-lib-path", "")
+    if raw != "" is
+        if string_starts_with(raw, "/") is return raw end
+        return root + "/" + raw
+    end
+    if string_contains(native_cmd(p), "cargo") is
+        if triple != "" is return root + "/target/" + triple + "/release" end
+        return root + "/target/release"
+    end
+    return root
+end
+
+fn native_command(p: project::Project, triple: string) -> string is
+    let c: string = native_cmd(p)
+    ;; cross-compiling a cargo build: add --target unless the manifest already did
+    if triple != "" && string_contains(c, "cargo") && !string_contains(c, "--target") is
+        return c + " --target " + triple
+    end
+    return c
+end
+
+fn skip_marker(p: project::Project) -> string is
+    return project::root_of(p) + "/.bit/native.ok"
+end
+
+;; Builds one project's native part. `is_dep`: an installed dependency is built
+;; once (marker file); the project you are working on is rebuilt every time
+;; (cargo & co. are incremental). Returns 0 on success.
+pub fn ensure_native(p: project::Project, verbose: bool, is_dep: bool, triple: string) -> int is
+    if !has_native(p) is return 0 end
+    let root: string = project::root_of(p)
+    let name: string = project::name_of(p)
+    let skip_if: string = project::get(p, "build", "native-skip-if", "")
+    if is_dep is
+        let mark: string = skip_marker(p)
+        let art: string = if skip_if == "" then "" else if string_starts_with(skip_if, "/") then skip_if else root + "/" + skip_if
+        if file_exists(mark) && (art == "" || file_exists(art)) is return 0 end
+    end
+
+    let cmd: string = native_command(p, triple)
+    let full: string = "cd " + util::sq(root) + " && BIT_NATIVE=1 " + cmd
+    if verbose is ui::note("$ " + cmd) end
+    let rc: int = task::run("native " + name + "  " + ui::dim(cmd), full, verbose, false)
+    if rc != 0 is
+        ui::fail(name + ": native build failed (" + cmd + ")")
+        return rc
+    end
+    let dir: string = native_dir(p, triple)
+    if !dir_exists(dir) is
+        ui::warn(name + ": native build finished but " + dir + " does not exist — check [build] native-lib-path")
+    end
+    util::mkdir_p(root + "/.bit")
+    file_write(skip_marker(p), util::now_iso() + "\n")
+    return 0
+end
+
+fn dep_dir(p: project::Project, d: project::Dep) -> string is
+    let kind: string = project::dep_kind(d)
+    if kind == "path" is
+        let rel: string = project::dep_arg(d)
+        if string_starts_with(rel, "/") is return rel end
+        return project::root_of(p) + "/" + rel
+    end
+    let name: string = if kind == "git" then string_replace(util::basename(project::dep_arg(d)), ".git", "") else project::dep_name(d)
+    return util::libs_dir() + "/" + name + "/current"
+end
+
+fn add_path(paths: string, dir: string) -> string is
+    if paths == "" is return dir end
+    if string_contains(":" + paths + ":", ":" + dir + ":") is return paths end
+    return paths + ":" + dir
+end
+
+fn collect(p: project::Project, verbose: bool, is_dep: bool, triple: string, depth: int, acc: string) -> string is
+    if depth > 8 is return acc end
+    let mut paths: string = acc
+    if has_native(p) is
+        if ensure_native(p, verbose, is_dep, triple) != 0 is return "\x00FAILED" end
+        paths = add_path(paths, native_dir(p, triple))
+    end
+    let deps: [project::Dep] = project::deps(p)
+    let mut i: int = 0
+    while i < array_len(deps) is
+        let dir: string = dep_dir(p, deps[i])
+        if dir_exists(dir) && project::dep_kind(deps[i]) != "invalid" is
+            let sub: project::Project = project::load_with_cache(dir, dir + "/.bit")
+            paths = collect(sub, verbose, true, triple, depth + 1, paths)
+            if paths == "\x00FAILED" is return paths end
+        end
+        i += 1
+    end
+    return paths
+end
+
+;; Builds every native part the project needs and exports LIBRARY_PATH (and
+;; BIT_NATIVE_LIBPATH). Returns 0 on success.
+pub fn prepare(p: project::Project, verbose: bool, triple: string) -> int is
+    let paths: string = collect(p, verbose, false, triple, 0, "")
+    if paths == "\x00FAILED" is return 1 end
+    if paths == "" is return 0 end
+    let old: string = env_get("LIBRARY_PATH")
+    env_set("BIT_NATIVE_LIBPATH", paths)
+    env_set("LIBRARY_PATH", if old == "" then paths else paths + ":" + old)
+    if verbose is ui::note("LIBRARY_PATH += " + paths) end
+    return 0
+end
