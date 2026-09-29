@@ -1,1 +1,114 @@
+name: Build new packages
 
+# When index/repository.json gets a new or changed library entry, fetch that
+# library and build it with the freshly built `bit` — exactly what a user runs.
+# The work is done by scripts/build-new-package.lua.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "index/repository.json"
+      - "scripts/build-new-package.lua"
+      - "scripts/common.lua"
+      - "src/**"
+      - "scripts/bootstrap-ci.sh"
+      - ".github/workflows/build-new-package.yml"
+  pull_request:
+    paths:
+      - "index/repository.json"
+      - "scripts/build-new-package.lua"
+      - "scripts/common.lua"
+      - "src/**"
+      - "scripts/bootstrap-ci.sh"
+      - ".github/workflows/build-new-package.yml"
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: "Comma-separated library names to build (empty = new/changed entries)"
+        required: false
+        default: ""
+      all:
+        description: "Build every library in the index"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-new-package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fork PRs can add an index entry that points at arbitrary code, and building it
+  # runs that code (compilers, `[build] native`, hooks). Same-repo PRs and pushes
+  # to main run right away; a PR from a fork waits for a maintainer to approve the
+  # `external-packages` environment (Settings → Environments → Required reviewers).
+  gate:
+    name: Who is asking?
+    runs-on: ubuntu-latest
+    outputs:
+      external: ${{ steps.who.outputs.external }}
+    steps:
+      - id: who
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+        run: |
+          if [ "$EVENT" = "pull_request" ] && [ "$HEAD_REPO" != "$THIS_REPO" ]; then
+            echo "external=true" >> "$GITHUB_OUTPUT"
+            echo "PR from a fork ($HEAD_REPO): the build waits for maintainer approval." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "external=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-packages:
+    needs: gate
+    environment: ${{ needs.gate.outputs.external == 'true' && 'external-packages' || 'internal' }}
+    name: Build new / changed libraries
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # the script diffs index/repository.json against the base revision
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install lua and jq
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lua5.4 jq
+
+      # H# through install-utils.sh + install.sh of the H-Sharp repository,
+      # then hk-parser and progress-bar from bit.io.
+      - name: Install H# and bit's libraries
+        run: bash scripts/bootstrap-ci.sh
+
+      - name: Build bit
+        run: |
+          mkdir -p cache/build/release
+          'h#' compile src/main.h# -o cache/build/release/bit --release
+
+      - name: Work out what to compare against
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "sha=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "sha=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the libraries (scripts/build-new-package.lua)
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+          PACKAGES: ${{ github.event.inputs.packages }}
+          BIT_BIN: ${{ github.workspace }}/cache/build/release/bit
+        run: |
+          if [ "${{ github.event.inputs.all }}" = "true" ]; then
+            lua5.4 scripts/build-new-package.lua --all
+          else
+            lua5.4 scripts/build-new-package.lua
+          fi
