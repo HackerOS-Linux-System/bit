@@ -1,0 +1,168 @@
+mod util
+mod ui
+mod task
+
+pub fn offline() -> bool is
+    let v: string = string_lower(env_get("BIT_OFFLINE"))
+    return v == "1" || v == "true" || v == "yes" || v == "on"
+end
+
+pub fn set_offline(on: bool) is
+    env_set("BIT_OFFLINE", if on then "1" else "0")
+end
+
+fn env_int(name: string, fallback: int) -> int is
+    let v: string = env_get(name)
+    if v == "" is return fallback end
+    let n: int = str_to_int(v)
+    if n < 0 is return fallback end
+    return n
+end
+
+pub fn timeout_s() -> int is return env_int("BIT_TIMEOUT", 120) end
+pub fn retries() -> int is
+    let n: int = env_int("BIT_RETRIES", 3)
+    if n < 1 is return 1 end
+    return n
+end
+pub fn jobs() -> int is
+    let n: int = env_int("BIT_JOBS", 4)
+    if n < 1 is return 1 end
+    if n > 16 is return 16 end
+    return n
+end
+pub fn set_jobs(n: int) is env_set("BIT_JOBS", to_string(n)) end
+
+;; git never prompts (a private repo must fail, not hang) and gives up on a
+;; connection that stalls.
+pub fn git_env() -> string is
+    let t: int = timeout_s()
+    let stall: string = if t > 0 then " GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=" + to_string(t) else ""
+    return "GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true" + stall + " "
+end
+
+;; `timeout N sh -c '<cmd>'` when the tool exists and a limit is set.
+pub fn limited(cmd: string) -> string is
+    let t: int = timeout_s()
+    if t > 0 && util::tool_exists("timeout") is
+        return "timeout " + to_string(t * 3) + " sh -c " + util::sq(cmd)
+    end
+    return cmd
+end
+
+;; Retries with exponential back-off (2s, 4s, 8s …). Returns the last exit code.
+pub fn run_retry(cmd: string) -> int is
+    let attempts: int = retries()
+    let mut tries: int = 0
+    let mut rc: int = 1
+    let mut wait: int = 2
+    while tries < attempts is
+        tries += 1
+        rc = util::run(limited(cmd))
+        if rc == 0 is return 0 end
+        if tries < attempts is
+            ui::note("network operation failed (attempt " + to_string(tries) + "/" + to_string(attempts) +
+                     "), retrying in " + to_string(wait) + "s")
+            sleep_ms(wait * 1000)
+            wait = wait * 2
+        end
+    end
+    return rc
+end
+
+;; The clone command line (shallow for branches/tags; a bare commit id needs a full clone).
+pub fn clone_cmd(url: string, rev: string, dest: string) -> string is
+    let g: string = git_env() + "git clone --quiet --progress "
+    if rev == "" is
+        return g + "--depth=1 " + util::sq(url) + " " + util::sq(dest)
+    end
+    return g + "--depth=1 --branch " + util::sq(rev) + " " + util::sq(url) + " " + util::sq(dest) +
+           " 2>/dev/null || (rm -rf " + util::sq(dest) + " && " + g + util::sq(url) + " " + util::sq(dest) +
+           " && git -C " + util::sq(dest) + " checkout --quiet " + util::sq(rev) + ")"
+end
+
+;; Clone with spinner + retries. 0 on success.
+pub fn clone(url: string, rev: string, dest: string, label: string, verbose: bool) -> int is
+    if offline() is
+        ui::fail("offline mode: cannot fetch " + url)
+        return 1
+    end
+    let attempts: int = retries()
+    let mut tries: int = 0
+    let mut rc: int = 1
+    let mut wait: int = 2
+    while tries < attempts is
+        tries += 1
+        util::rm_rf(dest)
+        rc = task::run(label, limited(clone_cmd(url, rev, dest)), verbose, true)
+        if rc == 0 is return 0 end
+        if tries < attempts is
+            ui::note("clone failed, retrying in " + to_string(wait) + "s (" + to_string(tries) + "/" + to_string(attempts) + ")")
+            sleep_ms(wait * 1000)
+            wait = wait * 2
+        end
+    end
+    return rc
+end
+
+;; Version tags of a remote repo: "v1.0.0", "v1.1.0", …  (empty when offline / unreachable)
+pub fn remote_tags(url: string) -> [string] is
+    if offline() is return [] end
+    let cmd: string = git_env() + "git ls-remote --tags --refs " + util::sq(url) + " 2>/dev/null | sed 's#.*refs/tags/##'"
+    let mut out: [string] = []
+    let mut attempt: int = 0
+    while attempt < retries() is
+        attempt += 1
+        let txt: string = util::capture(limited(cmd))
+        if txt != "" is
+            let lines: [string] = string_split(txt, "\n")
+            let mut i: int = 0
+            while i < array_len(lines) is
+                let t: string = string_trim(lines[i])
+                if t != "" is out = array_push(out, t) end
+                i += 1
+            end
+            return out
+        end
+        if attempt < retries() is sleep_ms(1500 * attempt) end
+    end
+    return out
+end
+
+;; ── parallel prefetch ────────────────────────────────────────────────────────
+;; Clones several repositories at once into <tmp>/prefetch/<key>; install_lib
+;; picks a finished clone up instead of cloning again.
+
+pub fn prefetch_dir(url: string, rev: string) -> string is
+    let key: string = util::capture("printf %s " + util::sq(url + "@" + rev) + " | sha256sum | cut -c1-16")
+    return util::tmp_dir() + "/prefetch/" + key
+end
+
+;; `items` are "url<TAB>rev". Failures are ignored here — install_lib falls back
+;; to a normal (retrying) clone for anything that is missing.
+pub fn prefetch(items: [string], verbose: bool) is
+    if offline() || array_len(items) < 2 is return end
+    let n: int = jobs()
+    util::mkdir_p(util::tmp_dir() + "/prefetch")
+    let retry_fn: string = "retry() { n=0; until \"$@\"; do n=$((n+1)); [ $n -ge " + to_string(retries()) +
+                           " ] && return 1; sleep $((n*2)); done; }; "
+    let mut script: string = retry_fn
+    let mut started: int = 0
+    let mut i: int = 0
+    while i < array_len(items) is
+        let parts: [string] = string_split(items[i], "\t")
+        let url: string = parts[0]
+        let rev: string = if array_len(parts) > 1 then parts[1] else ""
+        let dest: string = prefetch_dir(url, rev)
+        if !dir_exists(dest) is
+            script = script + "( retry sh -c " + util::sq(clone_cmd(url, rev, dest)) + " >/dev/null 2>&1 || rm -rf " +
+                     util::sq(dest) + " ) & "
+            started += 1
+            if started % n == 0 is script = script + "wait; " end
+        end
+        i += 1
+    end
+    if started == 0 is return end
+    script = script + "wait"
+    task::run("fetching " + to_string(started) + " libraries (" + to_string(n) + " in parallel)", script, verbose, false)
+end
