@@ -1,5 +1,7 @@
 mod util
 mod ui
+mod net
+mod semver
 mod hk
 mod index
 mod checksum
@@ -22,8 +24,69 @@ fn resolve_path(p: project::Project, rel: string) -> string is
     return project::root_of(p) + "/" + rel
 end
 
+;; What to install for one dependency.
+pub struct Pick is
+    pub pk_rev:   string    ;; tag / branch / commit handed to install_lib ("" = the index default)
+    pub pk_range: string    ;; the range it came from ("" = none)
+    pub pk_err:   string    ;; non-empty: this dependency cannot be resolved
+end
+
+fn locked_only() -> bool is return env_get("BIT_LOCKED") == "1" end
+
+fn spec_of(d: project::Dep) -> string is
+    return if project::dep_kind(d) == "git" then project::dep_arg(d) else project::dep_name(d)
+end
+
+;; Decides the revision of a dependency:
+;;   range  -> the Bit.lock entry when it was resolved from the same range (reproducible,
+;;             works offline), otherwise the newest git tag that satisfies it
+;;   rev    -> exactly that
+;;   none   -> the Bit.lock commit, else the index default
+;; With --locked (BIT_LOCKED=1) nothing is resolved: a dependency missing from
+;; Bit.lock is an error, so CI builds exactly what was committed.
+fn pick_rev(d: project::Dep, pl: lock::Lock, use_lock: bool) -> Pick is
+    let dname: string = project::dep_name(d)
+    let range: string = project::dep_range(d)
+    let locked: lock::Locked = lock::lock_get(pl, dname)
+    let have_lock: bool = lock::locked_commit(locked) != ""
+
+    if range != "" is
+        if use_lock && have_lock && lock::locked_range(locked) == range is
+            return Pick { pk_rev: lock::locked_commit(locked), pk_range: range, pk_err: "" }
+        end
+        if locked_only() is
+            return Pick { pk_rev: "", pk_range: range,
+                          pk_err: "Bit.lock has no entry for " + dname + " matching " + range + " (run `bit upgrade " + dname + "`, commit Bit.lock)" }
+        end
+        let tag: string = installer::resolve_range(spec_of(d), range)
+        if tag != "" is
+            return Pick { pk_rev: tag, pk_range: range, pk_err: "" }
+        end
+        ;; offline / unreachable: a version that is already installed may still fit
+        let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+        let inst: lock::Locked = lock::lock_get(gl, dname)
+        let iv: int = semver::parse(lock::locked_tag(inst))
+        if iv >= 0 && semver::satisfies(iv, semver::parse_range(range)) is
+            return Pick { pk_rev: lock::locked_tag(inst), pk_range: range, pk_err: "" }
+        end
+        ;; `1.2` without an operator used to mean "the tag/branch named 1.2"
+        if !string_contains("^~<>=", string_slice(range, 0, 1)) && !net::offline() is
+            return Pick { pk_rev: range, pk_range: "", pk_err: "" }
+        end
+        return Pick { pk_rev: "", pk_range: range,
+                      pk_err: "no version of " + dname + " satisfies " + range + (if net::offline() then " (offline)" else "") }
+    end
+
+    let mut rev: string = project::dep_rev(d)
+    if rev == "" && use_lock && have_lock is rev = lock::locked_commit(locked) end
+    if rev == "" && locked_only() && !have_lock is
+        return Pick { pk_rev: "", pk_range: "", pk_err: "Bit.lock has no entry for " + dname + " (run `bit install`, commit Bit.lock)" }
+    end
+    return Pick { pk_rev: rev, pk_range: "", pk_err: "" }
+end
+
 ;; Installs/links one dependency. Returns the name it is installed under ("" on failure).
-fn ensure_one(p: project::Project, d: project::Dep, pl: lock::Lock, use_lock: bool, force: bool,
+fn ensure_one(p: project::Project, d: project::Dep, pk: Pick, pl: lock::Lock, use_lock: bool, force: bool,
               verbose: bool, release: bool) -> string is
     let dname: string = project::dep_name(d)
     let kind: string = project::dep_kind(d)
@@ -44,18 +107,16 @@ fn ensure_one(p: project::Project, d: project::Dep, pl: lock::Lock, use_lock: bo
         return ""      ;; path deps are not part of the global install/lock
     end
 
-    ;; locked commit (only when the Bit.lock knows it and no explicit rev is given)
-    let locked: lock::Locked = lock::lock_get(pl, dname)
-    let mut rev: string = project::dep_rev(d)
-    if use_lock && rev == "" && lock::locked_commit(locked) != "" is
-        rev = lock::locked_commit(locked)
+    if pk.pk_err != "" is
+        ui::bad(dname + "  " + ui::red(pk.pk_err))
+        return ""
     end
 
-    let spec: string = if kind == "git" then project::dep_arg(d) else dname
-    let want_build: bool = true
-    let opts: installer::InstallOpts = installer::iopts(force, want_build, project::dep_output(d),
+    let locked: lock::Locked = lock::lock_get(pl, dname)
+    let spec: string = spec_of(d)
+    let opts: installer::InstallOpts = installer::iopts(force, true, project::dep_output(d),
                                                        project::dep_lang(d), "", release, verbose)
-    if installer::install_lib(spec, rev, opts) != 0 is return "" end
+    if installer::install_lib(spec, pk.pk_rev, opts) != 0 is return "" end
 
     let installed: string = if kind == "git" then installer::repo_name_from_url(project::dep_arg(d)) else dname
     let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
@@ -82,30 +143,93 @@ pub fn ensure_deps(p: project::Project, verbose: bool, release: bool, use_lock: 
     if array_len(deps) == 0 is return 0 end
 
     project::cache_ensure(p)
-    ui::line(ui::bold("dependencies") + " " + ui::dim("(" + to_string(array_len(deps)) + ")"))
+    ui::line(ui::bold("dependencies") + " " + ui::dim("(" + to_string(array_len(deps)) + ")") +
+             (if net::offline() then "  " + ui::yellow("offline") else "") +
+             (if locked_only() then "  " + ui::dim("--locked") else ""))
     let mut pl: lock::Lock = lock::lock_read(project_lock_path(p))
-    let mut failed: int = 0
+
+    ;; 1. decide the revision of every dependency (ranges → tags)
+    let mut picks: [Pick] = []
     let mut i: int = 0
     while i < array_len(deps) is
+        picks = array_push(picks, pick_rev(deps[i], pl, use_lock))
+        i += 1
+    end
+
+    ;; 2. clone everything that is missing, several at a time
+    let mut items: [string] = []
+    i = 0
+    while i < array_len(deps) is
         let d: project::Dep = deps[i]
-        let installed: string = ensure_one(p, d, pl, use_lock, force, verbose, release)
+        let k: string = project::dep_kind(d)
+        if (k == "index" || k == "git") && picks[i].pk_err == "" && (force || !installer::is_installed(project::dep_name(d))) is
+            let url: string = installer::spec_url(spec_of(d))
+            if url != "" is items = array_push(items, url + "\t" + picks[i].pk_rev) end
+        end
+        i += 1
+    end
+    net::prefetch(items, verbose)
+
+    ;; 3. install / link, one by one
+    let mut failed: int = 0
+    i = 0
+    while i < array_len(deps) is
+        let d: project::Dep = deps[i]
+        let installed: string = ensure_one(p, d, picks[i], pl, use_lock, force, verbose, release)
         if installed == "" && project::dep_kind(d) != "path" is
             failed += 1
         else if installed != "" is
             let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
             let e: lock::Locked = lock::lock_get(gl, installed)
+            let tag: string = if semver::parse(picks[i].pk_rev) >= 0 then picks[i].pk_rev else lock::locked_tag(e)
             pl = lock::lock_set(pl, lock::Locked {
                 lk_name: project::dep_name(d), lk_version: lock::locked_version(e),
                 lk_commit: lock::locked_commit(e), lk_url: lock::locked_url(e),
                 lk_checksum: lock::locked_checksum(e), lk_lang: lock::locked_lang(e),
-                lk_output: lock::locked_output(e), lk_at: lock::locked_at(e)
+                lk_output: lock::locked_output(e), lk_at: lock::locked_at(e),
+                lk_range: picks[i].pk_range, lk_tag: tag
             })
         end
         i += 1
     end
-    if failed == 0 is lock::lock_write(project_lock_path(p), pl) end
+    if failed == 0 && !locked_only() is lock::lock_write(project_lock_path(p), pl) end
     ui::blank()
     return failed
+end
+
+;; `bit outdated`: what `bit upgrade` would change. Returns the number of outdated dependencies.
+pub fn outdated(p: project::Project) -> int is
+    let deps: [project::Dep] = project::deps(p)
+    let pl: lock::Lock = lock::lock_read(project_lock_path(p))
+    if net::offline() is
+        ui::fail("bit outdated needs the network (offline mode is on)")
+        return -1
+    end
+    ui::line(ui::bold("dependency") + "  " + ui::dim("locked → newest in range → newest overall"))
+    let mut count: int = 0
+    let mut i: int = 0
+    while i < array_len(deps) is
+        let d: project::Dep = deps[i]
+        let k: string = project::dep_kind(d)
+        if k == "index" || k == "git" is
+            let tags: [string] = net::remote_tags(installer::spec_url(spec_of(d)))
+            let locked: lock::Locked = lock::lock_get(pl, project::dep_name(d))
+            let cur: string = util::or_default(lock::locked_tag(locked), util::short_hash(lock::locked_commit(locked)))
+            let range: string = project::dep_range(d)
+            let in_range: string = if range != "" then semver::best_tag(tags, range) else semver::newest_tag(tags)
+            let newest: string = semver::newest_tag(tags)
+            let is_old: bool = in_range != "" && lock::locked_tag(locked) != "" && semver::parse(in_range) > semver::parse(lock::locked_tag(locked))
+            let beyond: bool = newest != "" && in_range != "" && semver::parse(newest) > semver::parse(in_range)
+            let mark: string = if is_old then ui::yellow("↑") else if beyond then ui::cyan("»") else ui::green("✓")
+            ui::line(mark + " " + project::dep_name(d) + "  " + ui::dim(util::or_default(cur, "not installed") + " → " +
+                     util::or_default(in_range, "-") + " → " + util::or_default(newest, "-")) +
+                     (if range != "" then "  " + ui::dim("(" + range + ")") else ""))
+            if is_old is count += 1 end
+        end
+        i += 1
+    end
+    if count == 0 is ui::ok("everything is up to date within its version ranges") end
+    return count
 end
 
 ;; ── bare `bit` ───────────────────────────────────────────────────────────────
