@@ -1,5 +1,9 @@
+use "bit -> progress-bar" from "pb"
 mod util
 mod ui
+mod net
+mod task
+mod semver
 mod hk
 mod index
 mod checksum
@@ -52,16 +56,6 @@ fn deeper(o: InstallOpts) -> InstallOpts is
 end
 
 ;; ── Fetching ─────────────────────────────────────────────────────────────────
-
-fn clone_cmd(url: string, rev: string, dest: string) -> string is
-    if rev == "" is
-        return "git clone --quiet --depth=1 " + util::sq(url) + " " + util::sq(dest)
-    end
-    ;; a branch/tag can be cloned shallow; a bare commit id needs a full fetch
-    return "git clone --quiet --depth=1 --branch " + util::sq(rev) + " " + util::sq(url) + " " + util::sq(dest) +
-           " 2>/dev/null || (rm -rf " + util::sq(dest) + " && git clone --quiet " + util::sq(url) + " " + util::sq(dest) +
-           " && git -C " + util::sq(dest) + " checkout --quiet " + util::sq(rev) + ")"
-end
 
 pub fn repo_name_from_url(url: string) -> string is
     let mut base: string = util::basename(url)
@@ -143,6 +137,29 @@ end
 
 ;; ── Install ──────────────────────────────────────────────────────────────────
 
+
+;; url of an index name / git url ("" when the library is not in the index)
+pub fn spec_url(spec: string) -> string is
+    if util::is_url(spec) is return spec end
+    let ix: index::Index = index::index_load()
+    let e: index::LibEntry = index::index_find(ix, spec)
+    return index::e_target(e)
+end
+
+;; Newest tag of `spec` that satisfies `range` ("" = none / offline / unreachable).
+;; A range with no operator (`1.2`) that matches no tag is taken as a plain rev.
+pub fn resolve_range(spec: string, range: string) -> string is
+    let url: string = spec_url(spec)
+    if url == "" is return "" end
+    let tags: [string] = net::remote_tags(url)
+    return semver::best_tag(tags, range)
+end
+
+fn looks_like_tag(rev: string) -> string is
+    if rev != "" && semver::parse(rev) >= 0 is return rev end
+    return ""
+end
+
 pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
     if o.io_depth > 8 is
         ui::fail("dependency chain too deep (cycle?) at " + spec)
@@ -184,8 +201,18 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
 
     ;; already there? (no network needed)
     if !o.io_force && is_installed(name) is
-        ui::note(name + " is already installed (bit upgrade " + name + " to refresh)")
-        return 0
+        let have: lock::Locked = lock::lock_get(lock::lock_read(lock::global_lock_path()), name)
+        let same_rev: bool = rev == "" || lock::locked_tag(have) == rev || lock::locked_commit(have) == rev ||
+                             string_starts_with(lock::locked_commit(have), rev)
+        if same_rev is
+            ui::note(name + " is already installed (bit upgrade " + name + " to refresh)")
+            return 0
+        end
+        ui::note(name + ": installed " + util::short_hash(lock::locked_commit(have)) + ", wanted " + rev + " — installing it")
+    end
+    if net::offline() is
+        ui::fail(name + " is not installed and bit is offline (BIT_OFFLINE / --offline)")
+        return 1
     end
 
     ui::line(ui::dim("fetching") + " " + ui::bold(name) + "  " + ui::dim(url))
@@ -194,10 +221,16 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
     util::rm_rf(tmp)
 
     ;; 2. clone
-    if util::run_retry(clone_cmd(url, rev, tmp), 3) != 0 is
-        ui::fail("git clone failed: " + url)
-        util::rm_rf(tmp)
-        return 1
+    let pre: string = net::prefetch_dir(url, rev)
+    if dir_exists(pre) && !o.io_force is
+        util::run("mv " + util::sq(pre) + " " + util::sq(tmp))
+    else is
+        if net::clone(url, rev, tmp, "cloning " + name, o.io_verbose) != 0 is
+            ui::fail("git clone failed: " + url)
+            ui::note("network trouble? retries: BIT_RETRIES, timeout: BIT_TIMEOUT, offline: BIT_OFFLINE=1")
+            util::rm_rf(tmp)
+            return 1
+        end
     end
     let commit: string = util::capture("git -C " + util::sq(tmp) + " rev-parse HEAD 2>/dev/null")
     if commit == "" is
@@ -255,7 +288,8 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
     let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
     lock::lock_write(lock::global_lock_path(), lock::lock_set(gl, lock::Locked {
         lk_name: name, lk_version: version, lk_commit: commit, lk_url: url,
-        lk_checksum: checksum::tag(sum), lk_lang: lang, lk_output: out_used, lk_at: util::now_iso()
+        lk_checksum: checksum::tag(sum), lk_lang: lang, lk_output: out_used, lk_at: util::now_iso(),
+        lk_range: "", lk_tag: looks_like_tag(rev)
     }))
 
     ui::ok(ui::bold(name) + " " + ui::dim("@ " + version + "  " + project::lang_label(lang) + "  " + out_used +
@@ -265,17 +299,40 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
     let dep_keys: [string] = hk::hk_keys(h, "dependencies")
     let mut failed: int = 0
     let mut i: int = 0
+    ;; progress: drawn by the progress-bar library, only worth it for 2+ dependencies
+    let mut pbar = pb::quick_bar(array_len(dep_keys), name + ": dependencies")
+    let show_bar: bool = array_len(dep_keys) > 1
     while i < array_len(dep_keys) is
         if !string_contains(dep_keys[i], ".") is
             let d: project::Dep = project::parse_dep(dep_keys[i], hk::hk_get(h, "dependencies", dep_keys[i], ""), h)
+            if show_bar is pbar.clear() end
             if project::dep_kind(d) == "invalid" is
                 ui::warn(name + ": dependency '" + dep_keys[i] + "' is declared dynamic — ignored (bit links statically)")
             else is
                 let dspec: string = if project::dep_kind(d) == "git" then project::dep_arg(d) else project::dep_name(d)
-                if install_lib(dspec, project::dep_rev(d), deeper(o)) != 0 is failed += 1 end
+                let mut drev: string = project::dep_rev(d)
+                if project::dep_range(d) != "" is
+                    drev = resolve_range(dspec, project::dep_range(d))
+                    if drev == "" is
+                        ui::bad(name + ": no version of " + project::dep_name(d) + " matches " + project::dep_range(d))
+                        failed += 1
+                    end
+                end
+                if drev != "" || project::dep_range(d) == "" is
+                    if install_lib(dspec, drev, deeper(o)) != 0 is failed += 1 end
+                end
             end
         end
         i += 1
+        pbar = pbar.inc(1)
+        if show_bar is pbar.draw() end
+    end
+    if show_bar is
+        if failed > 0 is
+            pbar = pbar.abandon(name + ": " + to_string(failed) + " dependency install(s) failed")
+        else is
+            pbar = pbar.finish(name + ": dependencies installed")
+        end
     end
     if failed > 0 is return 1 end
     return 0
@@ -317,9 +374,12 @@ pub fn verify_all(only: string) -> int is
     end
     let mut problems: int = 0
     let mut i: int = 0
+    let mut pbar = pb::quick_bar(n, "verifying libraries")
+    let show_bar: bool = only == "" && n > 1
     while i < n is
         let e: lock::Locked = lock::lock_at(gl, i)
         let name: string = lock::locked_name(e)
+        if show_bar is pbar.clear() end
         if only == "" || only == name is
             let dir: string = lib_dir(name, util::short_hash(lock::locked_commit(e)))
             if !dir_exists(dir) is
@@ -336,6 +396,15 @@ pub fn verify_all(only: string) -> int is
             end
         end
         i += 1
+        pbar = pbar.inc(1)
+        if show_bar is pbar.draw() end
+    end
+    if show_bar is
+        if problems > 0 is
+            pbar = pbar.abandon(to_string(problems) + " problem(s) found")
+        else is
+            pbar = pbar.finish("all libraries verified")
+        end
     end
     return problems
 end
