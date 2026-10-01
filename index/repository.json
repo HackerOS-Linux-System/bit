@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-09-29",
+  "updated_at": "2026-10-1",
   "libraries": [
     {
       "name": "mold",
@@ -278,6 +278,29 @@
         "HackerOS-Linux-System"
       ],
       "author": "HackerOS Team"
+    },
+    {
+      "name": "cranelift",
+      "target": "https://github.com/bit-io/cranelift",
+      "description": "Library bindings for cranelift (rust library).",
+      "tags": [
+        "rust",
+        "cranelift",
+        "codegen",
+        "jit"
+      ],
+      "author": "Bit Developers"
+    },
+    {
+      "name": "tauri",
+      "target": "https://github.com/bit-io/tauri",
+      "description": "Library bindings for tauri (rust library).",
+      "tags": [
+        "webview",
+        "tauri",
+        "rust"
+      ],
+      "author": "Bit Developers"
     }
   ]
 }
