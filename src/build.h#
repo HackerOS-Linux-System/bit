@@ -139,17 +139,24 @@ end
 
 ;; ── Static-linking guard ─────────────────────────────────────────────────────
 
+;; Only a real declaration counts: `extern dynamic` as the first tokens of a line. The old plain
+;; substring grep also matched bit's own sources (it mentions the phrase in messages and comments),
+;; so `bit` refused to build itself.
+fn dynamic_pattern() -> string is
+    return "^[[:space:]]*(pub[[:space:]]+)?extern[[:space:]]+dynamic([[:space:]]|[[])"
+end
+
 ;; Files of the project's own sources that use `extern dynamic` (H#).
 pub fn static_offenders(p: project::Project) -> string is
     let dir: string = project::root_of(p) + "/" + project::src_dir(p)
     if !dir_exists(dir) is return "" end
-    return util::capture("grep -rIl --include='*.h#' 'extern dynamic' " + util::sq(dir) + " 2>/dev/null")
+    return util::capture("grep -rIlE --include='*.h#' " + util::sq(dynamic_pattern()) + " " + util::sq(dir) + " 2>/dev/null")
 end
 
 ;; Same check on an arbitrary source tree (used for installed dependencies).
 pub fn static_offenders_in(dir: string) -> string is
     if !dir_exists(dir) is return "" end
-    return util::capture("grep -rIl --include='*.h#' 'extern dynamic' " + util::sq(dir) +
+    return util::capture("grep -rIlE --include='*.h#' " + util::sq(dynamic_pattern()) + " " + util::sq(dir) +
                          " 2>/dev/null | grep -v '/.bit/' | head -5")
 end
 
