@@ -1,0 +1,498 @@
+mod util
+mod ui
+mod project
+mod build
+mod workflow
+
+;; ── Developer tools ──────────────────────────────────────────────────────────
+;;   bit fmt [file] [--check]     format the sources (H# → `h# fmt`, HackerScript → `hackerc fmt`)
+;;   bit lint [file]              show warnings only
+;;   bit lsp [h#|hs]              run the language server over stdio
+;;   bit repair <code>            explain a diagnostic code (E0001, W0002, …)
+;;   bit test [filter]            run `#[test]` functions
+;;   bit doc [dir]                generate HTML documentation from `;;` comments
+
+fn files_of(p: project::Project, lang: string, only: string) -> [string] is
+    let root: string = project::root_of(p)
+    if only != "" is return [only] end
+    let mut cmd: string = ""
+    if lang == "hsharp" is
+        cmd = "cd " + util::sq(root) + " && find " + util::sq(project::src_dir(p)) + " tests -name '*.h#' 2>/dev/null | LC_ALL=C sort"
+    else if lang == "hackerscript" is
+        cmd = "cd " + util::sq(root) + " && find " + util::sq(project::cmd_dir(p)) + " " + util::sq(project::lib_dir(p)) + " -name '*.hcs' 2>/dev/null | LC_ALL=C sort"
+    else is
+        return []
+    end
+    let txt: string = util::capture(cmd)
+    let mut out: [string] = []
+    if txt == "" is return out end
+    let parts: [string] = string_split(txt, "\n")
+    let mut i: int = 0
+    while i < array_len(parts) is
+        if string_trim(parts[i]) != "" is out = array_push(out, string_trim(parts[i])) end
+        i += 1
+    end
+    return out
+end
+
+fn quoted(files: [string]) -> string is
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < array_len(files) is
+        out = out + " " + util::sq(files[i])
+        i += 1
+    end
+    return out
+end
+
+;; ── fmt ──────────────────────────────────────────────────────────────────────
+
+pub fn cmd_fmt(p: project::Project, only: string, check: bool, verbose: bool) -> int is
+    let o: build::BuildOpts = build::opts_new(false, verbose, "", "", "")
+    let langs: [string] = build::target_langs(p, o)
+    if array_len(langs) == 0 is
+        ui::fail("nothing to format — no sources found")
+        return 1
+    end
+    let mut failed: int = 0
+    let mut done: int = 0
+    let mut i: int = 0
+    while i < array_len(langs) is
+        let lang: string = langs[i]
+        if lang == "hackerlang" is
+            ui::note("Hacker Lang has no formatter yet — skipped")
+        else if !build::have_toolchain(lang) is
+            ui::bad(project::lang_label(lang) + "  toolchain not found")
+            ui::note(build::missing_tool_hint(lang))
+            failed += 1
+        else is
+            let tool: string = build::tool_for(lang)
+            let files: [string] = files_of(p, lang, only)
+            if array_len(files) == 0 is
+                ui::note(project::lang_label(lang) + ": no files")
+            else if lang == "hsharp" is
+                let cmd: string = tool + " fmt" + quoted(files) + (if check then " --check" else "")
+                if build::run_step(p, "H#  fmt" + (if check then " --check" else ""), cmd, verbose) != 0 is failed += 1 end
+                done += array_len(files)
+            else is
+                let mut k: int = 0
+                let mut bad: int = 0
+                while k < array_len(files) is
+                    let cmd: string = tool + " fmt " + util::sq(files[k]) + (if check then " --check" else "")
+                    if util::run(build::in_root(p, cmd + " >/dev/null 2>&1")) != 0 is
+                        bad += 1
+                        ui::bad(files[k] + (if check then "  " + ui::dim("would change") else ""))
+                    end
+                    k += 1
+                end
+                done += array_len(files)
+                if bad > 0 is failed += 1 else is ui::ok("HackerScript  " + to_string(array_len(files)) + " file(s) " + (if check then "formatted" else "formatted")) end
+            end
+        end
+        i += 1
+    end
+    if failed > 0 is return 1 end
+    if check && done > 0 is ui::ok("formatting is clean") end
+    return 0
+end
+
+;; ── lint ─────────────────────────────────────────────────────────────────────
+
+;; Keeps only the diagnostic blocks that are warnings (blocks are separated by blank lines).
+fn warnings_only(out: string) -> string is
+    let blocks: [string] = string_split(out, "\n\n")
+    let mut keep: string = ""
+    let mut i: int = 0
+    while i < array_len(blocks) is
+        let b: string = blocks[i]
+        if string_contains(b, "warning") || string_contains(b, "[W0") is
+            keep = keep + b + "\n\n"
+        end
+        i += 1
+    end
+    return keep
+end
+
+pub fn cmd_lint(p: project::Project, only: string, verbose: bool) -> int is
+    let o: build::BuildOpts = build::opts_new(false, verbose, "", "", "")
+    let langs: [string] = build::target_langs(p, o)
+    if array_len(langs) == 0 is
+        ui::fail("nothing to lint — no sources found")
+        return 1
+    end
+    let mut errors: int = 0
+    let mut warnings: int = 0
+    let mut i: int = 0
+    while i < array_len(langs) is
+        let lang: string = langs[i]
+        if lang == "hackerlang" is
+            ui::note("Hacker Lang has no linter — skipped")
+        else if !build::have_toolchain(lang) is
+            ui::bad(project::lang_label(lang) + "  toolchain not found")
+            ui::note(build::missing_tool_hint(lang))
+            errors += 1
+        else is
+            let tool: string = build::tool_for(lang)
+            let files: [string] = files_of(p, lang, only)
+            let mut cmd: string = ""
+            if lang == "hsharp" is
+                cmd = tool + " check" + quoted(files) + " 2>&1"
+            else is
+                let e: string = if only != "" then only else if project::entry_for(p, lang, "bin") != "" then project::entry_for(p, lang, "bin") else project::entry_for(p, lang, "lib")
+                cmd = tool + " lint " + util::sq(e) + " 2>&1"
+            end
+            let tmp: string = util::tmp_dir() + "/lint-" + to_string(proc_id()) + ".txt"
+            util::mkdir_p(util::tmp_dir())
+            let rc: int = util::run(build::in_root(p, cmd + " > " + util::sq(tmp)))
+            let out: string = if file_exists(tmp) then file_read(tmp) else ""
+            util::run("rm -f " + util::sq(tmp))
+            let w: string = warnings_only(out)
+            if w != "" is
+                write(w)
+                warnings += 1
+            end
+            if rc != 0 && w == "" is
+                write(out)
+                errors += 1
+            end
+        end
+        i += 1
+    end
+    if errors > 0 is return 1 end
+    if warnings == 0 is ui::ok("no warnings") end
+    return 0
+end
+
+;; ── lsp ──────────────────────────────────────────────────────────────────────
+
+pub fn cmd_lsp(which: string) -> int is
+    let w: string = string_lower(which)
+    let mut lang: string = "hsharp"
+    if w == "hs" || w == "hackerscript" || w == "hcs" is lang = "hackerscript" end
+    if w == "hl" || w == "hackerlang" is
+        ui::fail("Hacker Lang has no language server")
+        return 1
+    end
+    if !build::have_toolchain(lang) is
+        ui::fail(project::lang_label(lang) + " toolchain not found")
+        ui::note(build::missing_tool_hint(lang))
+        return 1
+    end
+    ;; stdio is inherited: the editor talks to the server directly
+    return util::run(build::tool_for(lang) + " lsp")
+end
+
+;; ── repair ───────────────────────────────────────────────────────────────────
+
+pub struct Diag is
+    pub dg_code:    string
+    pub dg_title:   string
+    pub dg_explain: string
+    pub dg_fix:     string
+end
+
+fn diag(code: string, title: string, explain: string, fix: string) -> Diag is
+    return Diag { dg_code: code, dg_title: title, dg_explain: explain, dg_fix: fix }
+end
+
+fn diagnostics() -> [Diag] is
+    return [
+        diag("E0001", "wrong number of arguments in a call",
+             "A function was called with a different number of arguments than its signature declares.",
+             "Count the parameters in the `fun` declaration and make the call match."),
+        diag("E0002", "missing `end <value>` in a function that returns a value",
+             "A function with a return type (-> Type) has no `end <expression>` on any path.",
+             "Add `end <value>` on every path that leaves the function, including every branch of `if` / `match`."),
+        diag("E0003", "unknown dependency source in `get <source:name>`",
+             "Known sources: bit, c, core, cpp, crates, extern, hlib, jsr, npm, pypi, selfhost, std, vira, work.",
+             "Fix the prefix in the `get` statement — usually a typo (`phyp` instead of `pypi`)."),
+        diag("E0005", "declared type of a variable does not match its value",
+             "`let x: T = expr` — the inferred type of `expr` differs from the explicit `T`.",
+             "Fix the annotation or the assigned value so they agree."),
+        diag("E0011", "`?` used in a function that does not return Result<T,E> or Option<T>",
+             "The `?` operator propagates Err/None to the ENCLOSING function, so its return type must be Result or Option.",
+             "Change the return type to `Result<...>` / `Option<...>`, or handle the error with `match` instead of `?`."),
+        diag("W0001", "unused variable",
+             "A variable declared with `let` is never read.",
+             "Remove it, or prefix the name with an underscore (`_name`) to silence the warning."),
+        diag("W0002", "call to an unknown function",
+             "The name is not a builtin, not declared in this file, and not a known struct / variant / import.",
+             "Check the spelling; if the name is right and comes from an import, the warning can be ignored for now.")
+    ]
+end
+
+fn common_prefix(a: string, b: string) -> int is
+    let mut n: int = 0
+    while n < string_len(a) && n < string_len(b) && string_at(a, n) == string_at(b, n) is n += 1 end
+    return n
+end
+
+pub fn cmd_repair(code: string) -> int is
+    if code == "" is
+        ui::fail("usage: bit repair <code>     e.g.  bit repair E0001")
+        return 2
+    end
+    let wanted: string = string_upper(string_trim(code))
+    let all: [Diag] = diagnostics()
+    let mut i: int = 0
+    while i < array_len(all) is
+        if all[i].dg_code == wanted is
+            ui::blank()
+            ui::line(ui::bold(all[i].dg_code) + "  " + all[i].dg_title)
+            ui::blank()
+            ui::line(all[i].dg_explain)
+            ui::blank()
+            ui::line(ui::green("fix: ") + all[i].dg_fix)
+            ui::blank()
+            return 0
+        end
+        i += 1
+    end
+    ui::fail("unknown diagnostic code '" + code + "'")
+    let mut best: string = ""
+    let mut score: int = 0
+    i = 0
+    while i < array_len(all) is
+        let s: int = common_prefix(wanted, all[i].dg_code)
+        if s > score is
+            score = s
+            best = all[i].dg_code
+        end
+        i += 1
+    end
+    if best != "" is ui::note("did you mean " + best + "?") end
+    let mut known: [string] = []
+    i = 0
+    while i < array_len(all) is
+        known = array_push(known, all[i].dg_code)
+        i += 1
+    end
+    ui::note("known codes: " + util::join(known, ", "))
+    return 1
+end
+
+;; ── test ─────────────────────────────────────────────────────────────────────
+;; A test is an H# function marked `#[test]` (in src/ or in tests/*.h#). bit compiles one
+;; harness per file — a copy of the file whose `main` is replaced by a dispatcher on argv[1] —
+;; and runs it once per test: exit code 0 is a pass. `assert(cond, msg)` / `panic(msg)` fail a test.
+
+fn test_names(content: string) -> [string] is
+    let lines: [string] = string_split(content, "\n")
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i + 1 < array_len(lines) is
+        if string_trim(lines[i]) == "#[test]" is
+            let next: string = string_trim(lines[i + 1])
+            if string_starts_with(next, "fn ") || string_starts_with(next, "pub fn ") is
+                let rest: string = if string_starts_with(next, "pub fn ") then string_slice(next, 7, string_len(next)) else string_slice(next, 3, string_len(next))
+                let paren: int = string_find(rest, "(")
+                if paren > 0 is out = array_push(out, string_trim(string_slice(rest, 0, paren))) end
+            end
+        end
+        i += 1
+    end
+    return out
+end
+
+fn harness_text(content: string, names: [string]) -> string is
+    let mut body: string = string_replace(content, "#[test]\n", "")
+    body = string_replace(body, "fn main()", "fn bit_original_main()")
+    let mut dispatch: string = ""
+    let mut i: int = 0
+    while i < array_len(names) is
+        dispatch = dispatch + "    if which == \"" + names[i] + "\" is\n        " + names[i] + "()\n        return\n    end\n"
+        i += 1
+    end
+    return body + "\n\nfn main() is\n    let args: [string] = env::args()\n    let which: string = if array_len(args) > 1 then args[1] else \"\"\n" +
+           dispatch + "end\n"
+end
+
+pub struct TestTotals is
+    pub tt_passed: int
+    pub tt_failed: int
+    pub tt_files:  int
+end
+
+fn test_files(p: project::Project) -> [string] is
+    let root: string = project::root_of(p)
+    let txt: string = util::capture("cd " + util::sq(root) + " && { find tests -name '*.h#' 2>/dev/null; grep -rl '#\\[test\\]' " +
+                                    util::sq(project::src_dir(p)) + " --include='*.h#' 2>/dev/null; } | LC_ALL=C sort -u")
+    let mut out: [string] = []
+    if txt == "" is return out end
+    let parts: [string] = string_split(txt, "\n")
+    let mut i: int = 0
+    while i < array_len(parts) is
+        if string_trim(parts[i]) != "" is out = array_push(out, string_trim(parts[i])) end
+        i += 1
+    end
+    return out
+end
+
+fn run_file_tests(p: project::Project, rel: string, filter: string, verbose: bool) -> TestTotals is
+    let root: string = project::root_of(p)
+    let path: string = root + "/" + rel
+    let content: string = file_read(path)
+    let names: [string] = test_names(content)
+    let mut t: TestTotals = TestTotals { tt_passed: 0, tt_failed: 0, tt_files: 0 }
+    if array_len(names) == 0 is return t end
+
+    let mut picked: [string] = []
+    let mut i: int = 0
+    while i < array_len(names) is
+        if filter == "" || string_contains(names[i], filter) || string_contains(rel, filter) is picked = array_push(picked, names[i]) end
+        i += 1
+    end
+    if array_len(picked) == 0 is return t end
+    t = TestTotals { tt_passed: 0, tt_failed: 0, tt_files: 1 }
+    ui::line(ui::dim(rel))
+
+    let dir: string = util::dirname(path)
+    let stem: string = util::basename(path)
+    let harness: string = dir + "/_bit_test_" + stem
+    let out_bin: string = project::cache_build(p) + "/test/" + string_replace(rel, "/", "_")
+    util::mkdir_p(util::dirname(out_bin))
+    file_write(harness, harness_text(content, picked))
+    let rc: int = util::run(build::in_root(p, build::tool_for("hsharp") + " compile " + util::sq(harness) + " -o " + util::sq(out_bin) +
+                                              (if verbose then "" else " >/dev/null 2>&1")))
+    util::run("rm -f " + util::sq(harness))
+    if rc != 0 is
+        ui::bad("    " + ui::red("does not compile") + "  " + ui::dim("(run `bit check`)"))
+        return TestTotals { tt_passed: 0, tt_failed: array_len(picked), tt_files: 1 }
+    end
+
+    let mut passed: int = 0
+    let mut failed: int = 0
+    i = 0
+    while i < array_len(picked) is
+        let t0: int = time_ms()
+        let rc2: int = util::run(build::in_root(p, util::sq(out_bin) + " " + picked[i] + (if verbose then "" else " >/dev/null 2>&1")))
+        let ms: string = ui::dim("(" + util::elapsed_str(time_ms() - t0) + ")")
+        if rc2 == 0 is
+            ui::ok("    " + picked[i] + "  " + ms)
+            passed += 1
+        else is
+            ui::bad("    " + picked[i] + "  " + ui::red("failed") + " " + ms)
+            failed += 1
+        end
+        i += 1
+    end
+    return TestTotals { tt_passed: passed, tt_failed: failed, tt_files: 1 }
+end
+
+pub fn cmd_test(p: project::Project, filter: string, verbose: bool, release: bool) -> int is
+    ui::blank()
+    ui::heading("bit test")
+    if !build::have_toolchain("hsharp") is
+        ui::fail("H# toolchain not found")
+        ui::note(build::missing_tool_hint("hsharp"))
+        return 1
+    end
+    if workflow::ensure_deps(p, verbose, release, true, false) != 0 is return 1 end
+    if workflow::ensure_dev_deps(p, verbose, release, true, false) != 0 is return 1 end
+
+    let files: [string] = test_files(p)
+    if array_len(files) == 0 is
+        ui::note("no tests found. Mark functions with `#[test]` in " + project::src_dir(p) + "/ or put files in tests/")
+        ui::blank()
+        return 0
+    end
+    let mut passed: int = 0
+    let mut failed: int = 0
+    let mut nfiles: int = 0
+    let mut i: int = 0
+    while i < array_len(files) is
+        let t: TestTotals = run_file_tests(p, files[i], filter, verbose)
+        passed += t.tt_passed
+        failed += t.tt_failed
+        nfiles += t.tt_files
+        i += 1
+    end
+    ui::blank()
+    if passed + failed == 0 is
+        ui::note("no test matched" + (if filter != "" then " '" + filter + "'" else ""))
+        return 0
+    end
+    if failed == 0 is
+        ui::ok(to_string(passed) + " passed in " + to_string(nfiles) + " file(s)")
+        ui::blank()
+        return 0
+    end
+    ui::fail(to_string(failed) + " failed, " + to_string(passed) + " passed")
+    ui::blank()
+    return 1
+end
+
+;; ── doc ──────────────────────────────────────────────────────────────────────
+;; Every `pub fn` / `pub struct` / `pub enum` becomes an entry; the `;;` lines right above it
+;; are its description. The result is one self-contained HTML page per project.
+
+fn html_esc(s: string) -> string is
+    return string_replace(string_replace(string_replace(s, "&", "&amp;"), "<", "&lt;"), ">", "&gt;")
+end
+
+fn doc_for_file(rel: string, content: string) -> string is
+    let lines: [string] = string_split(content, "\n")
+    let mut out: string = ""
+    let mut pending: string = ""
+    let mut has_items: bool = false
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let l: string = string_trim(lines[i])
+        if string_starts_with(l, ";;") is
+            let text: string = string_trim(string_slice(l, 2, string_len(l)))
+            if pending == "" is pending = text else is pending = pending + " " + text end
+        else if string_starts_with(l, "pub fn ") || string_starts_with(l, "pub struct ") || string_starts_with(l, "pub enum ") is
+            let is_fn: bool = string_starts_with(l, "pub fn ")
+            let head: string = if is_fn then string_replace(l, " is", "") else l
+            let sig: string = if is_fn && string_contains(l, " is") then string_slice(l, 0, string_find(l, " is")) else l
+            out = out + "<section><h3><code>" + html_esc(if is_fn then sig else head) + "</code></h3>" +
+                  (if pending != "" then "<p>" + html_esc(pending) + "</p>" else "") + "</section>\n"
+            has_items = true
+            pending = ""
+        else is
+            pending = ""
+        end
+        i += 1
+    end
+    if !has_items is return "" end
+    return "<h2 id=\"" + html_esc(rel) + "\">" + html_esc(rel) + "</h2>\n" + out
+end
+
+pub fn cmd_doc(p: project::Project, out_arg: string) -> int is
+    let root: string = project::root_of(p)
+    let out_dir: string = if out_arg != "" then out_arg else root + "/docs/generated"
+    let listing: string = util::capture("cd " + util::sq(root) + " && find " + util::sq(project::src_dir(p)) + " -name '*.h#' 2>/dev/null | LC_ALL=C sort")
+    if listing == "" is
+        ui::fail("no .h# files found in " + project::src_dir(p) + "/")
+        return 1
+    end
+    let files: [string] = string_split(listing, "\n")
+    let mut body: string = ""
+    let mut toc: string = ""
+    let mut count: int = 0
+    let mut i: int = 0
+    while i < array_len(files) is
+        let rel: string = string_trim(files[i])
+        if rel != "" && file_exists(root + "/" + rel) is
+            let d: string = doc_for_file(rel, file_read(root + "/" + rel))
+            if d != "" is
+                body = body + d
+                toc = toc + "<li><a href=\"#" + html_esc(rel) + "\">" + html_esc(rel) + "</a></li>\n"
+                count += 1
+            end
+        end
+        i += 1
+    end
+    util::mkdir_p(out_dir)
+    let css: string = ":root{{color-scheme:light dark;--bg:#fff;--fg:#1b1f23;--mut:#6a737d;--bd:#d0d7de}}" +
+        "@media(prefers-color-scheme:dark){{:root{{--bg:#0d1117;--fg:#e6edf3;--mut:#8b949e;--bd:#30363d}}}}" +
+        "body{{background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,sans-serif;max-width:860px;margin:2rem auto;padding:0 1rem}}" +
+        "code{{font-family:ui-monospace,monospace}}section{{border-top:1px solid var(--bd);padding:.25rem 0}}p{{color:var(--mut);margin:.2rem 0 .8rem}}" +
+        "h3{{font-size:1rem;margin:.6rem 0 .1rem}}"
+    let html: string = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
+        "<title>" + html_esc(project::name_of(p)) + " — documentation</title><style>" + css + "</style></head><body>" +
+        "<h1>" + html_esc(project::name_of(p)) + " <small>" + html_esc(project::version_of(p)) + "</small></h1><ul>" + toc + "</ul>" + body + "</body></html>\n"
+    file_write(out_dir + "/index.html", html)
+    ui::ok("documented " + to_string(count) + " file(s)  " + ui::dim("→ " + out_dir + "/index.html"))
+    return 0
+end
