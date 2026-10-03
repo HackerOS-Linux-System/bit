@@ -15,22 +15,12 @@ pub fn norm_section(raw: string) -> string is
     return string_replace(string_replace(t, " ", "-"), "_", "-")
 end
 
-fn warned_old_syntax() -> bool is return env_get("BIT_WARNED_OLD_HK") != "" end
-
-;; Parses manifest text. Manifests written in bit's old dialect (`;;` comments,
-;; `key = value`, a value plus `-->` sub-keys, trailing comments) are rewritten in
-;; memory to hk-parser's grammar first — with a warning pointing at `bit migrate`,
-;; which rewrites the file for good. A real syntax error is reported once and
-;; yields an empty document, so callers fall back to their defaults.
+;; Parses manifest text with the hk-parser library. Comments are whole lines that
+;; start with `!`; a key is either a value or a map, never both. A syntax error
+;; is reported once and yields an empty document, so callers fall back to their
+;; defaults.
 pub fn hk_parse(text: string) -> Hk is
-    let fixed: string = migrate_text(text)
-    if fixed != text is
-        if !warned_old_syntax() is
-            write("  warning: Bit.hk uses the old syntax — read in compatibility mode. Run `bit migrate` to rewrite it.")
-            env_set("BIT_WARNED_OLD_HK", "1")
-        end
-    end
-    let cfg: hkp::HkConfig = hkp::parse(fixed)
+    let cfg: hkp::HkConfig = hkp::parse(text)
     if !cfg.is_valid() is
         write("bit: cannot parse manifest: " + hkp::last_error())
         return hk_empty()
@@ -74,7 +64,8 @@ fn array_text(h: Hk, path: string) -> string is
     return out + "]"
 end
 
-pub fn hk_get(h: Hk, section: string, key: string, fallback: string) -> string is
+;; The raw text of a value, interpolations not yet resolved.
+fn raw_get(h: Hk, section: string, key: string, fallback: string) -> string is
     let path: string = path_of(real_section(h, section), key)
     if !h.hk_cfg.has(path) is return fallback end
     let t: string = h.hk_cfg.type_of(path)
@@ -87,6 +78,55 @@ pub fn hk_get(h: Hk, section: string, key: string, fallback: string) -> string i
     let v: string = h.hk_cfg.get(path)
     if v == "" is return fallback end
     return v
+end
+
+;; ── Interpolation ────────────────────────────────────────────────────────────
+;;   ${env:NAME}          an environment variable ("" when unset)
+;;   ${section.key}       another value of the same file, e.g. ${package.version}
+;;   ${section.key.sub}   a sub-key:  ${dependencies.mine.git}
+;; A reference may itself contain references; a cycle is an error (the text is left as written).
+
+fn interpolate(h: Hk, text: string, visiting: [string], depth: int) -> string is
+    if !string_contains(text, "${") || depth > 16 is return text end
+    let mut out: string = ""
+    let mut rest: string = text
+    while string_contains(rest, "${") is
+        let start: int = string_find(rest, "${")
+        out = out + string_slice(rest, 0, start)
+        let after: string = string_slice(rest, start + 2, string_len(rest))
+        let close: int = string_find(after, "}")
+        if close < 0 is
+            out = out + "${" + after
+            rest = ""
+        else is
+            let expr: string = string_trim(string_slice(after, 0, close))
+            rest = string_slice(after, close + 1, string_len(after))
+            if string_starts_with(expr, "env:") is
+                out = out + env_get(string_slice(expr, 4, string_len(expr)))
+            else if util::array_has(visiting, expr) is
+                write("bit: Bit.hk: circular reference ${" + expr + "}")
+                out = out + "${" + expr + "}"
+            else is
+                let dot: int = string_find(expr, ".")
+                let sec: string = if dot > 0 then string_slice(expr, 0, dot) else expr
+                let key: string = if dot > 0 then string_slice(expr, dot + 1, string_len(expr)) else ""
+                let v: string = raw_get(h, sec, key, "@@bit-unset@@")
+                if v == "@@bit-unset@@" is
+                    write("bit: Bit.hk: ${" + expr + "} refers to nothing")
+                    out = out + "${" + expr + "}"
+                else is
+                    out = out + interpolate(h, v, array_push(visiting, expr), depth + 1)
+                end
+            end
+        end
+    end
+    return out
+end
+
+pub fn hk_get(h: Hk, section: string, key: string, fallback: string) -> string is
+    let v: string = raw_get(h, section, key, "@@bit-unset@@")
+    if v == "@@bit-unset@@" is return fallback end
+    return interpolate(h, v, [], 0)
 end
 
 pub fn hk_has(h: Hk, section: string, key: string) -> bool is
@@ -113,7 +153,7 @@ pub fn hk_list(value: string) -> [string] is
     let mut i: int = 0
     while i < array_len(parts) is
         let p: string = string_trim(parts[i])
-        let mut v: string = p
+        let mut v: string = string_trim(parts[i])
         if string_len(p) >= 2 && string_starts_with(p, "\"") && string_ends_with(p, "\"") is
             v = string_slice(p, 1, string_len(p) - 1)
         end
@@ -130,123 +170,24 @@ pub fn hk_pkg(h: Hk, key: string, fallback: string) -> string is
     return hk_get(h, "project", key, fallback)
 end
 
-
-;; ── Migration from bit's old Bit.hk dialect ──────────────────────────────────
-
-;; Cuts a trailing `;;` comment (outside double quotes). Returns [value, comment].
-fn split_trailing(v: string) -> [string] is
-    let n: int = string_len(v)
-    let mut in_str: bool = false
-    let mut i: int = 0
-    while i < n - 1 is
-        let c: string = string_at(v, i)
-        if c == "\"" is in_str = !in_str end
-        if !in_str && c == ";" && string_at(v, i + 1) == ";" is
-            return [string_trim(string_slice(v, 0, i)), string_trim(string_slice(v, i + 2, n))]
-        end
-        i += 1
-    end
-    return [v, ""]
-end
-
-fn unquote(v: string) -> string is
-    let t: string = string_trim(v)
-    if string_len(t) >= 2 && string_starts_with(t, "\"") && string_ends_with(t, "\"") is
-        return string_slice(t, 1, string_len(t) - 1)
-    end
-    return t
-end
-
-fn is_skip_line(t: string) -> bool is
-    return t == "" || string_starts_with(t, ";;") || string_starts_with(t, "!") || string_starts_with(t, "#")
-end
-
-;; Does the next entry line (skipping blanks/comments) start with `-->`?
-fn next_is_sub(lines: [string], from: int) -> bool is
-    let mut j: int = from
-    while j < array_len(lines) is
-        let t: string = string_trim(lines[j])
-        if !is_skip_line(t) is
-            return string_starts_with(t, "-->") && !string_starts_with(t, "--->")
-        end
-        j += 1
-    end
-    return false
-end
-
-;; Rewrites old-dialect text into hk-parser's grammar. Lines that are already
-;; fine are copied verbatim, so text that needs no change comes back unchanged
-;; (`migrate_text(t) == t`), which is how `bit migrate --check` decides.
-pub fn migrate_text(text: string) -> string is
-    let lines: [string] = string_split(string_replace(text, "\r", ""), "\n")
-    let mut out: [string] = []
-    let mut changed: bool = false
-    let mut i: int = 0
-    while i < array_len(lines) is
-        let raw: string = lines[i]
-        let t: string = string_trim(raw)
-        i += 1
-        if string_starts_with(t, ";;") is
-            out = array_push(out, "! " + string_trim(string_slice(t, 2, string_len(t))))
-            changed = true
-        else if string_starts_with(t, "#") is
-            out = array_push(out, "! " + string_trim(string_slice(t, 1, string_len(t))))
-            changed = true
-        else if t == "" || string_starts_with(t, "!") || (string_starts_with(t, "[") && string_ends_with(t, "]")) is
-            out = array_push(out, raw)
-        else if string_starts_with(t, "--->") is
-            out = array_push(out, raw)          ;; deeper nesting is hk-parser native
-        else is
-            let sub: bool = string_starts_with(t, "-->")
-            let mut body: string = t
-            if sub is body = string_trim(string_slice(t, 3, string_len(t)))
-            else if string_starts_with(t, "->") is body = string_trim(string_slice(t, 2, string_len(t)))
-            end
-            let had_arrow_prefix: bool = string_starts_with(t, "->")
-            let arrow: int = string_find(body, "=>")
-            let eq: int = string_find(body, "=")
-            let mut key: string = ""
-            let mut val: string = ""
-            let mut dirty: bool = !(sub || had_arrow_prefix)
-            if arrow >= 0 is
-                key = string_trim(string_slice(body, 0, arrow))
-                val = string_slice(body, arrow + 2, string_len(body))
-            else if eq >= 0 is
-                key = string_trim(string_slice(body, 0, eq))
-                val = string_slice(body, eq + 1, string_len(body))
-                dirty = true
-            else is
-                key = string_trim(body)
-            end
-            let parts: [string] = split_trailing(string_trim(val))
-            let comment: string = parts[1]
-            if comment != "" is dirty = true end
-            let value: string = string_trim(parts[0])
-            let has_children: bool = !sub && value != "" && next_is_sub(lines, i)
-            if has_children is dirty = true end
-
-            if !dirty is
-                out = array_push(out, raw)
-            else is
-                changed = true
-                if comment != "" is out = array_push(out, "! " + comment) end
-                let k: string = unquote(key)
-                if sub is
-                    out = array_push(out, if value == "" then "--> " + k else "--> " + k + " => " + unquote(value))
-                else if has_children is
-                    out = array_push(out, "-> " + k)
-                    out = array_push(out, "--> value => " + unquote(value))
-                else is
-                    out = array_push(out, if value == "" then "-> " + k else "-> " + k + " => " + unquote(value))
-                end
-            end
-        end
-    end
-    if !changed is return text end
-    return util::join(out, "\n")
-end
-
-;; Would this text parse (after migration)?
+;; Would this text parse?
 pub fn hk_valid(text: string) -> bool is
-    return hkp::parse(migrate_text(text)).is_valid()
+    return hkp::parse(text).is_valid()
+end
+
+;; Direct children of a map key: `hk_sub_keys(h, "dependencies", "mine")` ->
+;; ["git", "dir", "rev"] for   -> mine / --> git => … / --> dir => …
+pub fn hk_sub_keys(h: Hk, section: string, key: string) -> [string] is
+    let path: string = path_of(real_section(h, section), key)
+    if !h.hk_cfg.has(path) is return [] end
+    if h.hk_cfg.type_of(path) != "map" is return [] end
+    return h.hk_cfg.keys(path)
+end
+
+;; `true|yes|1|on` / `false|no|0|off`
+pub fn hk_bool(h: Hk, section: string, key: string, fallback: bool) -> bool is
+    let v: string = string_lower(hk_get(h, section, key, ""))
+    if v == "true" || v == "yes" || v == "1" || v == "on" is return true end
+    if v == "false" || v == "no" || v == "0" || v == "off" is return false end
+    return fallback
 end
