@@ -5,6 +5,8 @@ mod index
 mod project
 mod task
 mod native
+mod sysdeps
+mod net
 
 pub struct BuildOpts is
     pub bo_release:  bool
@@ -13,6 +15,10 @@ pub struct BuildOpts is
     pub bo_platform: string
     pub bo_emit:     string     ;; "" = auto | bin | lib | hlib | so | a | obj
     pub bo_sign:     string     ;; path to an Ed25519 key for hlib signing
+    pub bo_wasm:     bool       ;; HackerScript: build a WebAssembly module (`--wasm`)
+    pub bo_jar:      bool       ;; HackerScript: pack the generated Java classes (`--jar`)
+    pub bo_rlib:     bool       ;; HackerScript: build a Rust library (`--library`, .rlib)
+    pub bo_bin:      string     ;; build only this binary (`--bin NAME`), "" = all of them
 end
 
 pub fn opts_new(release: bool, verbose: bool, target: string, platform: string, emit: string) -> BuildOpts is
@@ -20,16 +26,41 @@ pub fn opts_new(release: bool, verbose: bool, target: string, platform: string, 
     let plat: string = if platform != "" then platform else if lang == "" then target else ""
     return BuildOpts {
         bo_release: release, bo_verbose: verbose, bo_lang: lang,
-        bo_platform: plat, bo_emit: string_lower(emit), bo_sign: ""
+        bo_platform: plat, bo_emit: string_lower(emit), bo_sign: "",
+        bo_wasm: false, bo_jar: false, bo_rlib: false, bo_bin: ""
     }
 end
 
 pub fn opts_with_sign(o: BuildOpts, key: string) -> BuildOpts is
     return BuildOpts { bo_release: o.bo_release, bo_verbose: o.bo_verbose, bo_lang: o.bo_lang,
-                       bo_platform: o.bo_platform, bo_emit: o.bo_emit, bo_sign: key }
+                       bo_platform: o.bo_platform, bo_emit: o.bo_emit, bo_sign: key,
+                       bo_wasm: o.bo_wasm, bo_jar: o.bo_jar, bo_rlib: o.bo_rlib, bo_bin: o.bo_bin }
+end
+
+;; `--wasm`, `--jar`, `--library` (rlib) and `--bin NAME`
+pub fn opts_with_targets(o: BuildOpts, wasm: bool, jar: bool, rlib: bool, bin: string) -> BuildOpts is
+    return BuildOpts { bo_release: o.bo_release, bo_verbose: o.bo_verbose, bo_lang: o.bo_lang,
+                       bo_platform: o.bo_platform, bo_emit: o.bo_emit, bo_sign: o.bo_sign,
+                       bo_wasm: wasm, bo_jar: jar, bo_rlib: rlib, bo_bin: bin }
+end
+
+pub fn opts_with_release(o: BuildOpts, release: bool) -> BuildOpts is
+    return BuildOpts { bo_release: release, bo_verbose: o.bo_verbose, bo_lang: o.bo_lang,
+                       bo_platform: o.bo_platform, bo_emit: o.bo_emit, bo_sign: o.bo_sign,
+                       bo_wasm: o.bo_wasm, bo_jar: o.bo_jar, bo_rlib: o.bo_rlib, bo_bin: o.bo_bin }
+end
+
+pub fn opts_bin(o: BuildOpts) -> string is return o.bo_bin end
+
+;; Same options for one language (`--target` of a member that declares its language in the workspace).
+pub fn opts_with_lang(o: BuildOpts, lang: string) -> BuildOpts is
+    return BuildOpts { bo_release: o.bo_release, bo_verbose: o.bo_verbose, bo_lang: lang,
+                       bo_platform: o.bo_platform, bo_emit: o.bo_emit, bo_sign: o.bo_sign,
+                       bo_wasm: o.bo_wasm, bo_jar: o.bo_jar, bo_rlib: o.bo_rlib, bo_bin: o.bo_bin }
 end
 
 pub fn opts_release(o: BuildOpts) -> bool is return o.bo_release end
+pub fn opts_verbose(o: BuildOpts) -> bool is return o.bo_verbose end
 pub fn opts_lang(o: BuildOpts)    -> string is return o.bo_lang end
 
 ;; Options for `[default-build]` — what a bare `bit` (and `bit build` without
@@ -56,7 +87,7 @@ end
 
 ;; ── Effective settings (CLI flags win over Bit.hk) ───────────────────────────
 
-fn build_platform(p: project::Project, o: BuildOpts) -> string is
+pub fn build_platform(p: project::Project, o: BuildOpts) -> string is
     if o.bo_platform != "" is return o.bo_platform end
     let explicit: string = project::get(p, "build", "platform", "")
     if explicit != "" is return explicit end
@@ -65,14 +96,14 @@ fn build_platform(p: project::Project, o: BuildOpts) -> string is
     return ""
 end
 
-fn target_langs(p: project::Project, o: BuildOpts) -> [string] is
+pub fn target_langs(p: project::Project, o: BuildOpts) -> [string] is
     if o.bo_lang != "" is return [o.bo_lang] end
     let t: string = index::normalize_lang(project::get(p, "build", "target", ""))
     if t != "" is return [t] end
     return project::langs(p)
 end
 
-fn short_lang(lang: string) -> string is
+pub fn short_lang(lang: string) -> string is
     if lang == "hackerlang" is return "hl" end
     if lang == "hackerscript" is return "hs" end
     return "hsharp"
@@ -124,7 +155,7 @@ end
 
 ;; ── Platform mapping (HackerScript compiles through cargo) ───────────────────
 
-fn rust_triple(platform: string) -> string is
+pub fn rust_triple(platform: string) -> string is
     if platform == "linux-aarch64" is return "aarch64-unknown-linux-musl" end
     if platform == "linux-riscv64" || platform == "linux-riscv64-musl" is return "riscv64gc-unknown-linux-musl" end
     if platform == "linux-x86_64" || platform == "linux" || platform == "" is
@@ -146,11 +177,11 @@ fn env_prefix(p: project::Project) -> string is
            " HLIB_PATH=" + util::sq(util::libs_dir()) + " "
 end
 
-fn in_root(p: project::Project, cmd: string) -> string is
+pub fn in_root(p: project::Project, cmd: string) -> string is
     return "cd " + util::sq(project::root_of(p)) + " && " + env_prefix(p) + cmd
 end
 
-fn run_step(p: project::Project, label: string, cmd: string, verbose: bool) -> int is
+pub fn run_step(p: project::Project, label: string, cmd: string, verbose: bool) -> int is
     if verbose is ui::note("$ " + cmd) end
     let t0: int = time_ms()
     let animated: bool = !verbose && task::is_tty()
@@ -249,17 +280,159 @@ fn build_hl_lib(p: project::Project, o: BuildOpts, entry: string, dir: string, o
     return 1
 end
 
-;; HackerScript = hackerc (→ cargo crate) + cargo. Static: crt-static + musl.
-fn build_hs_cargo(p: project::Project, o: BuildOpts, entry: string, dir: string, library: bool) -> int is
-    let name: string = project::name_of(p)
-    let crate: string = string_replace(name, "-", "_")
+
+;; ── HackerScript: hackerc (→ cargo crate) + cargo ────────────────────────────
+;; Static: crt-static + musl. Extra pieces, all driven by Bit.hk:
+;;   [native-sources]   own .c / .cpp files, compiled with the `cc` crate from a generated build.rs
+;;   vira dependencies  static-lib / rust-lib files fetched by `bit install`
+;;   --wasm  --jar  --library  (see HsMode)
+
+;; `HsMode.hm_kind`: bin | lib (.a) | rlib | wasm | jar
+pub struct HsMode is
+    pub hm_kind: string
+    pub hm_bin:  string      ;; binary name for kind bin
+end
+
+fn crate_of(name: string) -> string is
+    return string_replace(name, "-", "_")
+end
+
+;; `libfoo.a` -> ("dir", "foo", "static") lines for build.rs. Shared objects cannot be linked statically.
+fn link_lines_for_file(file: string, dep: string) -> string is
+    let dir: string = util::dirname(file)
+    let base: string = util::basename(file)
+    if string_ends_with(base, ".a") || string_ends_with(base, ".lib") is
+        let stem: string = string_replace(string_replace(base, ".lib", ""), ".a", "")
+        let libname: string = if string_starts_with(stem, "lib") then string_slice(stem, 3, string_len(stem)) else stem
+        return "    println!(\"cargo:rustc-link-search=native=" + dir + "\");\n" +
+               "    println!(\"cargo:rustc-link-lib=static=" + libname + "\");\n"
+    end
+    return ""
+end
+
+;; Reads cache/libs/vira/<dep>/.vira-meta.txt  (type=…  file=…).
+fn vira_meta(dir: string, key: string) -> string is
+    let f: string = dir + "/.vira-meta.txt"
+    if !file_exists(f) is return "" end
+    return util::capture("grep '^" + key + "=' " + util::sq(f) + " | head -1 | cut -d= -f2-")
+end
+
+;; RUSTFLAGS additions and build.rs lines for the vira dependencies of the project.
+pub struct ViraWiring is
+    pub vw_lines:  string      ;; build.rs statements
+    pub vw_rustc:  string      ;; extra RUSTFLAGS (--extern / -L for rust-libs)
+    pub vw_errors: int
+end
+
+fn vira_wiring(p: project::Project) -> ViraWiring is
+    let deps: [project::Dep] = project::deps(p)
+    let mut lines: string = ""
+    let mut rustc: string = ""
+    let mut errors: int = 0
+    let mut i: int = 0
+    while i < array_len(deps) is
+        let d: project::Dep = deps[i]
+        if project::dep_kind(d) == "vira" is
+            let dir: string = project::cache_libs(p) + "/vira/" + project::dep_name(d)
+            let kind: string = vira_meta(dir, "type")
+            let file: string = vira_meta(dir, "file")
+            if kind == "static-lib" is
+                lines = lines + link_lines_for_file(file, project::dep_name(d))
+            else if kind == "rust-lib" is
+                rustc = rustc + " --extern " + crate_of(project::dep_name(d)) + "=" + file + " -L dependency=" + util::dirname(file)
+            else if kind == "shared-lib" is
+                ui::fail(project::dep_name(d) + ": a vira shared-lib cannot be linked — bit links statically (use a static-lib or a git dependency)")
+                errors += 1
+            end
+        end
+        i += 1
+    end
+    return ViraWiring { vw_lines: lines, vw_rustc: rustc, vw_errors: errors }
+end
+
+fn cc_call(root: string, files: [string], cpp: bool, incs: [string], flags: string, label: string) -> string is
+    let mut c: string = "    cc::Build::new()" + (if cpp then ".cpp(true)" else "")
+    let mut i: int = 0
+    while i < array_len(files) is
+        c = c + ".file(\"" + root + "/" + files[i] + "\")"
+        i += 1
+    end
+    i = 0
+    while i < array_len(incs) is
+        c = c + ".include(\"" + root + "/" + incs[i] + "\")"
+        i += 1
+    end
+    let fl: [string] = util::words(flags)
+    i = 0
+    while i < array_len(fl) is
+        c = c + ".flag(\"" + fl[i] + "\")"
+        i += 1
+    end
+    return c + ".compile(\"" + label + "\");\n"
+end
+
+;; Writes/extends build.rs of the generated crate with [native-sources] and vira link lines.
+fn wire_crate(p: project::Project, crate_dir: string, vw: ViraWiring) -> int is
+    let c: [string] = project::native_c(p)
+    let cpp: [string] = project::native_cpp(p)
+    let mut body: string = vw.vw_lines
+    let root: string = project::root_of(p)
+    if array_len(c) > 0 is
+        body = body + cc_call(root, c, false, project::native_include(p), project::native_flags(p), "bit_native_c")
+    end
+    if array_len(cpp) > 0 is
+        body = body + cc_call(root, cpp, true, project::native_include(p), project::native_flags(p), "bit_native_cpp")
+    end
+    if body == "" is return 0 end
+
+    let cargo: string = crate_dir + "/Cargo.toml"
+    if (array_len(c) > 0 || array_len(cpp) > 0) && file_exists(cargo) && !string_contains(file_read(cargo), "[build-dependencies]") is
+        file_write(cargo, file_read(cargo) + "\n[build-dependencies]\ncc = \"1\"\n")
+    else if (array_len(c) > 0 || array_len(cpp) > 0) && file_exists(cargo) && !string_contains(file_read(cargo), "\ncc =") is
+        file_write(cargo, string_replace(file_read(cargo), "[build-dependencies]", "[build-dependencies]\ncc = \"1\""))
+    end
+
+    let brs: string = crate_dir + "/build.rs"
+    let fn_text: string = "\nfn bit_native() {\n" + body + "}\n"
+    if file_exists(brs) is
+        let old: string = file_read(brs)
+        if string_contains(old, "fn bit_native()") is return 0 end
+        file_write(brs, string_replace(old, "fn main() {", "fn main() {\n    bit_native();") + fn_text)
+    else is
+        file_write(brs, "fn main() {{\n    bit_native();\n}}\n" + fn_text)
+    end
+    return 0
+end
+
+fn cargo_env(vw: ViraWiring, wasm: bool) -> string is
+    if wasm is return "" end
+    return "RUSTFLAGS='-C target-feature=+crt-static" + vw.vw_rustc + "' "
+end
+
+;; Java classes generated from `native {java}(...)` blocks -> crate/java_classes
+fn compile_java(p: project::Project, o: BuildOpts, crate_dir: string) -> int is
+    let src: string = crate_dir + "/java"
+    if !dir_exists(src) is return 0 end
+    if !util::tool_exists("javac") is
+        ui::fail("this project uses `native {{java}}` — javac is needed (install a JDK, e.g. openjdk-21-jdk-headless)")
+        return 1
+    end
+    util::mkdir_p(crate_dir + "/java_classes")
+    return run_step(p, "HackerScript  javac", "javac -d " + util::sq(crate_dir + "/java_classes") + " " + util::sq(src) + "/*.java", o.bo_verbose)
+end
+
+fn build_hs_cargo(p: project::Project, o: BuildOpts, entry: string, dir: string, m: HsMode) -> int is
+    let name: string = if m.hm_kind == "bin" && m.hm_bin != "" then m.hm_bin else project::name_of(p)
+    let crate: string = crate_of(name)
+    let library: bool = m.hm_kind != "bin"
     let crate_dir: string = dir + "/" + name + "-crate"
     let target_dir: string = project::cache_build(p) + "/target"
     let triple: string = rust_triple(build_platform(p, o))
     let profile: string = profile_name(o)
+    let wasm: bool = m.hm_kind == "wasm"
 
     let gen: string = tool_for("hackerscript") + " build " + util::sq(entry) + " -o " + util::sq(crate_dir) +
-        " --crate-name " + crate + (if library then " --library" else " --bin-name " + name) + flags_of(p)
+        " --crate-name " + crate + (if library then " --library" else " --bin-name " + name) + flags_of(p) + version_map_flag(p)
     let rc1: int = run_step(p, "HackerScript  transpile " + name, gen, o.bo_verbose)
     if rc1 != 0 is return rc1 end
 
@@ -267,21 +440,66 @@ fn build_hs_cargo(p: project::Project, o: BuildOpts, entry: string, dir: string,
         ui::fail("cargo is needed to compile HackerScript output (hackerc → Rust)")
         return 1
     end
-    let cargo: string = "RUSTFLAGS='-C target-feature=+crt-static' cargo build" +
-        (if o.bo_release then " --release" else "") + (if library then " --lib" else "") +
-        " --target " + triple + " --manifest-path " + util::sq(crate_dir + "/Cargo.toml") +
-        " --target-dir " + util::sq(target_dir)
-    let rc2: int = run_step(p, "HackerScript  cargo (static, " + triple + ")", cargo, o.bo_verbose)
-    if rc2 != 0 is return rc2 end
 
-    let built: string = target_dir + "/" + triple + "/" + profile
-    if library is
-        util::run("cp -f " + util::sq(built + "/lib" + crate + ".a") + " " + util::sq(dir + "/lib" + name + ".a") + " 2>/dev/null || " +
-                  "cp -f " + util::sq(built + "/lib" + crate + ".rlib") + " " + util::sq(dir + "/lib" + name + ".rlib"))
-    else is
+    let vw: ViraWiring = vira_wiring(p)
+    if vw.vw_errors > 0 is return 1 end
+    if wire_crate(p, crate_dir, vw) != 0 is return 1 end
+    if m.hm_kind == "jar" || m.hm_kind == "bin" || m.hm_kind == "lib" || m.hm_kind == "rlib" is
+        if compile_java(p, o, crate_dir) != 0 is return 1 end
+    end
+
+    let use_triple: string = if wasm then "wasm32-unknown-unknown" else triple
+    let cargo: string = cargo_env(vw, wasm) + "cargo build" +
+        (if o.bo_release then " --release" else "") + (if library then " --lib" else "") +
+        " --target " + use_triple + " --manifest-path " + util::sq(crate_dir + "/Cargo.toml") +
+        " --target-dir " + util::sq(target_dir)
+    let label: string = if wasm then "HackerScript  cargo (wasm32)" else "HackerScript  cargo (static, " + triple + ")"
+    let rc2: int = run_step(p, label, cargo, o.bo_verbose)
+    if rc2 != 0 is
+        if wasm is ui::note("missing the wasm target?  rustup target add wasm32-unknown-unknown") end
+        return rc2
+    end
+
+    let built: string = target_dir + "/" + use_triple + "/" + profile
+    if m.hm_kind == "bin" is
         return util::run("cp -f " + util::sq(built + "/" + name) + " " + util::sq(dir + "/" + name))
     end
-    return 0
+    if m.hm_kind == "lib" is
+        return util::run("cp -f " + util::sq(built + "/lib" + crate + ".a") + " " + util::sq(dir + "/lib" + name + ".a"))
+    end
+    if m.hm_kind == "rlib" is
+        return util::run("cp -f " + util::sq(built + "/lib" + crate + ".rlib") + " " + util::sq(dir + "/lib" + name + ".rlib"))
+    end
+    if m.hm_kind == "wasm" is
+        let raw: string = built + "/" + crate + ".wasm"
+        if !file_exists(raw) is
+            ui::fail("no " + crate + ".wasm was produced — does the source have an `@wasm_export` function?")
+            return 1
+        end
+        util::run("cp -f " + util::sq(raw) + " " + util::sq(dir + "/" + name + ".wasm"))
+        if util::tool_exists("wasm-bindgen") is
+            return run_step(p, "wasm-bindgen  " + name, "wasm-bindgen " + util::sq(raw) + " --target web --out-dir " + util::sq(dir + "/" + name + "-wasm"), o.bo_verbose)
+        end
+        ui::warn("wasm-bindgen is not installed — only the raw " + name + ".wasm was written  (cargo install wasm-bindgen-cli)")
+        return 0
+    end
+    if m.hm_kind == "jar" is
+        let classes: string = crate_dir + "/java_classes"
+        if !dir_exists(classes) is
+            ui::fail("--jar: this project has no `native {{java}}` blocks, so there is nothing to pack")
+            return 1
+        end
+        if !util::tool_exists("jar") is
+            ui::fail("--jar needs the `jar` tool from a JDK")
+            return 1
+        end
+        return run_step(p, "jar  " + name + ".jar", "jar --create --file " + util::sq(dir + "/" + name + ".jar") + " -C " + util::sq(classes) + " .", o.bo_verbose)
+    end
+    return 1
+end
+
+fn hs_mode(kind: string, bin: string) -> HsMode is
+    return HsMode { hm_kind: kind, hm_bin: bin }
 end
 
 fn build_hs_lib(p: project::Project, o: BuildOpts, entry: string, dir: string, output: string) -> int is
@@ -292,8 +510,9 @@ fn build_hs_lib(p: project::Project, o: BuildOpts, entry: string, dir: string, o
             (if o.bo_sign != "" then " --sign " + util::sq(o.bo_sign) else "")
         return run_step(p, "HackerScript  " + name + ".hlib", cmd, o.bo_verbose)
     end
-    if output == "a" is return build_hs_cargo(p, o, entry, dir, true) end
-    ui::fail("HackerScript libraries can be built as hlib or a, not '" + output + "'")
+    if output == "a" is return build_hs_cargo(p, o, entry, dir, hs_mode("lib", "")) end
+    if output == "rlib" is return build_hs_cargo(p, o, entry, dir, hs_mode("rlib", "")) end
+    ui::fail("HackerScript libraries can be built as hlib, a or rlib, not '" + output + "'")
     return 1
 end
 
@@ -305,11 +524,11 @@ end
 
 fn want_lib(o: BuildOpts) -> bool is
     return o.bo_emit == "" || o.bo_emit == "lib" || o.bo_emit == "hlib" || o.bo_emit == "so" ||
-           o.bo_emit == "a" || o.bo_emit == "obj"
+           o.bo_emit == "a" || o.bo_emit == "obj" || o.bo_emit == "rlib"
 end
 
 fn lib_format(p: project::Project, o: BuildOpts) -> string is
-    if o.bo_emit == "hlib" || o.bo_emit == "so" || o.bo_emit == "a" || o.bo_emit == "obj" is return o.bo_emit end
+    if o.bo_emit == "hlib" || o.bo_emit == "so" || o.bo_emit == "a" || o.bo_emit == "obj" || o.bo_emit == "rlib" is return o.bo_emit end
     return project::lib_output(p)
 end
 
@@ -319,31 +538,73 @@ pub fn bin_path(p: project::Project, o: BuildOpts, lang: string, suffix: string)
     return base
 end
 
+
+;; Binaries of a language: the main one (named after the project) and the extra ones
+;; (src/bin/*.h#, cmd/bin/*.hcs). `--bin NAME` narrows the list.
+fn wanted_bin(p: project::Project, o: BuildOpts, stem: string, is_main: bool) -> bool is
+    if o.bo_bin == "" is return true end
+    if is_main is return o.bo_bin == project::name_of(p) || o.bo_bin == "main" end
+    return o.bo_bin == stem
+end
+
 fn build_lang(p: project::Project, o: BuildOpts, lang: string, suffix: string) -> int is
     if !have_toolchain(lang) is
         ui::fail(project::lang_label(lang) + " toolchain not found")
         ui::note(missing_tool_hint(lang))
         return 1
     end
-    let root: string = project::root_of(p)
     let dir: string = out_dir(p, o)
     util::mkdir_p(dir)
 
     let bin_entry: string = project::entry_for(p, lang, "bin")
     let lib_entry: string = project::entry_for(p, lang, "lib")
+    let extras: [string] = project::extra_bins(p, lang)
     let mut built: int = 0
     let mut rc: int = 0
 
-    if want_bin(o) && bin_entry != "" is
+    ;; --wasm / --jar / --library: HackerScript only, one artifact each
+    if o.bo_wasm || o.bo_jar || o.bo_rlib is
+        if lang != "hackerscript" is
+            ui::fail("--wasm / --jar / --library are HackerScript targets (use --target hs)")
+            return 1
+        end
+        let e: string = if bin_entry != "" then bin_entry else lib_entry
+        if e == "" is
+            ui::fail("HackerScript: no entry point (" + project::cmd_dir(p) + "/main.hcs or " + project::lib_dir(p) + "/mod.hcs)")
+            return 1
+        end
+        if o.bo_wasm is rc = rc + build_hs_cargo(p, o, e, dir, hs_mode("wasm", "")) end
+        if o.bo_jar is rc = rc + build_hs_cargo(p, o, e, dir, hs_mode("jar", "")) end
+        if o.bo_rlib is rc = rc + build_hs_cargo(p, o, if lib_entry != "" then lib_entry else e, dir, hs_mode("rlib", "")) end
+        if rc != 0 is return 1 end
+        return 0
+    end
+
+    if want_bin(o) && bin_entry != "" && wanted_bin(p, o, "", true) is
         let out: string = dir + "/" + project::name_of(p) + suffix
         if lang == "hsharp" is rc = rc + build_hsharp_bin(p, o, bin_entry, out)
         else if lang == "hackerlang" is rc = rc + build_hl_bin(p, o, bin_entry, out)
-        else is rc = rc + build_hs_cargo(p, o, bin_entry, dir, false)
+        else is rc = rc + build_hs_cargo(p, o, bin_entry, dir, hs_mode("bin", project::name_of(p)))
         end
         built += 1
     end
 
-    if want_lib(o) && lib_entry != "" is
+    if want_bin(o) is
+        let mut k: int = 0
+        while k < array_len(extras) is
+            let stem: string = extras[k]
+            if wanted_bin(p, o, stem, false) is
+                let e: string = project::extra_bin_entry(p, lang, stem)
+                if lang == "hsharp" is rc = rc + build_hsharp_bin(p, o, e, dir + "/" + stem)
+                else is rc = rc + build_hs_cargo(p, o, e, dir, hs_mode("bin", stem))
+                end
+                built += 1
+            end
+            k += 1
+        end
+    end
+
+    if o.bo_bin == "" && want_lib(o) && lib_entry != "" is
         let fmt: string = lib_format(p, o)
         if lang == "hsharp" is rc = rc + build_hsharp_lib(p, o, lib_entry, dir, fmt)
         else if lang == "hackerlang" is rc = rc + build_hl_lib(p, o, lib_entry, dir, fmt)
@@ -353,6 +614,10 @@ fn build_lang(p: project::Project, o: BuildOpts, lang: string, suffix: string) -
     end
 
     if built == 0 is
+        if o.bo_bin != "" is
+            ui::fail(project::lang_label(lang) + ": no binary named '" + o.bo_bin + "'")
+            return 1
+        end
         ui::fail(project::lang_label(lang) + ": no entry point (" +
                  (if lang == "hsharp" then project::src_dir(p) + "/main.h# or " + project::src_dir(p) + "/lib.h#"
                   else if lang == "hackerscript" then project::cmd_dir(p) + "/main.hcs or " + project::lib_dir(p) + "/mod.hcs"
@@ -364,6 +629,148 @@ fn build_lang(p: project::Project, o: BuildOpts, lang: string, suffix: string) -
 end
 
 ;; ── Whole project ────────────────────────────────────────────────────────────
+
+;; ── `[package] -> using => 0.4` ──────────────────────────────────────────────
+;; Pins the HackerScript compiler: bit uses cache/env/hackerc-<version>/hackerc, downloads it from
+;; the HackerScript release when it is not there yet (like Virus did), and falls back to the
+;; `hackerc` on PATH with a warning when the download is impossible. BIT_HACKERC always wins.
+
+fn hackerc_release_url(version: string) -> string is
+    let base: string = env_get("BIT_HACKERC_RELEASES")
+    let root: string = if base != "" then base else "https://github.com/HackerOS-Linux-System/HackerScript/releases/download"
+    return root + "/v" + version + "/hackerc"
+end
+
+pub fn ensure_using(p: project::Project) -> int is
+    let version: string = hk::hk_pkg(p.pj_hk, "using", "")
+    if version == "" || env_get("BIT_HACKERC") != "" is return 0 end
+    let dir: string = project::cache_env(p) + "/hackerc-" + version
+    let bin: string = dir + "/hackerc"
+    if file_exists(bin) is
+        env_set("BIT_HACKERC", bin)
+        return 0
+    end
+    let on_path: string = util::first_tool(["hackerc"])
+    if on_path != "" is
+        let have: string = util::capture(util::sq(on_path) + " --version 2>&1 | head -1")
+        if string_contains(have, version) is return 0 end
+    end
+    if net::offline() is
+        if on_path != "" is
+            ui::warn("using => " + version + ": offline, using the hackerc on PATH instead")
+            return 0
+        end
+        ui::fail("using => " + version + ": hackerc " + version + " is not installed and bit is offline")
+        return 1
+    end
+    let url: string = hackerc_release_url(version)
+    ui::line(ui::dim("using <" + version + ">  fetching hackerc from " + url))
+    util::mkdir_p(dir)
+    if net::run_retry("curl -fsSL --connect-timeout 15 " + util::sq(url) + " -o " + util::sq(bin)) != 0 is
+        util::rm_rf(dir)
+        if on_path != "" is
+            ui::warn("using => " + version + ": cannot download hackerc " + version + " — using the one on PATH (" + on_path + ")")
+            return 0
+        end
+        ui::fail("using => " + version + ": cannot download hackerc from " + url)
+        return 1
+    end
+    util::run("chmod +x " + util::sq(bin))
+    let magic: string = util::capture("head -c 4 " + util::sq(bin) + " | od -An -c | tr -d ' '")
+    if magic != "177ELF" is
+        ui::warn("the downloaded file does not look like an executable")
+    end
+    env_set("BIT_HACKERC", bin)
+    ui::ok("hackerc " + version + " ready  " + ui::dim(bin))
+    return 0
+end
+
+;; ── `using <version>` per file  (HackerScript multi-version, ex-`virus`) ─────────
+;; A `.hcs` file may start with `using <0.4>` to be compiled by that hackerc version. bit scans the project,
+;; makes sure every version it finds (plus `[package] -> all-versions => [0.3, 0.4]`) is available under
+;; cache/env/hackerc-<version>/hackerc, and hands hackerc the map as `--version-map 0.3=/path;0.4=/path`.
+;; Best effort: a version that cannot be fetched is skipped — hackerc then warns at the file that needed it.
+
+;; "0.4" when the file starts with `using <0.4>` (comment lines `!` and blank lines may precede it), else "".
+fn peek_using(path: string) -> string is
+    let text: string = file_read(path)
+    let lines: [string] = string_split(text, "\n")
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let l: string = string_trim(lines[i])
+        if l == "" || string_starts_with(l, "!") is
+            i += 1
+        else is
+            if !string_starts_with(l, "using") is return "" end
+            let lt: int = string_find(l, "<")
+            let gt: int = string_find(l, ">")
+            if lt < 0 || gt < lt is return "" end
+            return string_trim(string_slice(l, lt + 1, gt))
+        end
+    end
+    return ""
+end
+
+fn scan_hcs_versions(p: project::Project, default_version: string) -> [string] is
+    let mut out: [string] = []
+    if default_version != "" is out = array_push(out, default_version) end
+    let all: [string] = util::csv_split(hk::hk_pkg(p.pj_hk, "all-versions", ""))
+    let mut a: int = 0
+    while a < array_len(all) is
+        let v: string = string_trim(string_replace(string_replace(string_replace(all[a], "[", ""), "]", ""), "\"", ""))
+        if v != "" && !util::array_has(out, v) is out = array_push(out, v) end
+        a += 1
+    end
+    let found: string = util::capture("find " + util::sq(project::root_of(p)) +
+        " \\( -name cache -o -name target -o -name node_modules -o -name .git \\) -prune -o -type f -name '*.hcs' -print 2>/dev/null")
+    let files: [string] = string_split(found, "\n")
+    let mut i: int = 0
+    while i < array_len(files) is
+        if string_trim(files[i]) != "" is
+            let v: string = peek_using(string_trim(files[i]))
+            if v != "" && !util::array_has(out, v) is out = array_push(out, v) end
+        end
+        i += 1
+    end
+    return out
+end
+
+;; Path of hackerc <version> (cached or freshly downloaded), "" when it cannot be had.
+fn hackerc_bin_for(p: project::Project, version: string) -> string is
+    let dir: string = project::cache_env(p) + "/hackerc-" + version
+    let bin: string = dir + "/hackerc"
+    if file_exists(bin) is return bin end
+    if net::offline() is return "" end
+    util::mkdir_p(dir)
+    let url: string = hackerc_release_url(version)
+    ui::line(ui::dim("using <" + version + ">  fetching hackerc from " + url))
+    if net::run_retry("curl -fsSL --connect-timeout 15 " + util::sq(url) + " -o " + util::sq(bin)) != 0 is
+        util::rm_rf(dir)
+        ui::warn("cannot fetch hackerc " + version + " — files with `using <" + version + ">` will fail")
+        return ""
+    end
+    util::run("chmod +x " + util::sq(bin))
+    return bin
+end
+
+;; " --version-map 'v=path;v=path'" or "" when the project does not use several versions.
+fn version_map_flag(p: project::Project) -> string is
+    let own: string = hk::hk_pkg(p.pj_hk, "using", "")
+    let versions: [string] = scan_hcs_versions(p, own)
+    if array_len(versions) < 2 is return "" end
+    let mut map: string = ""
+    let mut i: int = 0
+    while i < array_len(versions) is
+        let bin: string = hackerc_bin_for(p, versions[i])
+        if bin != "" is
+            if map != "" is map = map + ";" end
+            map = map + versions[i] + "=" + bin
+        end
+        i += 1
+    end
+    if map == "" is return "" end
+    return " --version-map " + util::sq(map)
+end
 
 pub fn build_project(p: project::Project, o: BuildOpts) -> int is
     let name: string = project::name_of(p)
@@ -385,6 +792,7 @@ pub fn build_project(p: project::Project, o: BuildOpts) -> int is
     end
 
     let langs: [string] = target_langs(p, o)
+    if util::array_has(langs, "hackerscript") && ensure_using(p) != 0 is return 1 end
     if array_len(langs) == 0 is
         ui::fail("nothing to build: no " + project::src_dir(p) + "/ (H#), " + project::cmd_dir(p) + "/ or " +
                  project::lib_dir(p) + "/ (HackerScript) found")
@@ -393,6 +801,14 @@ pub fn build_project(p: project::Project, o: BuildOpts) -> int is
     end
 
     project::cache_ensure(p)
+    if env_get("BIT_NO_SYSTEM_CHECK") != "1" is
+        let missing: int = sysdeps::check(p, false, true)
+        if missing > 0 is
+            ui::fail(to_string(missing) + " required system librar" + (if missing == 1 then "y is" else "ies are") + " missing  (bit system install — or --no-system-check)")
+            return 1
+        end
+        sysdeps::export_paths(p)
+    end
     if run_hook(p, "pre-build", o.bo_verbose) != 0 is
         ui::fail("pre-build hook failed")
         return 1
@@ -483,7 +899,7 @@ pub fn run_project(p: project::Project, o: BuildOpts, args: string, no_build: bo
     end
 
     if !no_build is
-        let only: BuildOpts = opts_new(o.bo_release, o.bo_verbose, lang, o.bo_platform, "bin")
+        let only: BuildOpts = opts_with_targets(opts_new(o.bo_release, o.bo_verbose, lang, o.bo_platform, "bin"), false, false, false, o.bo_bin)
         if build_project(p, only) != 0 is return 1 end
     end
 
@@ -493,7 +909,8 @@ pub fn run_project(p: project::Project, o: BuildOpts, args: string, no_build: bo
                                     (if args != "" then " -- " + args else "")))
     end
     let sfx: string = if array_len(langs) > 1 && lang != "hsharp" then "-" + short_lang(lang) else ""
-    return util::run(in_root(p, util::sq(bin_path(p, o, lang, sfx)) + (if args != "" then " " + args else "")))
+    let exe: string = if o.bo_bin != "" && o.bo_bin != project::name_of(p) && o.bo_bin != "main" then out_dir(p, o) + "/" + o.bo_bin else bin_path(p, o, lang, sfx)
+    return util::run(in_root(p, util::sq(exe) + (if args != "" then " " + args else "")))
 end
 
 pub fn clean_project(p: project::Project) -> bool is
