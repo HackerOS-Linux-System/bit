@@ -4,7 +4,7 @@ mod index
 mod project
 
 fn manifest(name: string, lang: string, is_lib: bool) -> string is
-    let lang_key: string = if lang == "hackerlang" then "hl" else if lang == "hackerscript" then "hs" else "h#"
+    let lang_key: string = if lang == "hackerlang" then "hl" else if lang == "hackerscript" then "HackerScript" else "h#"
     ;; Bit.hk is read by the hk-parser library: comments are whole lines starting
     ;; with `!`, and a key is either a value or a map (never both).
     let mut m: string = "[package]\n" +
@@ -13,7 +13,7 @@ fn manifest(name: string, lang: string, is_lib: bool) -> string is
         "-> description => " + name + "\n" +
         "-> authors     => [\"" + util::or_default(env_get("USER"), "you") + "\"]\n" +
         "-> license     => MIT\n" +
-        "! lang: h# | hl | hs  (several: h#, hs)\n" +
+        "! lang: h# | hl | hs | HackerScript   (several: h#, HackerScript)\n" +
         "-> lang        => " + lang_key + "\n\n"
     if lang == "hackerlang" is
         m = m + "[layout]\n" +
@@ -26,14 +26,38 @@ fn manifest(name: string, lang: string, is_lib: bool) -> string is
         "! -> target   => h#              language toolchain to build with\n" +
         "! -> platform => linux-aarch64   cross-compilation platform\n\n"
     if is_lib is
-        m = m + "[lib]\n! output: hlib | so | a | obj\n-> output => hlib\n\n"
+        m = m + "[lib]\n! output: hlib | so | a | rlib | obj\n-> output => hlib\n\n"
     end
     m = m + "! what a bare `bit` does\n" +
         "[default-build]\n" +
         "-> profile => release\n" +
         "! -> run    => true\n" +
         "! -> before => echo starting\n\n" +
-        "[dependencies]\n! -> mold => *\n! -> tui  => rev v1.0\n! -> mine => path ../mine\n\n" +
+        "! versions:  newest | 0.1 (exactly 0.1.0) | ^0.1 | ~0.1.2 | >=0.1 <1 | 1.x | rev v1.0\n" +
+        "! sources:   git <url> | github <org/repo> | path ../mine | pypi 2.31 | crates ^1 | npm 4 | jsr | vira | std | core\n" +
+        "[dependencies]\n" +
+        "! -> silver => newest\n" +
+        "! -> mold   => 0.1\n" +
+        "! -> mine   => path ../mine\n" +
+        "! a library that is not in the index:\n" +
+        "! -> tui\n" +
+        "! --> git => https://github.com/org/tui\n" +
+        "! --> dir => crates/tui\n" +
+        "! --> version => ^0.3\n\n" +
+        "! only for `bit test`\n" +
+        "[dev-dependencies]\n" +
+        "! -> tester => newest\n\n" +
+        "! native libraries from the operating system; bit checks them and says how to install\n" +
+        "[system-dependencies]\n" +
+        "! -> libc => >=2.31\n" +
+        "! -> openssl\n" +
+        "! --> version => >=3.0\n" +
+        "! --> pkg-config => openssl\n" +
+        "! --> apt => libssl-dev\n" +
+        "! --> dnf => openssl-devel\n\n" +
+        "[features]\n" +
+        "! -> default => []\n" +
+        "! -> fast    => [dep:silver]\n\n" +
         "[commands]\n! -> hello\n! --> run => echo hello from bit\n! --> description => Say hello\n"
     return m
 end
@@ -67,16 +91,29 @@ fn stub_path(lang: string, is_lib: bool) -> string is
     return f
 end
 
+fn write_project(dir: string, name: string, lang: string, is_lib: bool) is
+    util::mkdir_p(dir)
+    let entry: string = stub_path(lang, is_lib)
+    util::mkdir_p(dir + "/" + util::dirname(entry))
+    file_write(dir + "/Bit.hk", manifest(name, lang, is_lib))
+    if !file_exists(dir + "/" + entry) is
+        file_write(dir + "/" + entry, stub_source(lang, name, is_lib))
+    end
+    if !file_exists(dir + "/.gitignore") is
+        file_write(dir + "/.gitignore", "cache/\nsrc/bit_features.h#\n")
+    end
+end
+
 pub fn init_project(name_in: string, lang_in: string, is_lib: bool) -> int is
     let lang: string = if lang_in == "" then "hsharp" else index::normalize_lang(lang_in)
     if lang == "" is
-        ui::fail("unknown language '" + lang_in + "' (use h#, hl or hs)")
+        ui::fail("unknown language '" + lang_in + "' (use h#, hl, hs or HackerScript)")
         return 1
     end
 
     let here: bool = name_in == ""
     let dir: string = if here then "." else name_in
-    let name: string = if here then util::basename(fs_cwd()) else util::basename(name_in)
+    let name: string = if here then util::basename(project::cwd()) else util::basename(name_in)
     if !util::valid_name(name) is
         ui::fail("'" + name + "' is not a valid project name")
         return 1
@@ -86,20 +123,12 @@ pub fn init_project(name_in: string, lang_in: string, is_lib: bool) -> int is
         return 1
     end
     if here && project::manifest_in(".") != "" is
-        ui::fail("this directory already has a Bit.hk")
+        ui::fail("this directory already has a " + util::basename(project::manifest_in(".")))
         return 1
     end
 
-    util::mkdir_p(dir)
+    write_project(dir, name, lang, is_lib)
     let entry: string = stub_path(lang, is_lib)
-    util::mkdir_p(dir + "/" + util::dirname(entry))
-    file_write(dir + "/Bit.hk", manifest(name, lang, is_lib))
-    if !file_exists(dir + "/" + entry) is
-        file_write(dir + "/" + entry, stub_source(lang, name, is_lib))
-    end
-    if !file_exists(dir + "/.gitignore") is
-        file_write(dir + "/.gitignore", "cache/\n")
-    end
 
     ui::ok("created " + ui::bold(name) + " (" + project::lang_label(lang) + (if is_lib then " library" else "") + ")")
     ui::line(ui::dim("Bit.hk  " + entry + "  .gitignore"))
@@ -109,4 +138,66 @@ pub fn init_project(name_in: string, lang_in: string, is_lib: bool) -> int is
     ui::line("  bit            " + ui::dim("# builds it (uses [default-build] from Bit.hk)"))
     ui::blank()
     return 0
+end
+
+;; ── Workspaces ───────────────────────────────────────────────────────────────
+
+fn rust_member(dir: string, name: string) is
+    util::mkdir_p(dir + "/src")
+    file_write(dir + "/Cargo.toml", "[package]\nname = \"" + name + "\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n")
+    file_write(dir + "/src/main.rs", "fn main() {\n    println!(\"Hello from " + name + "!\");\n}\n")
+    file_write(dir + "/.gitignore", "cache/\ntarget/\n")
+end
+
+pub fn new_workspace(name_in: string, special: bool) -> int is
+    let name: string = util::basename(name_in)
+    if name_in == "" || !util::valid_name(name) is
+        ui::fail("usage: bit new-ws <name> [--special]")
+        return 1
+    end
+    if dir_exists(name_in) is
+        ui::fail("directory '" + name_in + "' already exists")
+        return 1
+    end
+    let core: string = name + "-core"
+    let cli: string = name + "-cli"
+
+    util::mkdir_p(name_in)
+    write_project(name_in + "/core", core, "hsharp", true)
+    write_project(name_in + "/cli", cli, "hsharp", false)
+    ;; the cli depends on the core through a path dependency — bit builds the core first
+    let cli_hk: string = file_read(name_in + "/cli/Bit.hk")
+    file_write(name_in + "/cli/Bit.hk", string_replace(cli_hk, "[dependencies]\n", "[dependencies]\n-> " + core + " => path ../core\n"))
+
+    let mut ws: string = "! workspace " + name + "\n[package]\n-> name    => " + name + "\n-> version => 0.1.0\n\n" +
+        "[workspace]\n"
+    if special is
+        write_project_extra_rust(name_in)
+        ws = ws + "-> members => [core, cli, fast]\n" +
+             "! mode special: a member may be written in another language and is built with its own toolchain\n" +
+             "-> mode => special\n" +
+             "-> languages\n" +
+             "--> core => h#\n" +
+             "--> cli  => h#\n" +
+             "--> fast => rust\n\n"
+    else is
+        ws = ws + "-> members => [core, cli]\n\n"
+    end
+    ws = ws + "[default-build]\n-> profile => release\n"
+    file_write(name_in + "/Bit.hk", ws)
+    file_write(name_in + "/.gitignore", "cache/\nsrc/bit_features.h#\n")
+
+    ui::ok("created workspace " + ui::bold(name) + (if special then " " + ui::magenta("(special)") else ""))
+    ui::line(ui::dim("Bit.hk  core/ (H# library)  cli/ (H# binary)" + (if special then "  fast/ (Rust)" else "")))
+    ui::blank()
+    ui::line(ui::bold("Next:"))
+    ui::line("  cd " + name_in)
+    ui::line("  bit ws info      " + ui::dim("# members, languages, toolchains"))
+    ui::line("  bit              " + ui::dim("# builds every member, dependencies first"))
+    ui::blank()
+    return 0
+end
+
+fn write_project_extra_rust(root: string) is
+    rust_member(root + "/fast", "fast")
 end
