@@ -12,9 +12,12 @@
 [build]
 -> link => static
 
-! a bare `bit` in this repo builds a release binary
 [default-build]
 -> profile => release
+
+[dependencies]
+-> progress-bar => newest
+-> hk-parser => newest
 
 [commands]
 -> check
