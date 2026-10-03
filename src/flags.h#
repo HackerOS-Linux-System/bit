@@ -1,0 +1,29 @@
+mod util
+mod project
+
+pub fn features() -> [string] is
+    return util::csv_split(env_get("BIT_SEL_FEATURES"))
+end
+
+pub fn no_default() -> bool is return env_get("BIT_SEL_NO_DEFAULT") == "1" end
+pub fn all_features() -> bool is return env_get("BIT_SEL_ALL_FEATURES") == "1" end
+pub fn member() -> string is return env_get("BIT_SEL_MEMBER") end
+pub fn bin() -> string is return env_get("BIT_SEL_BIN") end
+pub fn wasm() -> bool is return env_get("BIT_SEL_WASM") == "1" end
+pub fn jar() -> bool is return env_get("BIT_SEL_JAR") == "1" end
+pub fn rlib() -> bool is return env_get("BIT_SEL_RLIB") == "1" end
+pub fn no_system_check() -> bool is return env_get("BIT_NO_SYSTEM_CHECK") == "1" end
+
+;; In a workspace a requested feature only applies to the members that declare it.
+pub fn features_for(p: project::Project, workspace: bool) -> [string] is
+    let all: [string] = features()
+    if !workspace is return all end
+    let declared: [string] = project::feature_names(p)
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(all) is
+        if util::array_has(declared, all[i]) || string_starts_with(all[i], "dep:") is out = array_push(out, all[i]) end
+        i += 1
+    end
+    return out
+end
