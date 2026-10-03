@@ -108,7 +108,8 @@ end
 ;; Range text -> comparators (all must hold).
 ;;   ^1.2.3  >=1.2.3 <2.0.0     ^0.2.3 >=0.2.3 <0.3.0     ^0.0.3 >=0.0.3 <0.0.4
 ;;   ~1.2.3  >=1.2.3 <1.3.0     ~1.2 >=1.2.0 <1.3.0       ~1 >=1.0.0 <2.0.0
-;;   1.x / 1.2.x / 1.*  -> the matching span               1.2.3 / =1.2.3 -> exactly
+;;   1.x / 1.2.x / 1.*  -> the matching span               0.1 / 1.2.3 / =1.2.3 -> exactly that version
+;;                                                            (0.1 = 0.1.0)
 pub fn parse_range(text: string) -> [Cmp] is
     let mut out: [Cmp] = []
     let words: [string] = string_split(string_replace(string_trim(text), ",", " "), " ")
@@ -150,13 +151,14 @@ pub fn parse_range(text: string) -> [Cmp] is
                 let wild: bool = string_contains(body, "x") || string_contains(body, "X") || string_contains(body, "*")
                 let n: int = count_parts(body)
                 let lo: int = parse_partial(body, 0)
-                if wild || n < 3 is
+                if wild is
                     let ma: int = lo / 1000000000
                     let mi: int = (lo / 1000000) % 1000
                     let hi: int = if n <= 1 then pack(ma + 1, 0, 0) else pack(ma, mi + 1, 0)
                     out = array_push(out, Cmp { cm_op: ">=", cm_v: lo })
                     out = array_push(out, Cmp { cm_op: "<",  cm_v: hi })
                 else is
+                    ;; a plain version is a pinned version: `0.1` is 0.1.0, `1.2.3` is 1.2.3
                     out = array_push(out, Cmp { cm_op: "=", cm_v: lo })
                 end
             end
@@ -200,4 +202,26 @@ end
 ;; Newest version tag overall ("" if the repo has none).
 pub fn newest_tag(tags: [string]) -> string is
     return best_tag(tags, "")
+end
+
+;; `0.1`, `1.2.3`, `=1.2.3`, `v1.0` — a pinned version, as opposed to a span or an operator range.
+pub fn is_exact(s: string) -> bool is
+    let t: string = string_trim(s)
+    if t == "" is return false end
+    if !is_range(t) is return false end
+    let c: string = string_at(t, 0)
+    if c == "^" || c == "~" || c == ">" || c == "<" is return false end
+    if string_contains(t, "x") || string_contains(t, "X") || string_contains(t, "*") || string_contains(t, " ") || string_contains(t, ",") is
+        return false
+    end
+    return string_contains(t, ".")
+end
+
+;; The version a pinned range stands for, as a tag-like string: `0.1` -> `0.1.0`.
+pub fn exact_of(s: string) -> string is
+    let mut t: string = string_trim(s)
+    if string_starts_with(t, "=") is t = string_trim(string_slice(t, 1, string_len(t))) end
+    let v: int = parse(t)
+    if v < 0 is return t end
+    return show(v)
 end
