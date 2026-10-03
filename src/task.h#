@@ -37,7 +37,9 @@ pub fn run(label: string, cmd: string, verbose: bool, show_git: bool) -> int is
     let log: string = scratch("task") + ".log"
     let rcf: string = scratch("task") + ".rc"
     ;; run detached; the exit status lands in rcf when the command is done
-    util::run("( " + cmd + " ) >" + util::sq(log) + " 2>&1 ; echo $? >" + util::sq(rcf) + " &")
+    ;; the WHOLE list must go to the background: `( cmd ) > log ; echo $? > rcf &` only backgrounded the
+    ;; `echo`, so the command ran in the foreground (output hidden in the log) and the spinner never turned.
+    util::run("{ ( " + cmd + " ) >" + util::sq(log) + " 2>&1 ; echo $? >" + util::sq(rcf) + " ; } >/dev/null 2>&1 &")
 
     let mut sp = pb::quick_spinner(label)
     let t0: int = time_ms()
