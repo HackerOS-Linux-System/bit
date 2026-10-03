@@ -1,0 +1,333 @@
+mod util
+mod ui
+mod semver
+mod project
+
+;; ── [system-dependencies] ────────────────────────────────────────────────────
+;; Native libraries the program needs from the operating system (libc, openssl,
+;; libsolv, …). They are NOT fetched by bit: bit looks for them, checks the version and,
+;; when one is missing, tells you exactly how to install it — or installs it for you
+;; with `bit system install`.
+;;
+;; A library is looked for in this order (the first check that can answer wins):
+;;   1. --> check     a shell command that exits 0 when the library is there
+;;   2. --> pkg-config  (or the library's own name) through pkg-config
+;;   3. --> header    a header file in the usual include directories
+;;   4. --> lib       a lib<name>.so / lib<name>.a in the usual library directories
+;;   libc is known by name (glibc: getconf, musl: ldd).
+
+;; ── Package managers ─────────────────────────────────────────────────────────
+
+pub fn detect_pm() -> string is
+    if util::tool_exists("apt-get") is return "apt" end
+    if util::tool_exists("dnf") is return "dnf" end
+    if util::tool_exists("yum") is return "yum" end
+    if util::tool_exists("pacman") is return "pacman" end
+    if util::tool_exists("apk") is return "apk" end
+    if util::tool_exists("zypper") is return "zypper" end
+    if util::tool_exists("xbps-install") is return "xbps" end
+    if util::tool_exists("emerge") is return "emerge" end
+    if util::tool_exists("brew") is return "brew" end
+    if util::tool_exists("nix-env") is return "nix" end
+    return ""
+end
+
+fn sudo_prefix() -> string is
+    if util::capture("id -u") == "0" is return "" end
+    if util::tool_exists("sudo") is return "sudo " end
+    return ""
+end
+
+pub fn pm_install_cmd(pm: string, pkg: string) -> string is
+    let s: string = sudo_prefix()
+    if pm == "apt" is return s + "apt-get install -y " + pkg end
+    if pm == "dnf" is return s + "dnf install -y " + pkg end
+    if pm == "yum" is return s + "yum install -y " + pkg end
+    if pm == "pacman" is return s + "pacman -S --needed --noconfirm " + pkg end
+    if pm == "apk" is return s + "apk add " + pkg end
+    if pm == "zypper" is return s + "zypper --non-interactive install " + pkg end
+    if pm == "xbps" is return s + "xbps-install -y " + pkg end
+    if pm == "emerge" is return s + "emerge --ask=n " + pkg end
+    if pm == "brew" is return "brew install " + pkg end
+    if pm == "nix" is return "nix-env -iA nixpkgs." + pkg end
+    return ""
+end
+
+;; The package name declared for `pm` in Bit.hk (`--> apt => libssl-dev`), else "".
+fn declared_pkg(d: project::SysDep, pm: string) -> string is
+    let names: [string] = d.sd_pm_names
+    let mut i: int = 0
+    while i < array_len(names) is
+        if string_starts_with(names[i], pm + "=") is
+            return string_slice(names[i], string_len(pm) + 1, string_len(names[i]))
+        end
+        i += 1
+    end
+    return ""
+end
+
+;; The shell command that installs `d` on this machine, or "" when bit cannot tell.
+pub fn install_command(d: project::SysDep) -> string is
+    let pm: string = detect_pm()
+    if pm != "" is
+        let pkg: string = declared_pkg(d, pm)
+        if pkg != "" is return pm_install_cmd(pm, pkg) end
+    end
+    if d.sd_install != "" is return d.sd_install end
+    return ""
+end
+
+;; ── Looking for a library ────────────────────────────────────────────────────
+
+fn lib_dirs() -> string is
+    let extra: string = env_get("LIBRARY_PATH")
+    let base: string = "/usr/lib /usr/lib64 /lib /lib64 /usr/local/lib /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu " +
+                       "/usr/lib/riscv64-linux-gnu /usr/lib/musl /usr/lib/x86_64-linux-musl"
+    if extra == "" is return base end
+    return base + " " + string_replace(extra, ":", " ")
+end
+
+fn include_dirs() -> string is
+    let extra: string = env_get("C_INCLUDE_PATH")
+    let base: string = "/usr/include /usr/local/include /usr/include/x86_64-linux-gnu /usr/include/aarch64-linux-gnu"
+    if extra == "" is return base end
+    return base + " " + string_replace(extra, ":", " ")
+end
+
+fn header_found(header: string) -> bool is
+    let dirs: [string] = string_split(include_dirs(), " ")
+    let mut i: int = 0
+    while i < array_len(dirs) is
+        if dirs[i] != "" && file_exists(dirs[i] + "/" + header) is return true end
+        i += 1
+    end
+    return false
+end
+
+fn lib_found(lib: string, ext: string) -> bool is
+    let dirs: [string] = string_split(lib_dirs(), " ")
+    let mut i: int = 0
+    while i < array_len(dirs) is
+        if dirs[i] != "" && dir_exists(dirs[i]) is
+            let hit: string = util::capture("ls " + util::sq(dirs[i]) + " 2>/dev/null | grep -m1 '^lib" + lib + "\\." + ext + "'")
+            if hit != "" is return true end
+        end
+        i += 1
+    end
+    return false
+end
+
+;; "3.0.13" / "1.2.13.1" / "2.31-r3" -> "3.0.13" / "1.2.13" / "2.31" (the leading numeric part)
+fn numeric_version(raw: string) -> string is
+    let t: string = string_trim(raw)
+    if t == "" is return "" end
+    return util::capture("printf %s " + util::sq(t) + " | grep -o '^[0-9][0-9]*\\(\\.[0-9][0-9]*\\)\\{{0,2\\}}'")
+end
+
+fn pkg_config_name(d: project::SysDep) -> string is
+    if d.sd_pkgconfig != "" is return d.sd_pkgconfig end
+    return d.sd_name
+end
+
+;; Result of looking for one library.
+pub struct Found is
+    pub fd_present: bool
+    pub fd_version: string      ;; "" when it is there but its version is unknown
+    pub fd_how:     string      ;; check | pkg-config | header | lib | builtin
+end
+
+fn found(present: bool, version: string, how: string) -> Found is
+    return Found { fd_present: present, fd_version: version, fd_how: how }
+end
+
+fn find_libc() -> Found is
+    let glibc: string = util::capture("getconf GNU_LIBC_VERSION 2>/dev/null | awk '{{print $2}}'")
+    if glibc != "" is return found(true, numeric_version(glibc), "builtin") end
+    let musl: string = util::capture("ldd --version 2>&1 | grep -i musl | head -1")
+    if musl != "" is
+        let v: string = util::capture("ldd --version 2>&1 | grep -i '^Version' | head -1 | awk '{{print $2}}'")
+        return found(true, numeric_version(v), "builtin")
+    end
+    if file_exists("/lib/libc.so.6") || file_exists("/usr/lib/libc.so.6") is return found(true, "", "builtin") end
+    return found(false, "", "")
+end
+
+pub fn locate(d: project::SysDep) -> Found is
+    if d.sd_name == "libc" && d.sd_check == "" is return find_libc() end
+
+    if d.sd_check != "" is
+        if util::run(d.sd_check + " >/dev/null 2>&1") == 0 is
+            let v: string = if util::tool_exists("pkg-config") then numeric_version(util::capture("pkg-config --modversion " + util::sq(pkg_config_name(d)) + " 2>/dev/null")) else ""
+            return found(true, v, "check")
+        end
+        return found(false, "", "check")
+    end
+
+    if util::tool_exists("pkg-config") is
+        let n: string = pkg_config_name(d)
+        if util::run("pkg-config --exists " + util::sq(n) + " >/dev/null 2>&1") == 0 is
+            return found(true, numeric_version(util::capture("pkg-config --modversion " + util::sq(n) + " 2>/dev/null")), "pkg-config")
+        end
+    end
+
+    if d.sd_header != "" && header_found(d.sd_header) is return found(true, "", "header") end
+    let lib: string = if d.sd_lib != "" then d.sd_lib else ""
+    if lib != "" && (lib_found(lib, "a") || lib_found(lib, "so")) is return found(true, "", "lib") end
+    return found(false, "", "")
+end
+
+;; Does the found version satisfy the constraint? An unknown version passes (with a note).
+pub fn version_ok(d: project::SysDep, f: Found) -> bool is
+    if d.sd_version == "" || f.fd_version == "" is return true end
+    let v: int = semver::parse(f.fd_version)
+    if v < 0 is return true end
+    return semver::satisfies(v, semver::parse_range(d.sd_version))
+end
+
+;; bit links statically: a library that exists only as a shared object cannot be linked in.
+fn static_note(d: project::SysDep) is
+    if d.sd_lib == "" is return end
+    if lib_found(d.sd_lib, "a") is return end
+    if lib_found(d.sd_lib, "so") is
+        ui::warn(d.sd_name + ": only a shared lib" + d.sd_lib + ".so was found — bit links statically, install the static archive (lib" + d.sd_lib + ".a, usually the -dev / -static package)")
+    end
+end
+
+;; ── check / install ──────────────────────────────────────────────────────────
+
+fn print_missing(d: project::SysDep) is
+    let cmd: string = install_command(d)
+    if cmd != "" is
+        ui::note("  install it:  " + cmd)
+        ui::note("  or let bit do it:  bit system install")
+    else is
+        let pm: string = detect_pm()
+        ui::note("  no install recipe for " + (if pm == "" then "this system" else "'" + pm + "'") + " — add one to Bit.hk:")
+        ui::note("    [system-dependencies]")
+        ui::note("    -> " + d.sd_name)
+        ui::note("    --> " + (if pm == "" then "install" else pm) + " => " + (if pm == "" then "<command>" else "<package>"))
+    end
+end
+
+;; Checks every entry. Returns the number of REQUIRED libraries that are missing or too old.
+;; `install`: try to install the missing ones first (asks nothing — it is an explicit command).
+pub fn check(p: project::Project, install: bool, quiet_ok: bool) -> int is
+    let ds: [project::SysDep] = project::sysdeps(p)
+    if array_len(ds) == 0 is return 0 end
+    if !quiet_ok is ui::line(ui::bold("system dependencies") + " " + ui::dim("(" + to_string(array_len(ds)) + ")")) end
+    let mut bad: int = 0
+    let mut i: int = 0
+    while i < array_len(ds) is
+        let d: project::SysDep = ds[i]
+        let mut f: Found = locate(d)
+        let mut ok: bool = f.fd_present && version_ok(d, f)
+
+        if !ok && install is
+            let cmd: string = install_command(d)
+            if cmd != "" is
+                ui::line(ui::dim("$ " + cmd))
+                if util::run(cmd) == 0 is
+                    f = locate(d)
+                    ok = f.fd_present && version_ok(d, f)
+                end
+            end
+        end
+
+        let want: string = if d.sd_version != "" then " " + d.sd_version else ""
+        if ok is
+            if !quiet_ok is
+                ui::ok(d.sd_name + want + "  " + ui::dim((if f.fd_version != "" then "found " + f.fd_version else "found") + " (" + f.fd_how + ")"))
+            end
+            static_note(d)
+        else if f.fd_present is
+            ui::bad(d.sd_name + "  " + ui::red("version " + f.fd_version + " does not satisfy" + want))
+            print_missing(d)
+            if !d.sd_optional is bad += 1 end
+        else is
+            if d.sd_optional is
+                ui::warn(d.sd_name + want + " not found (optional)")
+            else is
+                ui::bad(d.sd_name + want + "  " + ui::red("not found"))
+                bad += 1
+            end
+            print_missing(d)
+        end
+        i += 1
+    end
+    return bad
+end
+
+;; Makes the headers / libraries of pkg-config-known system libraries visible to the compilers.
+pub fn export_paths(p: project::Project) is
+    let ds: [project::SysDep] = project::sysdeps(p)
+    if array_len(ds) == 0 || !util::tool_exists("pkg-config") is return end
+    let mut libs: string = ""
+    let mut incs: string = ""
+    let mut i: int = 0
+    while i < array_len(ds) is
+        let n: string = pkg_config_name(ds[i])
+        if util::run("pkg-config --exists " + util::sq(n) + " >/dev/null 2>&1") == 0 is
+            let l: string = util::capture("pkg-config --libs-only-L " + util::sq(n) + " 2>/dev/null | sed 's/-L//g' | tr ' ' ':'")
+            let c: string = util::capture("pkg-config --cflags-only-I " + util::sq(n) + " 2>/dev/null | sed 's/-I//g' | tr ' ' ':'")
+            if l != "" is
+                if libs == "" is libs = l else is libs = libs + ":" + l end
+            end
+            if c != "" is
+                if incs == "" is incs = c else is incs = incs + ":" + c end
+            end
+        end
+        i += 1
+    end
+    if libs != "" is
+        let old: string = env_get("LIBRARY_PATH")
+        env_set("LIBRARY_PATH", if old == "" then libs else libs + ":" + old)
+    end
+    if incs != "" is
+        let old: string = env_get("C_INCLUDE_PATH")
+        env_set("C_INCLUDE_PATH", if old == "" then incs else incs + ":" + old)
+    end
+end
+
+;; `bit system [check|install|list]`
+pub fn cmd_system(p: project::Project, action: string) -> int is
+    if !project::is_loaded(p) is
+        ui::fail("no Bit.hk here")
+        return 1
+    end
+    let ds: [project::SysDep] = project::sysdeps(p)
+    ui::blank()
+    if array_len(ds) == 0 is
+        ui::note("no [system-dependencies] in Bit.hk. Example:")
+        ui::note("  [system-dependencies]")
+        ui::note("  -> libc => >=2.31")
+        ui::note("  -> openssl")
+        ui::note("  --> version => >=3.0")
+        ui::note("  --> pkg-config => openssl")
+        ui::note("  --> apt => libssl-dev")
+        ui::note("  --> dnf => openssl-devel")
+        ui::blank()
+        return 0
+    end
+    if action == "list" is
+        let pm: string = detect_pm()
+        ui::heading("System dependencies  " + ui::dim("package manager: " + (if pm == "" then "none detected" else pm)))
+        let mut i: int = 0
+        while i < array_len(ds) is
+            let d: project::SysDep = ds[i]
+            ui::line(ui::cyan(string_pad_right(d.sd_name, 16)) + string_pad_right(if d.sd_version == "" then "any" else d.sd_version, 12) +
+                     ui::dim(if install_command(d) != "" then install_command(d) else "no install recipe for this system"))
+            i += 1
+        end
+        ui::blank()
+        return 0
+    end
+    let rc: int = check(p, action == "install", false)
+    ui::blank()
+    if rc > 0 is
+        ui::fail(to_string(rc) + " required system librar" + (if rc == 1 then "y is" else "ies are") + " missing")
+        return 1
+    end
+    ui::ok("system dependencies satisfied")
+    ui::blank()
+    return 0
+end
