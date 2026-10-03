@@ -1,0 +1,206 @@
+mod util
+mod ui
+mod sysdeps
+
+;; ── Members written in other languages (workspace mode `special`) ─────────────
+;; A member declared as  `--> fast => rust`  under [workspace] -> languages  is built with its
+;; own toolchain. Before anything runs, bit checks that the toolchain exists and — if not —
+;; says how to install it on this system.
+;;
+;;   rust     cargo build            (static: musl + crt-static)        test: cargo test
+;;   c        make, else cc -static  (src/*.c, include/)                test: make test
+;;   cpp      make, else c++ -static (src/*.cpp, include/)              test: make test
+;;   zig      zig build                                                 test: zig build test
+;;   go       go build  (CGO off ⇒ static)                              test: go test ./...
+;;   odin     odin build src                                            test: odin test src
+;;   crystal  shards build / crystal build --static                     test: crystal spec
+;;   python   byte-compiles the sources (nothing to link)               test: python3 -m unittest
+
+pub fn normalize(lang: string) -> string is
+    let l: string = string_lower(string_trim(lang))
+    if l == "rust" || l == "rs" is return "rust" end
+    if l == "c" is return "c" end
+    if l == "cpp" || l == "c++" || l == "cxx" || l == "cc" is return "cpp" end
+    if l == "zig" is return "zig" end
+    if l == "go" || l == "golang" is return "go" end
+    if l == "odin" is return "odin" end
+    if l == "crystal" || l == "cr" is return "crystal" end
+    if l == "python" || l == "py" || l == "python3" is return "python" end
+    return ""
+end
+
+pub fn supported() -> [string] is
+    return ["rust", "c", "cpp", "zig", "go", "odin", "crystal", "python"]
+end
+
+pub fn label(lang: string) -> string is
+    if lang == "cpp" is return "C++" end
+    if lang == "c" is return "C" end
+    if lang == "rust" is return "Rust" end
+    if lang == "zig" is return "Zig" end
+    if lang == "go" is return "Go" end
+    if lang == "odin" is return "Odin" end
+    if lang == "crystal" is return "Crystal" end
+    if lang == "python" is return "Python" end
+    return lang
+end
+
+;; What has to be on PATH (all of them, except where noted).
+fn required_tools(lang: string) -> [string] is
+    if lang == "rust" is return ["cargo", "rustc"] end
+    if lang == "c" is return ["cc"] end
+    if lang == "cpp" is return ["c++"] end
+    if lang == "zig" is return ["zig"] end
+    if lang == "go" is return ["go"] end
+    if lang == "odin" is return ["odin"] end
+    if lang == "crystal" is return ["crystal"] end
+    if lang == "python" is return ["python3"] end
+    return []
+end
+
+pub fn missing_tools(lang: string) -> [string] is
+    let need: [string] = required_tools(lang)
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(need) is
+        if !util::tool_exists(need[i]) is out = array_push(out, need[i]) end
+        i += 1
+    end
+    return out
+end
+
+pub fn install_hint(lang: string) -> string is
+    let pm: string = sysdeps::detect_pm()
+    if lang == "rust" is return "install Rust:  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   (then: rustup target add " + util::capture("uname -m") + "-unknown-linux-musl)" end
+    if lang == "c" || lang == "cpp" is
+        if pm == "apt" is return "sudo apt install build-essential" end
+        if pm == "pacman" is return "sudo pacman -S base-devel" end
+        if pm == "dnf" || pm == "yum" is return "sudo " + pm + " groupinstall 'Development Tools'" end
+        if pm == "apk" is return "apk add build-base" end
+        return "install a C/C++ compiler (gcc or clang) and make"
+    end
+    if lang == "zig" is
+        if pm == "pacman" is return "sudo pacman -S zig" end
+        if pm == "brew" is return "brew install zig" end
+        if pm == "apk" is return "apk add zig" end
+        return "install Zig:  https://ziglang.org/download/"
+    end
+    if lang == "go" is
+        if pm == "apt" is return "sudo apt install golang" end
+        if pm == "pacman" is return "sudo pacman -S go" end
+        if pm == "dnf" is return "sudo dnf install golang" end
+        if pm == "apk" is return "apk add go" end
+        if pm == "brew" is return "brew install go" end
+        return "install Go:  https://go.dev/dl/"
+    end
+    if lang == "odin" is
+        if pm == "pacman" is return "sudo pacman -S odin" end
+        if pm == "brew" is return "brew install odin" end
+        return "install Odin:  https://odin-lang.org/docs/install/"
+    end
+    if lang == "crystal" is
+        if pm == "pacman" is return "sudo pacman -S crystal shards" end
+        if pm == "brew" is return "brew install crystal" end
+        if pm == "apk" is return "apk add crystal shards" end
+        return "install Crystal:  https://crystal-lang.org/install/"
+    end
+    if lang == "python" is
+        if pm == "apt" is return "sudo apt install python3 python3-venv" end
+        if pm == "pacman" is return "sudo pacman -S python" end
+        if pm == "dnf" is return "sudo dnf install python3" end
+        if pm == "apk" is return "apk add python3" end
+        return "install Python 3:  https://www.python.org/downloads/"
+    end
+    return ""
+end
+
+;; true when the toolchain is there; otherwise prints what is missing and how to get it.
+pub fn preflight(lang: string) -> bool is
+    let miss: [string] = missing_tools(lang)
+    if array_len(miss) == 0 is return true end
+    ui::fail(label(lang) + " toolchain not found (missing: " + util::join(miss, ", ") + ")")
+    ui::note(install_hint(lang))
+    return false
+end
+
+;; ── Detecting the language of a member that declares none ────────────────────
+
+pub fn detect(dir: string) -> string is
+    if file_exists(dir + "/Cargo.toml") is return "rust" end
+    if file_exists(dir + "/go.mod") is return "go" end
+    if file_exists(dir + "/build.zig") is return "zig" end
+    if file_exists(dir + "/shard.yml") is return "crystal" end
+    if file_exists(dir + "/pyproject.toml") || file_exists(dir + "/requirements.txt") || file_exists(dir + "/setup.py") is return "python" end
+    if util::capture("ls " + util::sq(dir) + "/*.odin " + util::sq(dir) + "/src/*.odin 2>/dev/null | head -1") != "" is return "odin" end
+    if util::capture("ls " + util::sq(dir) + "/*.cpp " + util::sq(dir) + "/src/*.cpp 2>/dev/null | head -1") != "" is return "cpp" end
+    if util::capture("ls " + util::sq(dir) + "/*.c " + util::sq(dir) + "/src/*.c 2>/dev/null | head -1") != "" is return "c" end
+    return ""
+end
+
+;; ── Commands ─────────────────────────────────────────────────────────────────
+
+fn in_dir(dir: string, cmd: string) -> string is
+    return "cd " + util::sq(dir) + " && " + cmd
+end
+
+fn musl_triple() -> string is
+    return util::capture("uname -m") + "-unknown-linux-musl"
+end
+
+fn c_sources(dir: string, ext: string) -> string is
+    return util::capture("cd " + util::sq(dir) + " && find . -name '*." + ext + "' ! -path './cache/*' ! -path './build/*' | LC_ALL=C sort | tr '\\n' ' '")
+end
+
+;; The shell command that builds `lang` in `dir` into `out`; "" when it cannot be decided.
+pub fn build_command(dir: string, name: string, lang: string, release: bool, out: string) -> string is
+    let include: string = if dir_exists(dir + "/include") then " -Iinclude" else ""
+    if lang == "rust" is
+        return "RUSTFLAGS='-C target-feature=+crt-static' cargo build" + (if release then " --release" else "") +
+               " --target " + musl_triple() + " --target-dir " + util::sq(out + "/" + name + "-target")
+    end
+    if lang == "c" is
+        if file_exists(dir + "/Makefile") is return "make" end
+        return "cc -static" + (if release then " -O2" else " -g") + include + " -o " + util::sq(out + "/" + name) + " " + c_sources(dir, "c")
+    end
+    if lang == "cpp" is
+        if file_exists(dir + "/Makefile") is return "make" end
+        return "c++ -static -std=c++17" + (if release then " -O2" else " -g") + include + " -o " + util::sq(out + "/" + name) + " " + c_sources(dir, "cpp")
+    end
+    if lang == "zig" is
+        return "zig build" + (if release then " -Doptimize=ReleaseSafe" else "") + " --prefix " + util::sq(out + "/" + name + "-zig")
+    end
+    if lang == "go" is
+        return "CGO_ENABLED=0 go build" + (if release then " -ldflags='-s -w'" else "") + " -o " + util::sq(out + "/" + name) + " ."
+    end
+    if lang == "odin" is
+        return "odin build src -out:" + util::sq(out + "/" + name) + (if release then " -o:speed" else "") + " -extra-linker-flags:-static"
+    end
+    if lang == "crystal" is
+        if file_exists(dir + "/shard.yml") && util::tool_exists("shards") is
+            return "shards build --static" + (if release then " --release" else "")
+        end
+        let entry: string = if file_exists(dir + "/src/" + name + ".cr") then "src/" + name + ".cr" else "src/main.cr"
+        return "crystal build --static" + (if release then " --release" else "") + " " + entry + " -o " + util::sq(out + "/" + name)
+    end
+    if lang == "python" is
+        return "python3 -m compileall -q ."
+    end
+    return ""
+end
+
+pub fn test_command(dir: string, lang: string) -> string is
+    if lang == "rust" is return "cargo test" end
+    if lang == "go" is return "CGO_ENABLED=0 go test ./..." end
+    if lang == "zig" is return "zig build test" end
+    if lang == "odin" is return "odin test src" end
+    if lang == "crystal" is return "crystal spec" end
+    if lang == "python" is return "python3 -m unittest discover" end
+    if (lang == "c" || lang == "cpp") && file_exists(dir + "/Makefile") is return "make test" end
+    return ""
+end
+
+;; Runs a build/test command in the member's directory. Returns the exit code.
+pub fn run_in(dir: string, cmd: string, verbose: bool) -> int is
+    if verbose is ui::note("$ " + cmd) end
+    return util::run(in_dir(dir, cmd))
+end
