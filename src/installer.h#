@@ -10,6 +10,7 @@ mod checksum
 mod lock
 mod project
 mod build
+mod registry
 
 pub fn lib_root(name: string) -> string is return util::libs_dir() + "/" + name end
 
@@ -37,6 +38,9 @@ pub struct InstallOpts is
     pub io_release:  bool
     pub io_verbose:  bool
     pub io_depth:    int
+    pub io_name:     string   ;; install under this name ("" = the index name / the repository's name)
+    pub io_dir:      string   ;; take the library from this directory of the repository ("" = the root)
+    pub io_source:   string   ;; recorded in the lock: index | git
 end
 
 pub fn iopts(force: bool, do_build: bool, output: string, target: string, platform: string,
@@ -45,14 +49,23 @@ pub fn iopts(force: bool, do_build: bool, output: string, target: string, platfo
         io_force: force, io_build: do_build, io_output: string_lower(output),
         io_lang: index::normalize_lang(target),
         io_platform: if platform != "" then platform else if index::normalize_lang(target) == "" then target else "",
-        io_release: release, io_verbose: verbose, io_depth: 0
+        io_release: release, io_verbose: verbose, io_depth: 0,
+        io_name: "", io_dir: "", io_source: ""
     }
+end
+
+;; Same options, but the library is installed as `name` and (optionally) taken from `dir` of its repository.
+pub fn with_origin(o: InstallOpts, name: string, dir: string, source: string) -> InstallOpts is
+    return InstallOpts { io_force: o.io_force, io_build: o.io_build, io_output: o.io_output, io_lang: o.io_lang,
+                         io_platform: o.io_platform, io_release: o.io_release, io_verbose: o.io_verbose,
+                         io_depth: o.io_depth, io_name: name, io_dir: dir, io_source: source }
 end
 
 fn deeper(o: InstallOpts) -> InstallOpts is
     return InstallOpts { io_force: false, io_build: o.io_build, io_output: "", io_lang: "",
                          io_platform: o.io_platform, io_release: o.io_release,
-                         io_verbose: o.io_verbose, io_depth: o.io_depth + 1 }
+                         io_verbose: o.io_verbose, io_depth: o.io_depth + 1,
+                         io_name: "", io_dir: "", io_source: "" }
 end
 
 ;; ── Fetching ─────────────────────────────────────────────────────────────────
@@ -64,11 +77,9 @@ pub fn repo_name_from_url(url: string) -> string is
 end
 
 ;; ── Manifest of a fetched library ────────────────────────────────────────────
-;; bit reads Bit.hk; for libraries not migrated yet it also understands the
-;; predecessors' manifests (Bytes.hk = H#, Virus.hk = HackerScript, bit.hk).
 
 fn lib_manifest(dir: string) -> hk::Hk is
-    let candidates: [string] = ["Bit.hk", "bit.hk", "Bytes.hk", "bytes.hk", "Virus.hk"]
+    let candidates: [string] = ["Bit.hk", "bit.hk"]
     let mut i: int = 0
     while i < array_len(candidates) is
         if file_exists(dir + "/" + candidates[i]) is
@@ -81,10 +92,8 @@ end
 
 fn detect_lang(dir: string, h: hk::Hk, hint: string) -> string is
     if hint != "" is return hint end
-    let declared: string = index::normalize_lang(util::or_default(hk::hk_pkg(h, "lang", ""), hk::hk_get(h, "build", "lang", "")))
-    if declared != "" is return declared end
-    if file_exists(dir + "/Virus.hk") is return "hackerscript" end
-    if file_exists(dir + "/Bytes.hk") || file_exists(dir + "/bytes.hk") is return "hsharp" end
+    let declared_all: [string] = index::parse_langs(util::or_default(hk::hk_pkg(h, "lang", ""), hk::hk_get(h, "build", "lang", "")))
+    if array_len(declared_all) > 0 is return declared_all[0] end
     let p: project::Project = project::load(dir)
     let found: [string] = project::detect_langs(p)
     if array_len(found) > 0 is return found[0] end
@@ -167,15 +176,25 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
     end
 
     ;; 1. resolve name + url
-    let mut name: string = spec
+    let mut name: string = string_slice(spec, 0, string_len(spec))
     let mut url: string = ""
     let mut rev: string = rev_in
     let mut pinned: string = ""
     let mut hint_lang: string = o.io_lang
+    let mut dir: string = o.io_dir
+    let mut source: string = if o.io_source != "" then o.io_source else "index"
 
     if util::is_url(spec) is
-        url = spec
+        url = string_slice(spec, 0, string_len(spec))
         name = repo_name_from_url(spec)
+        if o.io_source == "" is source = "git" end
+        ;; `https://host/org/repo#crates/mine` — the fragment names a directory of the repository
+        let hash: int = string_find(spec, "#")
+        if hash >= 0 is
+            url = string_slice(spec, 0, hash)
+            if dir == "" is dir = string_slice(spec, hash + 1, string_len(spec)) end
+            name = repo_name_from_url(url)
+        end
     else is
         if !util::valid_name(spec) is
             ui::fail("invalid library name '" + spec + "'")
@@ -190,10 +209,12 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
         end
         name = index::e_name(e)
         url = index::e_target(e)
+        if dir == "" is dir = index::e_dir(e) end
         if rev == "" is rev = index::e_rev(e) end
         pinned = index::e_checksum(e)
         if hint_lang == "" is hint_lang = index::e_lang(e) end
     end
+    if o.io_name != "" is name = o.io_name end
     if !util::valid_name(name) is
         ui::fail("invalid library name '" + name + "'")
         return 1
@@ -215,7 +236,7 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
         return 1
     end
 
-    ui::line(ui::dim("fetching") + " " + ui::bold(name) + "  " + ui::dim(url))
+    ui::line(ui::dim("fetching") + " " + ui::bold(name) + "  " + ui::dim(url + (if dir != "" then "  [" + dir + "]" else "")))
     util::mkdir_p(util::tmp_dir())
     let tmp: string = util::tmp_dir() + "/" + name + "-" + to_string(proc_id())
     util::rm_rf(tmp)
@@ -243,13 +264,20 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
     let dest: string = lib_dir(name, util::short_hash(commit))
     let version: string = util::short_hash(commit)
     util::rm_rf(tmp + "/.git")
+    let held: string = if dir != "" then tmp + "/" + dir else tmp
+    if !dir_exists(held) is
+        ui::fail(name + ": the repository has no directory '" + dir + "'")
+        util::rm_rf(tmp)
+        return 1
+    end
     util::mkdir_p(lib_root(name))
     if dir_exists(dest) is util::rm_rf(dest) end
-    if util::run("mv " + util::sq(tmp) + " " + util::sq(dest)) != 0 is
+    if util::run("mv " + util::sq(held) + " " + util::sq(dest)) != 0 is
         ui::fail("cannot move the library into " + dest)
         util::rm_rf(tmp)
         return 1
     end
+    if dir != "" is util::rm_rf(tmp) end
 
     ;; 4. checksum (+ pin)
     let sum: string = checksum::dir_checksum(dest)
@@ -289,13 +317,49 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
     lock::lock_write(lock::global_lock_path(), lock::lock_set(gl, lock::Locked {
         lk_name: name, lk_version: version, lk_commit: commit, lk_url: url,
         lk_checksum: checksum::tag(sum), lk_lang: lang, lk_output: out_used, lk_at: util::now_iso(),
-        lk_range: "", lk_tag: looks_like_tag(rev)
+        lk_range: "", lk_tag: looks_like_tag(rev), lk_source: source, lk_dir: dir
     }))
 
     ui::ok(ui::bold(name) + " " + ui::dim("@ " + version + "  " + project::lang_label(lang) + "  " + out_used +
            "  sha256:" + util::short_hash(sum)))
 
     ;; 8. dependencies of the library itself
+    if install_lib_deps(name, h, dest, o) != 0 is return 1 end
+    return 0
+end
+
+;; One dependency of an installed library. 0 = fine, 1 = could not be installed.
+fn install_one_lib_dep(owner: string, d: project::Dep, dest: string, o: InstallOpts) -> int is
+    let kind: string = project::dep_kind(d)
+    if project::dep_optional(d) is return 0 end
+    if kind == "invalid" is
+        ui::warn(owner + ": dependency '" + project::dep_name(d) + "' has no usable source — ignored (system libraries go in [system-dependencies])")
+        return 0
+    end
+    if kind == "path" is
+        ui::note(owner + ": path dependency '" + project::dep_name(d) + "' is only for local development — skipped")
+        return 0
+    end
+    if project::is_registry_kind(kind) || project::is_builtin_kind(kind) is
+        let v: string = install_registry(dest + "/.bit/libs", d, "", false, false, o.io_verbose)
+        if v == "" is return 1 end
+        return 0
+    end
+    let dspec: string = if kind == "git" then project::dep_arg(d) else project::dep_name(d)
+    let mut drev: string = project::dep_rev(d)
+    if project::dep_range(d) != "" is
+        drev = resolve_range(dspec, project::dep_range(d))
+        if drev == "" is
+            ui::bad(owner + ": no version of " + project::dep_name(d) + " matches " + project::dep_range(d))
+            return 1
+        end
+    end
+    let dopts: InstallOpts = with_origin(deeper(o), project::dep_name(d), project::dep_dir(d), if kind == "git" then "git" else "index")
+    if install_lib(dspec, drev, dopts) != 0 is return 1 end
+    return 0
+end
+
+fn install_lib_deps(name: string, h: hk::Hk, dest: string, o: InstallOpts) -> int is
     let dep_keys: [string] = hk::hk_keys(h, "dependencies")
     let mut failed: int = 0
     let mut i: int = 0
@@ -304,24 +368,9 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
     let show_bar: bool = array_len(dep_keys) > 1
     while i < array_len(dep_keys) is
         if !string_contains(dep_keys[i], ".") is
-            let d: project::Dep = project::parse_dep(dep_keys[i], hk::hk_get(h, "dependencies", dep_keys[i], ""), h)
+            let d: project::Dep = project::parse_dep(dep_keys[i], hk::hk_get(h, "dependencies", dep_keys[i], ""), h, "dependencies")
             if show_bar is pbar.clear() end
-            if project::dep_kind(d) == "invalid" is
-                ui::warn(name + ": dependency '" + dep_keys[i] + "' is declared dynamic — ignored (bit links statically)")
-            else is
-                let dspec: string = if project::dep_kind(d) == "git" then project::dep_arg(d) else project::dep_name(d)
-                let mut drev: string = project::dep_rev(d)
-                if project::dep_range(d) != "" is
-                    drev = resolve_range(dspec, project::dep_range(d))
-                    if drev == "" is
-                        ui::bad(name + ": no version of " + project::dep_name(d) + " matches " + project::dep_range(d))
-                        failed += 1
-                    end
-                end
-                if drev != "" || project::dep_range(d) == "" is
-                    if install_lib(dspec, drev, deeper(o)) != 0 is failed += 1 end
-                end
-            end
+            failed += install_one_lib_dep(name, d, dest, o)
         end
         i += 1
         pbar = pbar.inc(1)
@@ -336,6 +385,41 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
     end
     if failed > 0 is return 1 end
     return 0
+end
+
+;; ── Registry dependencies (pypi / crates / npm / jsr / vira / std / core) ────
+
+;; Does an installed registry version satisfy what Bit.hk asks for?
+fn spec_ok(version: string, spec: string) -> bool is
+    let s: string = string_trim(spec)
+    if s == "" || s == "*" || string_lower(s) == "newest" || string_lower(s) == "latest" is return true end
+    if version == s is return true end
+    let v: int = semver::parse(version)
+    if v < 0 is return false end
+    return semver::satisfies(v, semver::parse_range(s))
+end
+
+pub fn registry_dir(base: string, d: project::Dep) -> string is
+    return base + "/" + project::dep_kind(d) + "/" + project::dep_name(d)
+end
+
+;; Makes sure a registry dependency is present in `base`/<source>/<name>/.
+;;   * an installed copy that fits is kept (no network);
+;;   * with a lock entry (`locked_version`) exactly that version is fetched, so builds repeat;
+;;   * otherwise the newest version that satisfies the range.
+;; Returns the exact version, "" on failure.
+pub fn install_registry(base: string, d: project::Dep, locked_version: string, use_lock: bool, force: bool, verbose: bool) -> string is
+    let kind: string = project::dep_kind(d)
+    let dest: string = registry_dir(base, d)
+    let spec: string = project::dep_range(d)
+    let have: string = registry::installed_version(dest)
+    if !force && have != "" && spec_ok(have, spec) is
+        if !use_lock || locked_version == "" || locked_version == have is return have end
+    end
+    let mut want: string = string_slice(spec, 0, string_len(spec))
+    if use_lock && locked_version != "" && spec_ok(locked_version, spec) is want = locked_version end
+    if !force && net::offline() && have != "" is return have end
+    return registry::install(kind, project::dep_package(d), want, dest, verbose)
 end
 
 ;; ── Remove ───────────────────────────────────────────────────────────────────
