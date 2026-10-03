@@ -1,5 +1,8 @@
 mod util
-use "std -> json" from "json"
+;; NOTE: no `use "std -> json"` here. Importing the std wrapper mangles its fns to
+;; json_get_str / json_set_str / json_stringify_pretty …, which collide with the LLVM
+;; builtins of the same names (self-recursion / wrong arity -> invalid IR). `json::get_str`,
+;; `json::set_str` and `json::empty_object` resolve straight to those builtins instead.
 
 pub struct Locked is
     pub lk_name:     string
@@ -12,6 +15,8 @@ pub struct Locked is
     pub lk_at:       string
     pub lk_range:    string   ;; constraint the entry was resolved from (`^1.2`), "" = none
     pub lk_tag:      string   ;; git tag it resolved to (`v1.4.2`), "" = a branch / commit
+    pub lk_source:   string   ;; index | git | pypi | crates | npm | jsr | vira | std | core
+    pub lk_dir:      string   ;; directory of the repository the library was taken from ("" = the root)
 end
 
 pub struct Lock is
@@ -29,9 +34,17 @@ pub fn locked_output(p: Locked)   -> string is return p.lk_output end
 pub fn locked_at(p: Locked)       -> string is return p.lk_at end
 pub fn locked_range(p: Locked)    -> string is return p.lk_range end
 pub fn locked_tag(p: Locked)      -> string is return p.lk_tag end
+pub fn locked_source(p: Locked)   -> string is return p.lk_source end
+pub fn locked_dir(p: Locked)      -> string is return p.lk_dir end
 
 pub fn lock_len(l: Lock)              -> int    is return l.lock_count end
 pub fn lock_at(l: Lock, i: int)       -> Locked is return l.lock_items[i] end
+
+pub fn empty_entry() -> Locked is
+    return Locked { lk_name: "", lk_version: "", lk_commit: "", lk_url: "", lk_checksum: "",
+                    lk_lang: "", lk_output: "", lk_at: "", lk_range: "", lk_tag: "",
+                    lk_source: "", lk_dir: "" }
+end
 
 pub fn empty_lock() -> Lock is
     return Lock { lock_items: [], lock_count: 0 }
@@ -45,8 +58,6 @@ end
 ;;   {"name":"mold","version":"a1b2c3d4e5f6","commit":"…","url":"…","checksum":"sha256:…",…}
 ;; (flat objects are exactly what std `json` reads and writes in compiled H#).
 ;;
-;; Files written by older bit versions (one pretty-printed object of objects) are
-;; recognised and rewritten in this format on first read.
 
 fn locked_from(o: string, name: string) -> Locked is
     return Locked {
@@ -59,50 +70,10 @@ fn locked_from(o: string, name: string) -> Locked is
         lk_output:   json::get_str(o, "output"),
         lk_at:       json::get_str(o, "installed_at"),
         lk_range:    json::get_str(o, "range"),
-        lk_tag:      json::get_str(o, "tag")
+        lk_tag:      json::get_str(o, "tag"),
+        lk_source:   json::get_str(o, "source"),
+        lk_dir:      json::get_str(o, "dir")
     }
-end
-
-;; Old format:   {
-;;                 "name": {
-;;                   "version": "…",
-;;                   …
-;;                 },
-;;               }
-pub fn is_old_format(text: string) -> bool is
-    let t: string = string_trim(text)
-    if !string_starts_with(t, "{") is return false end
-    let first: string = string_trim(string_split(t, "\n")[0])
-    return first == "{"
-end
-
-fn parse_old(text: string) -> [Locked] is
-    let lines: [string] = string_split(string_replace(text, "\r", ""), "\n")
-    let mut items: [Locked] = []
-    let mut name: string = ""
-    let mut cur: string = ""
-    let mut i: int = 0
-    while i < array_len(lines) is
-        let t: string = string_trim(lines[i])
-        i += 1
-        if name == "" is
-            ;; entry start:   "mold": {
-            if string_starts_with(t, "\"") && string_ends_with(t, "{") is
-                let close: int = string_find(string_slice(t, 1, string_len(t)), "\"")
-                if close > 0 is
-                    name = string_slice(t, 1, close + 1)
-                    cur = "{"
-                end
-            end
-        else if t == "}" || t == "}," is
-            items = array_push(items, locked_from(cur + "}", name))
-            name = ""
-            cur = ""
-        else if t != "" is
-            cur = cur + t
-        end
-    end
-    return items
 end
 
 fn write_items(path: string, items: [Locked]) is
@@ -122,6 +93,8 @@ fn write_items(path: string, items: [Locked]) is
         o = json::set_str(o, "installed_at", p.lk_at)
         o = json::set_str(o, "range", p.lk_range)
         o = json::set_str(o, "tag", p.lk_tag)
+        o = json::set_str(o, "source", p.lk_source)
+        o = json::set_str(o, "dir", p.lk_dir)
         out = out + o + "\n"
         i += 1
     end
@@ -134,13 +107,6 @@ end
 pub fn lock_read(path: string) -> Lock is
     if !file_exists(path) is return empty_lock() end
     let text: string = file_read(path)
-    if is_old_format(text) is
-        let old: [Locked] = parse_old(text)
-        util::run("cp -f " + util::sq(path) + " " + util::sq(path + ".old"))
-        write_items(path, old)
-        write("  note: converted " + path + " to the current lock format (old copy: " + path + ".old)")
-        return Lock { lock_items: old, lock_count: array_len(old) }
-    end
     let lines: [string] = string_split(string_replace(text, "\r", ""), "\n")
     let mut items: [Locked] = []
     let mut i: int = 0
@@ -164,7 +130,8 @@ pub fn lock_get(l: Lock, name: string) -> Locked is
         i += 1
     end
     return Locked { lk_name: "", lk_version: "", lk_commit: "", lk_url: "", lk_checksum: "",
-                    lk_lang: "", lk_output: "", lk_at: "", lk_range: "", lk_tag: "" }
+                    lk_lang: "", lk_output: "", lk_at: "", lk_range: "", lk_tag: "",
+                    lk_source: "", lk_dir: "" }
 end
 
 pub fn lock_has(l: Lock, name: string) -> bool is
