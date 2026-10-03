@@ -1,0 +1,27 @@
+mod util
+mod ui
+mod project
+mod build
+mod workflow
+mod features
+mod flags
+
+;; One package, from `[features]` to the finished build: what `bit build` does for a single
+;; project and what a workspace repeats for every member.
+
+;; Builds `p`. `in_ws`: the package is a member of a workspace (features apply only where declared).
+pub fn build_one(p: project::Project, o: build::BuildOpts, use_lock: bool, in_ws: bool) -> int is
+    if features::activate(p, flags::features_for(p, in_ws), flags::no_default(), flags::all_features(), build::opts_verbose(o)) != 0 is
+        return 1
+    end
+    if workflow::ensure_deps(p, build::opts_verbose(o), build::opts_release(o), use_lock, false) != 0 is
+        ui::fail("some dependencies could not be installed")
+        return 1
+    end
+    ;; `[default-build] -> wasm / jar / library => true` make a bare `bit` produce them
+    let wasm: bool = flags::wasm() || project::get_bool(p, "default-build", "wasm", false)
+    let jar: bool = flags::jar() || project::get_bool(p, "default-build", "jar", false)
+    let rlib: bool = flags::rlib() || project::get_bool(p, "default-build", "library", false)
+    let t: build::BuildOpts = build::opts_with_targets(o, wasm, jar, rlib, flags::bin())
+    return build::build_project(p, t)
+end
