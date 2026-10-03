@@ -1,0 +1,389 @@
+mod util
+mod ui
+mod net
+mod semver
+mod index
+;; NOTE: no `use "std -> json"` here. Importing the std wrapper mangles its fns to
+;; json_get_str / json_set_str / json_stringify_pretty …, which collide with the LLVM
+;; builtins of the same names (self-recursion / wrong arity -> invalid IR). `json::get_str`,
+;; `json::set_str` and `json::empty_object` resolve straight to those builtins instead.
+
+;; ── Dependencies that do not come from git ───────────────────────────────────
+;;
+;;   -> requests => pypi 2.31      PyPI        https://pypi.org
+;;   -> serde    => crates ^1      crates.io   https://crates.io   (sparse index, no cargo needed)
+;;   -> left-pad => npm 1.3        npm         https://registry.npmjs.org
+;;   -> @std/fs  => jsr            JSR         https://npm.jsr.io
+;;   -> zlib     => vira           the vira.io repository list (git / static-lib / shared-lib / rust-lib)
+;;   -> json     => std            part of the language's own standard library — nothing to fetch
+;;   -> core     => core
+;;
+;; Everything is fetched straight from the registry's HTTP API with curl and tar/unzip; no pip,
+;; cargo or npm is needed. A package lands in  <project>/cache/libs/<source>/<name>/  together
+;; with a `.bit-source` file (source / package / version), which is what Bit.lock's checksum
+;; is computed over. The versions rules are the same as for git dependencies: newest (empty,
+;; `*`, `newest`), pinned (`2.31`, `=2.31.0`), ranges (`^1`, `~1.2`, `>=1 <2`, `1.x`).
+
+pub fn registry_url(kind: string) -> string is
+    if kind == "pypi" is return "https://pypi.org" end
+    if kind == "crates" is return "https://crates.io" end
+    if kind == "npm" is return "https://registry.npmjs.org" end
+    if kind == "jsr" is return "https://npm.jsr.io" end
+    if kind == "vira" is return "https://github.com/vira-io/repository" end
+    return ""
+end
+
+fn vira_list_url() -> string is
+    let o: string = env_get("BIT_VIRA_LIST_URL")
+    if o != "" is return o end
+    return "https://raw.githubusercontent.com/vira-io/repository/main/repo-list.json"
+end
+
+;; ── HTTP helpers ─────────────────────────────────────────────────────────────
+
+fn scratch(tag: string) -> string is
+    util::mkdir_p(util::tmp_dir())
+    return util::tmp_dir() + "/reg-" + tag + "-" + to_string(proc_id()) + "-" + to_string(time_ms())
+end
+
+fn download(url: string, dest: string, accept: string) -> bool is
+    if net::offline() is return false end
+    util::mkdir_p(util::dirname(dest))
+    let limit: string = if net::timeout_s() > 0 then " --max-time " + to_string(net::timeout_s()) else ""
+    let hdr: string = if accept != "" then " -H " + util::sq("Accept: " + accept) else ""
+    let cmd: string = "curl -fsSL --connect-timeout 15" + limit + hdr + " " + util::sq(url) + " -o " + util::sq(dest)
+    return net::run_retry(cmd) == 0
+end
+
+;; Body of `url` ("" when it cannot be fetched).
+fn fetch_text(url: string, accept: string) -> string is
+    let f: string = scratch("txt")
+    if !download(url, f, accept) is
+        util::run("rm -f " + util::sq(f))
+        return ""
+    end
+    let body: string = file_read(f)
+    util::run("rm -f " + util::sq(f))
+    return body
+end
+
+;; Lines printed by a shell pipeline, blanks dropped.
+fn lines_of(cmd: string) -> [string] is
+    let txt: string = util::capture(cmd)
+    let mut out: [string] = []
+    if txt == "" is return out end
+    let parts: [string] = string_split(txt, "\n")
+    let mut i: int = 0
+    while i < array_len(parts) is
+        let t: string = string_trim(parts[i])
+        if t != "" is out = array_push(out, t) end
+        i += 1
+    end
+    return out
+end
+
+fn is_newest(spec: string) -> bool is
+    let s: string = string_lower(string_trim(spec))
+    return s == "" || s == "*" || s == "newest" || s == "latest"
+end
+
+;; ── Versions ─────────────────────────────────────────────────────────────────
+
+;; crates.io sparse-index path: 1/a  2/ab  3/a/abc  ab/cd/abcdef
+fn crates_index_path(name: string) -> string is
+    let n: string = string_lower(name)
+    let len: int = string_len(n)
+    if len == 1 is return "1/" + n end
+    if len == 2 is return "2/" + n end
+    if len == 3 is return "3/" + string_slice(n, 0, 1) + "/" + n end
+    return string_slice(n, 0, 2) + "/" + string_slice(n, 2, 4) + "/" + n
+end
+
+fn npm_pkg_url_name(pkg: string) -> string is
+    return string_replace(pkg, "/", "%2f")
+end
+
+;; jsr `@scope/name` -> npm-compatible `@jsr/scope__name`
+pub fn jsr_npm_name(pkg: string) -> string is
+    let t: string = if string_starts_with(pkg, "@") then string_slice(pkg, 1, string_len(pkg)) else pkg
+    let slash: int = string_find(t, "/")
+    if slash < 0 is return "" end
+    return "@jsr/" + string_slice(t, 0, slash) + "__" + string_slice(t, slash + 1, string_len(t))
+end
+
+fn last_segment(s: string) -> string is
+    let slash: int = string_find(s, "/")
+    if slash < 0 is return s end
+    return last_segment(string_slice(s, slash + 1, string_len(s)))
+end
+
+;; Every published (non-yanked) version of a package; [] when the registry cannot be reached.
+pub fn versions_of(kind: string, pkg: string) -> [string] is
+    if kind == "crates" is
+        let f: string = scratch("crates")
+        if !download("https://index.crates.io/" + crates_index_path(pkg), f, "") is
+            util::run("rm -f " + util::sq(f))
+            return []
+        end
+        let out: [string] = lines_of("grep -v '\"yanked\":true' " + util::sq(f) + " | grep -o '\"vers\":\"[^\"]*\"' | cut -d'\"' -f4")
+        util::run("rm -f " + util::sq(f))
+        return out
+    end
+    if kind == "npm" || kind == "jsr" is
+        let name: string = if kind == "jsr" then jsr_npm_name(pkg) else pkg
+        if name == "" is return [] end
+        let base: string = if kind == "jsr" then "https://npm.jsr.io/" else "https://registry.npmjs.org/"
+        let f: string = scratch("npm")
+        if !download(base + npm_pkg_url_name(name), f, "application/vnd.npm.install-v1+json") is
+            util::run("rm -f " + util::sq(f))
+            return []
+        end
+        let out: [string] = lines_of("grep -o '\"version\":\"[^\"]*\"' " + util::sq(f) + " | cut -d'\"' -f4 | sort -u")
+        util::run("rm -f " + util::sq(f))
+        return out
+    end
+    if kind == "pypi" is
+        let f: string = scratch("pypi")
+        if !download("https://pypi.org/pypi/" + pkg + "/json", f, "") is
+            util::run("rm -f " + util::sq(f))
+            return []
+        end
+        let out: [string] = lines_of("grep -o '\"[0-9][^\"]*\": *\\[' " + util::sq(f) + " | cut -d'\"' -f2 | sort -u")
+        util::run("rm -f " + util::sq(f))
+        return out
+    end
+    return []
+end
+
+;; PyPI's own idea of "newest" (also covers versions with 4+ parts that semver cannot rank).
+fn pypi_latest(pkg: string) -> string is
+    let f: string = scratch("pypi-latest")
+    if !download("https://pypi.org/pypi/" + pkg + "/json", f, "") is
+        util::run("rm -f " + util::sq(f))
+        return ""
+    end
+    let v: string = util::capture("grep -o '\"version\": *\"[^\"]*\"' " + util::sq(f) + " | head -1 | cut -d'\"' -f4")
+    util::run("rm -f " + util::sq(f))
+    return v
+end
+
+;; The exact version that `spec` stands for, or "" when nothing matches / offline.
+pub fn resolve(kind: string, pkg: string, spec: string) -> string is
+    if is_builtin(kind) is return "builtin" end
+    if kind == "vira" is return "" end
+    let vs: [string] = versions_of(kind, pkg)
+    if array_len(vs) == 0 is return "" end
+    let s: string = string_trim(spec)
+    if !is_newest(s) && util::array_has(vs, s) is return s end
+    if is_newest(s) is
+        let best: string = semver::newest_tag(vs)
+        if best == "" && kind == "pypi" is return pypi_latest(pkg) end
+        return best
+    end
+    return semver::best_tag(vs, s)
+end
+
+pub fn is_builtin(kind: string) -> bool is
+    return kind == "std" || kind == "core"
+end
+
+;; ── Unpacking ────────────────────────────────────────────────────────────────
+
+fn unpack(archive: string, dest: string, strip: bool) -> bool is
+    util::mkdir_p(dest)
+    if string_ends_with(archive, ".whl") || string_ends_with(archive, ".zip") is
+        if util::tool_exists("unzip") is
+            return util::run("unzip -q -o " + util::sq(archive) + " -d " + util::sq(dest)) == 0
+        end
+        if util::tool_exists("python3") is
+            return util::run("python3 -m zipfile -e " + util::sq(archive) + " " + util::sq(dest)) == 0
+        end
+        ui::fail("unzip (or python3) is needed to unpack " + util::basename(archive))
+        return false
+    end
+    return util::run("tar -xzf " + util::sq(archive) + " -C " + util::sq(dest) + (if strip then " --strip-components=1" else "")) == 0
+end
+
+fn write_source_meta(dest: string, kind: string, pkg: string, version: string, url: string) is
+    file_write(dest + "/.bit-source", "source=" + kind + "\npackage=" + pkg + "\nversion=" + version + "\nurl=" + url + "\n")
+end
+
+;; PyPI: a `py3-none-any` wheel, else any wheel, else the sdist.
+fn pypi_file_url(pkg: string, version: string) -> string is
+    let f: string = scratch("pypi-files")
+    if !download("https://pypi.org/pypi/" + pkg + "/" + version + "/json", f, "") is
+        util::run("rm -f " + util::sq(f))
+        return ""
+    end
+    let all: string = "grep -o 'https://files.pythonhosted.org/[^\"]*' " + util::sq(f) + " | sort -u"
+    let mut url: string = util::capture(all + " | grep 'py3-none-any\\.whl$' | head -1")
+    if url == "" is url = util::capture(all + " | grep '\\.whl$' | head -1") end
+    if url == "" is url = util::capture(all + " | grep '\\.tar\\.gz$' | head -1") end
+    util::run("rm -f " + util::sq(f))
+    return url
+end
+
+fn archive_url(kind: string, pkg: string, version: string) -> string is
+    if kind == "crates" is
+        return "https://static.crates.io/crates/" + pkg + "/" + pkg + "-" + version + ".crate"
+    end
+    if kind == "npm" is
+        return "https://registry.npmjs.org/" + pkg + "/-/" + last_segment(pkg) + "-" + version + ".tgz"
+    end
+    if kind == "jsr" is
+        let n: string = jsr_npm_name(pkg)
+        if n == "" is return "" end
+        return "https://npm.jsr.io/" + n + "/-/" + last_segment(n) + "-" + version + ".tgz"
+    end
+    if kind == "pypi" is return pypi_file_url(pkg, version) end
+    return ""
+end
+
+;; ── vira.io ──────────────────────────────────────────────────────────────────
+
+pub struct ViraEntry is
+    pub ve_name: string
+    pub ve_type: string     ;; git | static-lib | shared-lib | rust-lib
+    pub ve_lib:  string     ;; repository url, or a file url that may contain {version}
+end
+
+fn vira_find(name: string) -> ViraEntry is
+    let empty: ViraEntry = ViraEntry { ve_name: "", ve_type: "", ve_lib: "" }
+    let body: string = fetch_text(vira_list_url(), "")
+    if body == "" is return empty end
+    let objs: [string] = index::chop_objects(body)
+    let mut i: int = 0
+    while i < array_len(objs) is
+        if json::get_str(objs[i], "name") == name is
+            return ViraEntry { ve_name: name, ve_type: json::get_str(objs[i], "type"), ve_lib: json::get_str(objs[i], "lib") }
+        end
+        i += 1
+    end
+    return empty
+end
+
+;; `https://github.com/org/repo/...` -> "org/repo"
+fn github_org_repo(url: string) -> string is
+    let marker: string = "github.com/"
+    let at: int = string_find(url, marker)
+    if at < 0 is return "" end
+    let rest: string = string_slice(url, at + string_len(marker), string_len(url))
+    let parts: [string] = string_split(rest, "/")
+    if array_len(parts) < 2 is return "" end
+    return parts[0] + "/" + parts[1]
+end
+
+fn vira_resolve_url(template: string, version: string) -> string is
+    if !string_contains(template, "{{version}}") is return template end
+    let mut v: string = version
+    if is_newest(v) is
+        let org: string = github_org_repo(template)
+        if org == "" is return "" end
+        let tag: string = util::capture("curl -fsSL --connect-timeout 15 " + util::sq("https://api.github.com/repos/" + org + "/releases/latest") +
+                                        " 2>/dev/null | grep -o '\"tag_name\": *\"[^\"]*\"' | head -1 | cut -d'\"' -f4")
+        v = tag
+    end
+    if v == "" is return "" end
+    return string_replace(template, "{{version}}", v)
+end
+
+fn install_vira(name: string, spec: string, dest: string, verbose: bool) -> string is
+    let e: ViraEntry = vira_find(name)
+    if e.ve_name == "" is
+        ui::fail("vira: '" + name + "' is not in the vira.io repository list (" + vira_list_url() + ")")
+        return ""
+    end
+    if e.ve_type == "git" is
+        let url: string = if e.ve_lib != "" then e.ve_lib else "https://github.com/vira-io/" + name
+        let rev: string = if is_newest(spec) then "" else spec
+        util::rm_rf(dest)
+        if net::clone(url, rev, dest, "cloning " + name, verbose) != 0 is
+            ui::fail("vira: git clone failed: " + url)
+            return ""
+        end
+        let commit: string = util::capture("git -C " + util::sq(dest) + " rev-parse HEAD 2>/dev/null")
+        util::rm_rf(dest + "/.git")
+        write_source_meta(dest, "vira", name, if commit != "" then util::short_hash(commit) else spec, url)
+        return if commit != "" then util::short_hash(commit) else spec
+    end
+    if e.ve_type == "static-lib" || e.ve_type == "shared-lib" || e.ve_type == "rust-lib" is
+        let url: string = vira_resolve_url(e.ve_lib, if is_newest(spec) then "" else spec)
+        if url == "" is
+            ui::fail("vira: cannot work out the download url of " + name + " (give a version)")
+            return ""
+        end
+        util::rm_rf(dest)
+        util::mkdir_p(dest)
+        let file: string = dest + "/" + util::basename(url)
+        if !download(url, file, "") is
+            ui::fail("vira: download failed: " + url)
+            return ""
+        end
+        ;; the same two-line sidecar Virus wrote, so the HackerScript build wiring reads it as before
+        file_write(dest + "/.vira-meta.txt", "type=" + e.ve_type + "\nfile=" + file + "\n")
+        let ver: string = if is_newest(spec) then util::basename(url) else spec
+        write_source_meta(dest, "vira", name, ver, url)
+        return ver
+    end
+    ui::fail("vira: unknown library type '" + e.ve_type + "' for " + name + " (expected git, static-lib, shared-lib or rust-lib)")
+    return ""
+end
+
+;; ── Installing ───────────────────────────────────────────────────────────────
+
+;; Installs `pkg` from registry `kind` into `dest` (replacing what is there).
+;; Returns the exact version that was installed, "" on failure.
+pub fn install(kind: string, pkg: string, spec: string, dest: string, verbose: bool) -> string is
+    if is_builtin(kind) is
+        util::mkdir_p(dest)
+        file_write(dest + "/.bit-source", "source=" + kind + "\npackage=" + pkg + "\nversion=builtin\n")
+        return "builtin"
+    end
+    if net::offline() is
+        ui::fail(kind + ":" + pkg + " is not in cache/ and bit is offline")
+        return ""
+    end
+    if kind == "vira" is return install_vira(pkg, spec, dest, verbose) end
+
+    let version: string = resolve(kind, pkg, spec)
+    if version == "" is
+        ui::fail(kind + ": no version of " + pkg + " matches '" + (if is_newest(spec) then "newest" else spec) + "'  " +
+                 ui::dim("(" + registry_url(kind) + ")"))
+        return ""
+    end
+    let url: string = archive_url(kind, pkg, version)
+    if url == "" is
+        ui::fail(kind + ": no downloadable file for " + pkg + " " + version)
+        return ""
+    end
+    let file: string = scratch("dl") + "-" + util::basename(url)
+    ui::line(ui::dim("fetching") + " " + ui::bold(pkg) + " " + ui::dim(version + "  " + url))
+    if !download(url, file, "") is
+        ui::fail(kind + ": download failed: " + url)
+        util::run("rm -f " + util::sq(file))
+        return ""
+    end
+    util::rm_rf(dest)
+    let strip: bool = kind != "pypi" || !string_ends_with(file, ".whl")
+    if !unpack(file, dest, strip) is
+        ui::fail(kind + ": cannot unpack " + util::basename(file))
+        util::run("rm -f " + util::sq(file))
+        util::rm_rf(dest)
+        return ""
+    end
+    util::run("rm -f " + util::sq(file))
+    write_source_meta(dest, kind, pkg, version, url)
+    return version
+end
+
+;; Version recorded in a previously installed package ("" when there is none).
+pub fn installed_version(dest: string) -> string is
+    let f: string = dest + "/.bit-source"
+    if !file_exists(f) is return "" end
+    return util::capture("grep '^version=' " + util::sq(f) + " | head -1 | cut -d= -f2-")
+end
+
+;; `bit outdated`: the newest version of a registry package ("" = unknown).
+pub fn newest(kind: string, pkg: string) -> string is
+    return resolve(kind, pkg, "")
+end
