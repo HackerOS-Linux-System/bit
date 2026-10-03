@@ -96,7 +96,7 @@ fn collect(p: project::Project, verbose: bool, is_dep: bool, triple: string, dep
     if depth > 8 is return acc end
     let mut paths: string = acc
     if has_native(p) is
-        if ensure_native(p, verbose, is_dep, triple) != 0 is return "\x00FAILED" end
+        if ensure_native(p, verbose, is_dep, triple) != 0 is return "@@bit-native-failed@@" end
         paths = add_path(paths, native_dir(p, triple))
     end
     let deps: [project::Dep] = project::deps(p)
@@ -106,7 +106,7 @@ fn collect(p: project::Project, verbose: bool, is_dep: bool, triple: string, dep
         if dir != "" && dir_exists(dir) && project::dep_kind(deps[i]) != "invalid" is
             let sub: project::Project = project::load_with_cache(dir, dir + "/.bit")
             paths = collect(sub, verbose, true, triple, depth + 1, paths)
-            if paths == "\x00FAILED" is return paths end
+            if paths == "@@bit-native-failed@@" is return paths end
         end
         i += 1
     end
@@ -117,7 +117,7 @@ end
 ;; BIT_NATIVE_LIBPATH). Returns 0 on success.
 pub fn prepare(p: project::Project, verbose: bool, triple: string) -> int is
     let paths: string = collect(p, verbose, false, triple, 0, "")
-    if paths == "\x00FAILED" is return 1 end
+    if paths == "@@bit-native-failed@@" is return 1 end
     if paths == "" is return 0 end
     let old: string = env_get("LIBRARY_PATH")
     env_set("BIT_NATIVE_LIBPATH", paths)
