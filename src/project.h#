@@ -1,4 +1,5 @@
 mod util
+mod ui
 mod hk
 mod index
 mod semver
@@ -20,9 +21,33 @@ pub fn hk_of(p: Project)       -> hk::Hk  is return p.pj_hk end
 
 ;; ── Finding & loading ────────────────────────────────────────────────────────
 
+;; Manifest of `dir`: Bit.hk first. The manifests of the tools bit replaces are still read, so an
+;; existing HackerScript (Virus.hk) or H# (Bytes.hk) project builds without any change.
 pub fn manifest_in(dir: string) -> string is
     if file_exists(dir + "/Bit.hk") is return dir + "/Bit.hk" end
     if file_exists(dir + "/bit.hk") is return dir + "/bit.hk" end
+    return legacy_manifest_in(dir)
+end
+
+;; Virus.hk (HackerScript's package manager) / Bytes.hk (bytes, H#'s old package manager).
+pub fn legacy_manifest_in(dir: string) -> string is
+    if file_exists(dir + "/Virus.hk") is return dir + "/Virus.hk" end
+    if file_exists(dir + "/virus.hk") is return dir + "/virus.hk" end
+    if file_exists(dir + "/Bytes.hk") is return dir + "/Bytes.hk" end
+    if file_exists(dir + "/bytes.hk") is return dir + "/bytes.hk" end
+    return ""
+end
+
+pub fn is_legacy_manifest(path: string) -> bool is
+    let b: string = string_lower(util::basename(path))
+    return b == "virus.hk" || b == "bytes.hk"
+end
+
+;; "virus" | "bytes" | "" — which tool wrote this manifest.
+pub fn legacy_kind(path: string) -> string is
+    let b: string = string_lower(util::basename(path))
+    if b == "virus.hk" is return "virus" end
+    if b == "bytes.hk" is return "bytes" end
     return ""
 end
 
@@ -54,6 +79,10 @@ fn lists_member(ws_dir: string, member_dir: string) -> bool is
     while i < array_len(members) is
         let mm: string = string_replace(members[i], "./", "")
         if mm == rel || mm == util::basename(member_dir) is return true end
+        if string_ends_with(mm, "/*") is
+            let base: string = string_slice(mm, 0, string_len(mm) - 1)
+            if string_starts_with(rel, base) && !string_contains(string_slice(rel, string_len(base), string_len(rel)), "/") is return true end
+        end
         i += 1
     end
     return false
@@ -86,7 +115,7 @@ pub fn load(root: string) -> Project is
     }
 end
 
-pub fn cwd() -> string is return fs_cwd() end
+pub fn cwd() -> string is return getcwd() end
 
 ;; Same as `load`, but with the cache directory relocated. Used when bit
 ;; builds an installed library: the artifacts belong under <lib>/.bit/, never
@@ -192,16 +221,15 @@ end
 ;; Languages to build: `[package] -> lang` (csv, "auto" = detect), else detected.
 pub fn langs(p: Project) -> [string] is
     let declared: string = get(p, "package", "lang", get(p, "build", "lang", "auto"))
+    ;; a Virus.hk without `lang` is a HackerScript project (virus only ever built HackerScript)
+    if (string_lower(declared) == "auto" || declared == "") && legacy_kind(p.pj_manifest) == "virus" is
+        return ["hackerscript"]
+    end
     let mut out: [string] = []
     if string_lower(declared) != "auto" && declared != "" is
-        let parts: [string] = util::csv_split(declared)
-        let mut i: int = 0
-        while i < array_len(parts) is
-            let l: string = index::normalize_lang(parts[i])
-            if l != "" && !util::array_has(out, l) is out = array_push(out, l) end
-            i += 1
-        end
+        out = index::parse_langs(declared)
         if array_len(out) > 0 is return out end
+        ui::warn("Bit.hk: unknown lang '" + declared + "' (use h#, hl, hs or HackerScript) — detecting the language from the sources")
     end
     return detect_langs(p)
 end
@@ -250,34 +278,75 @@ pub fn link_mode(p: Project) -> string is
     return string_lower(get(p, "build", "link", "static"))
 end
 
-;; Library output: hlib (default) | so | a | obj  (`lib`/`static` are aliases of `a`).
+;; Library output: hlib (default) | so | a | obj | rlib  (`lib`/`static` are aliases of `a`).
 pub fn lib_output(p: Project) -> string is
     let v: string = string_lower(get(p, "lib", "output", get(p, "build", "lib-output", "hlib")))
     if v == "lib" || v == "static" || v == "archive" is return "a" end
     if v == "shared" || v == "dylib" is return "so" end
     if v == "object" || v == "o" is return "obj" end
+    if v == "rust" || v == "rust-lib" is return "rlib" end
     return v
 end
 
 ;; ── Dependencies ─────────────────────────────────────────────────────────────
+;;
+;;   [dependencies]                       [dev-dependencies]   (same grammar; only for `bit test`)
+;;   -> silver => newest                  newest version (also: *, latest)
+;;   -> silver => 0.1                     that exact version (0.1 = 0.1.0)
+;;   -> silver => ^0.1                    ranges: ^  ~  >=1 <2  1.x
+;;   -> silver => rev v1.4                a tag / branch / commit of the index entry
+;;   -> mine   => git https://host/x/y [rev]      -> mine => github org/repo [rev]
+;;   -> mine   => path ../mine
+;;   -> req    => pypi 2.31   crates ^1   npm 4   jsr    vira    std    core
+;;
+;;   a library that is not in the index (map form):
+;;   -> mine
+;;   --> git => https://github.com/org/repo        (or  github / gitlab / codeberg => org/repo)
+;;   --> dir => crates/mine                        a directory inside the repository
+;;   --> version => ^0.3                           or rev / tag / branch / commit
+;;   --> output => a     --> lang => hs     --> optional => true
 
 pub struct Dep is
-    pub dp_name:   string
-    pub dp_kind:   string    ;; index | git | path | invalid
-    pub dp_arg:    string    ;; git url / path
-    pub dp_rev:    string
-    pub dp_output: string    ;; per-dependency lib output override ("" = the library's own)
-    pub dp_lang:   string
-    pub dp_range:  string    ;; version range (`^1.2`, `~1.2.3`, `>=1 <2`, `1.x`), "" = none
+    pub dp_name:     string
+    pub dp_kind:     string    ;; index | git | path | pypi | crates | npm | jsr | vira | std | core | invalid
+    pub dp_arg:      string    ;; git url / path
+    pub dp_rev:      string
+    pub dp_output:   string    ;; per-dependency lib output override ("" = the library's own)
+    pub dp_lang:     string
+    pub dp_range:    string    ;; version range or pinned version (`^1.2`, `0.1`, `>=1 <2`, `1.x`), "" = newest
+    pub dp_dir:      string    ;; sub-directory of the repository that holds the library ("" = the root)
+    pub dp_package:  string    ;; registry package name when it differs from the key ("" = the key)
+    pub dp_optional: bool      ;; only built when a feature turns it on
 end
 
-pub fn dep_name(d: Dep)   -> string is return d.dp_name end
-pub fn dep_kind(d: Dep)   -> string is return d.dp_kind end
-pub fn dep_arg(d: Dep)    -> string is return d.dp_arg end
-pub fn dep_rev(d: Dep)    -> string is return d.dp_rev end
-pub fn dep_output(d: Dep) -> string is return d.dp_output end
-pub fn dep_lang(d: Dep)   -> string is return d.dp_lang end
-pub fn dep_range(d: Dep)  -> string is return d.dp_range end
+pub fn dep_name(d: Dep)     -> string is return d.dp_name end
+pub fn dep_kind(d: Dep)     -> string is return d.dp_kind end
+pub fn dep_arg(d: Dep)      -> string is return d.dp_arg end
+pub fn dep_rev(d: Dep)      -> string is return d.dp_rev end
+pub fn dep_output(d: Dep)   -> string is return d.dp_output end
+pub fn dep_lang(d: Dep)     -> string is return d.dp_lang end
+pub fn dep_range(d: Dep)    -> string is return d.dp_range end
+pub fn dep_dir(d: Dep)      -> string is return d.dp_dir end
+pub fn dep_optional(d: Dep) -> bool   is return d.dp_optional end
+pub fn dep_package(d: Dep)  -> string is
+    if d.dp_package != "" is return d.dp_package end
+    return d.dp_name
+end
+
+;; Sources whose libraries come from a package registry instead of git.
+pub fn is_registry_kind(kind: string) -> bool is
+    return kind == "pypi" || kind == "crates" || kind == "npm" || kind == "jsr" || kind == "vira"
+end
+
+;; Sources that live in the language's own standard library — nothing to fetch.
+pub fn is_builtin_kind(kind: string) -> bool is
+    return kind == "std" || kind == "core"
+end
+
+;; Everything that ends up as a git clone (index entries and explicit git / org+repo deps).
+pub fn is_git_kind(kind: string) -> bool is
+    return kind == "index" || kind == "git"
+end
 
 fn first_word(s: string) -> string is
     let t: string = string_trim(s)
@@ -293,84 +362,387 @@ fn rest_words(s: string) -> string is
     return string_trim(string_slice(t, sp + 1, string_len(t)))
 end
 
-pub fn parse_dep(name: string, value: string, h: hk::Hk) -> Dep is
+fn is_forge_word(w: string) -> bool is
+    return w == "github" || w == "gitlab" || w == "codeberg" || w == "bitbucket" || w == "sourcehut"
+end
+
+;; `org/repo` (no scheme, exactly one slash, no leading dot / slash)
+fn is_org_repo(s: string) -> bool is
+    let t: string = string_trim(s)
+    if t == "" || util::is_url(t) || string_contains(t, ":") || string_contains(t, " ") is return false end
+    if string_starts_with(t, "/") || string_starts_with(t, ".") || string_starts_with(t, "~") is return false end
+    let parts: [string] = string_split(t, "/")
+    return array_len(parts) == 2 && parts[0] != "" && parts[1] != ""
+end
+
+;; A git location as written by the user -> full clone url (`org/repo` means GitHub).
+fn as_git_url(s: string) -> string is
+    let t: string = string_trim(s)
+    if is_org_repo(t) is return util::forge_url("github", t) end
+    return t
+end
+
+;; First non-empty sub-key of a dependency (`-> name` + `--> key => value`).
+fn sub_of(h: hk::Hk, section: string, name: string, keys: [string]) -> string is
+    let mut i: int = 0
+    while i < array_len(keys) is
+        let v: string = hk::hk_get(h, section, name + "." + keys[i], "")
+        if v != "" is return v end
+        i += 1
+    end
+    return ""
+end
+
+fn is_op_range(s: string) -> bool is
+    return s != "" && string_contains("^~<>=", string_slice(s, 0, 1))
+end
+
+pub fn parse_dep(name: string, value: string, h: hk::Hk, section: string) -> Dep is
     let v: string = string_trim(value)
     let w: string = string_lower(first_word(v))
     let rest: string = rest_words(v)
     let mut kind: string = "index"
     let mut arg: string = ""
-    let mut rev: string = hk::hk_get(h, "dependencies", name + ".rev", "")
-    let mut range: string = hk::hk_get(h, "dependencies", name + ".version", "")
+    let mut rev: string = ""
+    let mut range: string = ""
 
-    if v == "" || v == "*" || w == "newest" || w == "index" || w == "static" || w == "latest" is
+    ;; Virus.hk spelled the language's own modules as a map:   -> std  /  --> io => "*"
+    let std_map: bool = v == "" && is_builtin_kind(name) && array_len(hk::hk_sub_keys(h, section, name)) > 0 &&
+                        sub_of(h, section, name, ["git", "url", "path", "source", "from"]) == ""
+
+    ;; ── the value on the key's own line ──
+    if std_map is
+        kind = string_slice(name, 0, string_len(name))
+    else if v == "" || v == "*" || w == "newest" || w == "index" || w == "latest" is
         kind = "index"
-    else if semver::is_range(v) is
-        ;; `-> regex => ^1.2` — a version range over the library's git tags
-        kind = "index"
-        range = v
-    else if w == "dynamic" is
-        kind = "invalid"          ;; bit links everything statically
+    else if w == "dynamic" || w == "static" is
+        kind = "invalid"
+        arg = w                   ;; linking is not chosen per dependency; system libraries belong in [system-dependencies]
     else if w == "git" is
         kind = "git"
-        arg = first_word(rest)
-        if rev == "" is rev = rest_words(rest) end
+        arg = as_git_url(first_word(rest))
+        rev = rest_words(rest)
+    else if is_forge_word(w) is
+        kind = "git"
+        arg = util::forge_url(w, first_word(rest))
+        rev = rest_words(rest)
     else if w == "path" is
         kind = "path"
-        arg = rest
-    else if w == "rev" || w == "tag" || w == "branch" is
+        arg = string_slice(rest, 0, string_len(rest))
+    else if is_registry_kind(w) || is_builtin_kind(w) is
+        kind = string_slice(w, 0, string_len(w))
+        let ver: string = first_word(rest)
+        if ver != "*" && string_lower(ver) != "newest" && string_lower(ver) != "latest" is range = ver end
+    else if w == "rev" || w == "tag" || w == "branch" || w == "commit" is
         kind = "index"
         rev = rest
     else if util::is_url(first_word(v)) is
         kind = "git"
         arg = first_word(v)
-        if rev == "" is rev = rest_words(v) end
+        rev = rest_words(v)
+    else if semver::is_range(v) is
+        kind = "index"
+        range = v                  ;; `-> silver => 0.1` / `^1.2` — a version of the library
     else is
         kind = "index"
-        rev = v                    ;; a bare `v1.2` / commit id is a rev of the index entry
+        rev = v                    ;; a bare commit id is a rev of the index entry
     end
 
-    let g: string = hk::hk_get(h, "dependencies", name + ".git", "")
-    let pth: string = hk::hk_get(h, "dependencies", name + ".path", "")
+    ;; ── options given as sub-keys (the map form) ──
+    let src: string = string_lower(sub_of(h, section, name, ["source", "from"]))
+    if src == "git" || is_registry_kind(src) || is_builtin_kind(src) || src == "path" || src == "index" is
+        kind = src
+    end
+    let g: string = sub_of(h, section, name, ["git", "url", "repository", "repo-url"])
     if g != "" is
         kind = "git"
-        arg = g
+        arg = as_git_url(g)
     end
+    let mut host: string = ""
+    let mut orgrepo: string = ""
+    let forges: [string] = ["github", "gitlab", "codeberg", "bitbucket", "sourcehut"]
+    let mut fi: int = 0
+    while fi < array_len(forges) is
+        let fv: string = hk::hk_get(h, section, name + "." + forges[fi], "")
+        if fv != "" is
+            host = forges[fi]
+            orgrepo = fv
+        end
+        fi += 1
+    end
+    if orgrepo == "" is
+        ;; `--> org => HackerOS-Linux-System`  `--> repo => bit`  [`--> host => gitlab`]
+        let org: string = sub_of(h, section, name, ["org", "organization", "owner", "user"])
+        let rp: string = sub_of(h, section, name, ["repo"])
+        if org != "" && rp != "" && !util::is_url(rp) is
+            host = sub_of(h, section, name, ["host", "forge"])
+            orgrepo = org + "/" + rp
+        end
+    end
+    if orgrepo != "" is
+        kind = "git"
+        arg = util::forge_url(host, orgrepo)
+    end
+    let pth: string = sub_of(h, section, name, ["path"])
     if pth != "" is
         kind = "path"
         arg = pth
     end
 
-    ;; `git <url> ^1.2` — a range as the "rev" of a git dependency
-    if kind == "git" && rev != "" && range == "" && semver::is_range(rev) && string_contains("^~<>=", string_slice(rev, 0, 1)) is
-        range = rev
+    let mut dir: string = sub_of(h, section, name, ["dir", "subdir", "directory", "folder"])
+    ;; `https://github.com/org/repo#crates/mine` — the fragment names the directory
+    let hash: int = string_find(arg, "#")
+    if kind == "git" && hash >= 0 is
+        if dir == "" is dir = string_slice(arg, hash + 1, string_len(arg)) end
+        arg = string_slice(arg, 0, hash)
+    end
+    while string_starts_with(dir, "/") is dir = string_slice(dir, 1, string_len(dir)) end
+    while string_ends_with(dir, "/") is dir = string_slice(dir, 0, string_len(dir) - 1) end
+    if string_starts_with(dir, "./") is dir = string_slice(dir, 2, string_len(dir)) end
+
+    let sub_rev: string = sub_of(h, section, name, ["rev", "tag", "branch", "commit"])
+    if sub_rev != "" is rev = sub_rev end
+    let sub_ver: string = sub_of(h, section, name, ["version"])
+    if sub_ver != "" is
+        if string_lower(sub_ver) == "newest" || string_lower(sub_ver) == "latest" || sub_ver == "*" is range = ""
+        else is range = sub_ver end
+    end
+
+    ;; a range written where a rev goes:  `git <url> ^1.2`
+    if is_op_range(rev) is
+        range = string_slice(rev, 0, string_len(rev))
         rev = ""
     end
-    ;; an explicit `rev` wins over a range
-    if rev != "" && string_contains("^~<>=", string_slice(rev, 0, 1)) is
-        range = rev
+    ;; a plain rev of a registry dependency is its version
+    if (is_registry_kind(kind) || is_builtin_kind(kind)) && rev != "" && range == "" is
+        range = string_slice(rev, 0, string_len(rev))
         rev = ""
     end
+    ;; an explicit `rev` wins over a range for repositories
+    if is_git_kind(kind) && rev != "" is range = "" end
 
     return Dep {
         dp_name: name, dp_kind: kind, dp_arg: arg, dp_rev: rev, dp_range: range,
-        dp_output: hk::hk_get(h, "dependencies", name + ".output", ""),
-        dp_lang: index::normalize_lang(hk::hk_get(h, "dependencies", name + ".lang", ""))
+        dp_output: sub_of(h, section, name, ["output"]),
+        dp_lang: index::normalize_lang(sub_of(h, section, name, ["lang"])),
+        dp_dir: dir,
+        dp_package: sub_of(h, section, name, ["package", "pkg"]),
+        dp_optional: string_lower(sub_of(h, section, name, ["optional"])) == "true"
     }
 end
 
-pub fn deps(p: Project) -> [Dep] is
-    let keys: [string] = hk::hk_keys(p.pj_hk, "dependencies")
+;; Dependencies switched on by the features being built (`BIT_FEATURE_DEPS`, csv).
+fn feature_deps() -> [string] is
+    return util::csv_split(env_get("BIT_FEATURE_DEPS"))
+end
+
+;; Every entry of a dependency section, optional ones included.
+pub fn deps_in(p: Project, section: string) -> [Dep] is
+    let keys: [string] = hk::hk_keys(p.pj_hk, section)
     let mut out: [Dep] = []
     let mut i: int = 0
     while i < array_len(keys) is
         let k: string = keys[i]
-        ;; `name.rev` style keys are sub-entries of `name`, not dependencies
+        ;; `name.git` style keys are options of `name`, not dependencies
         if !string_contains(k, ".") is
-            out = array_push(out, parse_dep(k, hk::hk_get(p.pj_hk, "dependencies", k, ""), p.pj_hk))
+            out = array_push(out, parse_dep(k, hk::hk_get(p.pj_hk, section, k, ""), p.pj_hk, section))
         end
         i += 1
     end
     return out
+end
+
+;; [dependencies] that are part of this build (optional ones only when a feature asks for them).
+pub fn deps(p: Project) -> [Dep] is
+    let all: [Dep] = deps_in(p, "dependencies")
+    let on: [string] = feature_deps()
+    let mut out: [Dep] = []
+    let mut i: int = 0
+    while i < array_len(all) is
+        if !all[i].dp_optional || util::array_has(on, all[i].dp_name) is out = array_push(out, all[i]) end
+        i += 1
+    end
+    return out
+end
+
+;; [dev-dependencies]: needed by `bit test` and `bit doc --examples`, never by a normal build.
+pub fn dev_deps(p: Project) -> [Dep] is
+    return deps_in(p, "dev-dependencies")
+end
+
+;; ── [system-dependencies] ────────────────────────────────────────────────────
+;;   -> libc => >=2.31                       the library and the version it must have
+;;   -> openssl
+;;   --> version => >=3.0
+;;   --> pkg-config => openssl               how to find it (any of these; the first that works wins)
+;;   --> header => openssl/ssl.h
+;;   --> lib => ssl
+;;   --> check => openssl version            a command that exits 0 when it is there
+;;   --> apt => libssl-dev   dnf => openssl-devel   pacman => openssl   apk => openssl-dev
+;;   --> zypper => libopenssl-devel   brew => openssl   xbps => openssl-devel   nix => openssl
+;;   --> install => ./scripts/get-openssl.sh  how to install it when no package manager fits
+;;   --> optional => true                    a missing library is a warning, not an error
+
+pub struct SysDep is
+    pub sd_name:       string
+    pub sd_version:    string
+    pub sd_pkgconfig:  string
+    pub sd_header:     string
+    pub sd_lib:        string
+    pub sd_check:      string
+    pub sd_install:    string
+    pub sd_optional:   bool
+    pub sd_pm_names:   [string]     ;; "apt=libssl-dev", "dnf=openssl-devel", …
+end
+
+pub fn sysdeps(p: Project) -> [SysDep] is
+    let keys: [string] = hk::hk_keys(p.pj_hk, "system-dependencies")
+    let pms: [string] = ["apt", "dnf", "yum", "pacman", "apk", "zypper", "brew", "xbps", "nix", "emerge"]
+    let mut out: [SysDep] = []
+    let mut i: int = 0
+    while i < array_len(keys) is
+        let k: string = keys[i]
+        if !string_contains(k, ".") is
+            let v: string = string_trim(hk::hk_get(p.pj_hk, "system-dependencies", k, ""))
+            let mut ver: string = string_slice(v, 0, string_len(v))
+            if string_lower(v) == "*" || string_lower(v) == "any" || string_lower(v) == "newest" || string_lower(v) == "latest" is ver = "" end
+            let sv: string = sub_of(p.pj_hk, "system-dependencies", k, ["version"])
+            if sv != "" is ver = sv end
+            let mut names: [string] = []
+            let mut m: int = 0
+            while m < array_len(pms) is
+                let pn: string = hk::hk_get(p.pj_hk, "system-dependencies", k + "." + pms[m], "")
+                if pn != "" is names = array_push(names, pms[m] + "=" + pn) end
+                m += 1
+            end
+            out = array_push(out, SysDep {
+                sd_name: k, sd_version: ver,
+                sd_pkgconfig: sub_of(p.pj_hk, "system-dependencies", k, ["pkg-config", "pkgconfig"]),
+                sd_header: sub_of(p.pj_hk, "system-dependencies", k, ["header"]),
+                sd_lib: sub_of(p.pj_hk, "system-dependencies", k, ["lib", "library"]),
+                sd_check: sub_of(p.pj_hk, "system-dependencies", k, ["check"]),
+                sd_install: sub_of(p.pj_hk, "system-dependencies", k, ["install"]),
+                sd_optional: string_lower(sub_of(p.pj_hk, "system-dependencies", k, ["optional"])) == "true",
+                sd_pm_names: names
+            })
+        end
+        i += 1
+    end
+    return out
+end
+
+;; ── [features] ───────────────────────────────────────────────────────────────
+;;   -> default => [fast]
+;;   -> fast    => [dep:silver, simd]     other features and `dep:<optional dependency>`
+
+pub fn feature_names(p: Project) -> [string] is
+    let keys: [string] = hk::hk_keys(p.pj_hk, "features")
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(keys) is
+        if !string_contains(keys[i], ".") is out = array_push(out, keys[i]) end
+        i += 1
+    end
+    return out
+end
+
+pub fn feature_requires(p: Project, name: string) -> [string] is
+    return hk::hk_list(hk::hk_get(p.pj_hk, "features", name, ""))
+end
+
+;; ── Workspace ────────────────────────────────────────────────────────────────
+;;   [workspace]
+;;   -> members => [core, cli, libs/*]
+;;   -> mode => special                  members may be written in different languages
+;;   -> languages
+;;   --> core => h#        (h# | hl | hs | rust | c | cpp | zig | go | odin | crystal | python)
+
+pub fn ws_mode(p: Project) -> string is
+    let m: string = string_lower(get(p, "workspace", "mode", "standard"))
+    if m == "special" || m == "multi" || m == "multilang" || m == "multi-lang" is return "special" end
+    return "standard"
+end
+
+;; The language a member is *declared* to be written in ("" = decided by the member's own Bit.hk).
+pub fn ws_declared_lang(p: Project, member: string) -> string is
+    let v: string = string_lower(hk::hk_get(p.pj_hk, "workspace", "languages." + member, ""))
+    if v != "" is return v end
+    return string_lower(hk::hk_get(p.pj_hk, "workspace", "languages." + util::basename(member), ""))
+end
+
+;; `members` with `dir/*` globs expanded, in file order. Entries are paths relative to the root.
+pub fn member_paths(p: Project) -> [string] is
+    let raw: [string] = members(p)
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(raw) is
+        let m0: string = string_replace(raw[i], "./", "")
+        if string_ends_with(m0, "/*") is
+            let base: string = string_slice(m0, 0, string_len(m0) - 2)
+            let listing: string = util::capture("ls -1 " + util::sq(p.pj_root + "/" + base) + " 2>/dev/null | LC_ALL=C sort")
+            if listing != "" is
+                let names: [string] = string_split(listing, "\n")
+                let mut k: int = 0
+                while k < array_len(names) is
+                    let n: string = string_trim(names[k])
+                    if n != "" && dir_exists(p.pj_root + "/" + base + "/" + n) is
+                        out = array_push(out, base + "/" + n)
+                    end
+                    k += 1
+                end
+            end
+        else is
+            if m0 != "" && !util::array_has(out, m0) is out = array_push(out, m0) end
+        end
+        i += 1
+    end
+    return out
+end
+
+;; ── Extra binaries: src/bin/*.h#  and  cmd/bin/*.hcs ─────────────────────────
+
+fn bin_stems(root: string, dir: string, ext: string) -> [string] is
+    let listing: string = util::capture("ls -1 " + util::sq(root + "/" + dir) + " 2>/dev/null | LC_ALL=C sort")
+    let mut out: [string] = []
+    if listing == "" is return out end
+    let names: [string] = string_split(listing, "\n")
+    let mut i: int = 0
+    while i < array_len(names) is
+        let n: string = string_trim(names[i])
+        if string_ends_with(n, "." + ext) is out = array_push(out, string_slice(n, 0, string_len(n) - string_len(ext) - 1)) end
+        i += 1
+    end
+    return out
+end
+
+;; Names of the additional binaries of a language (the main one is the project's name).
+pub fn extra_bins(p: Project, lang: string) -> [string] is
+    if lang == "hsharp" is return bin_stems(p.pj_root, src_dir(p) + "/bin", "h#") end
+    if lang == "hackerscript" is return bin_stems(p.pj_root, cmd_dir(p) + "/bin", "hcs") end
+    return []
+end
+
+pub fn extra_bin_entry(p: Project, lang: string, stem: string) -> string is
+    if lang == "hsharp" is return src_dir(p) + "/bin/" + stem + ".h#" end
+    return cmd_dir(p) + "/bin/" + stem + ".hcs"
+end
+
+;; ── [native-sources]  (C / C++ compiled together with the program) ───────────
+;;   -> c   => [native/a.c, native/b.c]
+;;   -> cpp => [native/x.cpp]
+;;   -> include => [native/include]      -> flags => -O2 -Wall
+
+pub fn native_c(p: Project) -> [string] is
+    return hk::hk_list(get(p, "native-sources", "c", ""))
+end
+pub fn native_cpp(p: Project) -> [string] is
+    return hk::hk_list(get(p, "native-sources", "cpp", ""))
+end
+pub fn native_include(p: Project) -> [string] is
+    return hk::hk_list(get(p, "native-sources", "include", ""))
+end
+pub fn native_flags(p: Project) -> string is
+    return get(p, "native-sources", "flags", "")
 end
 
 ;; ── Custom commands ([commands]) ─────────────────────────────────────────────
