@@ -1,0 +1,193 @@
+mod util
+mod ui
+mod project
+mod build
+mod workflow
+mod flags
+mod pipeline
+mod workspace
+mod devtools
+mod installer
+mod features
+
+;; The top-level commands that know about workspaces: `bit`, `bit build`, `bit run`,
+;; `bit check`, `bit test`, `bit clean`. One package → `pipeline::build_one`; a workspace root →
+;; every member; inside a member → just that member.
+
+fn flags_given(release: bool, target: string, platform: string, emit: string) -> bool is
+    return release || target != "" || platform != "" || emit != ""
+end
+
+pub fn effective_opts(p: project::Project, release: bool, debug: bool, verbose: bool, target: string,
+                      platform: string, emit: string, sign: string) -> build::BuildOpts is
+    let mut o: build::BuildOpts = build::opts_default(p)
+    if flags_given(release, target, platform, emit) || debug is
+        o = build::opts_new(release, verbose, target, platform, emit)
+    else is
+        o = build::opts_new(build::opts_release(o), verbose, project::get(p, "default-build", "target", ""),
+                            project::get(p, "default-build", "platform", ""),
+                            project::get(p, "default-build", "emit", ""))
+    end
+    if sign != "" is o = build::opts_with_sign(o, sign) end
+    return o
+end
+
+;; What `-p` / the current directory select: "" = the whole project (or whole workspace).
+fn member_selection(p: project::Project) -> string is
+    if flags::member() != "" is return flags::member() end
+    if !workspace::is_workspace(p) is return "" end
+    let near: string = project::nearest_manifest_dir(project::cwd())
+    if near != "" && near != project::root_of(p) is
+        let prefix: string = project::root_of(p) + "/"
+        if string_starts_with(near, prefix) is return string_slice(near, string_len(prefix), string_len(near)) end
+    end
+    return ""
+end
+
+fn no_project() -> int is
+    ui::fail("no Bit.hk found in " + project::cwd() + " or any parent directory")
+    ui::note("create a project:  bit init <name>     a workspace:  bit new-ws <name>     all commands:  bit --help")
+    return 1
+end
+
+pub fn build(release: bool, debug: bool, verbose: bool, target: string, platform: string, emit: string,
+             sign: string, use_lock: bool) -> int is
+    let p: project::Project = project::load_here()
+    if !project::is_loaded(p) is return no_project() end
+    let o: build::BuildOpts = effective_opts(p, release, debug, verbose, target, platform, emit, sign)
+    if workspace::is_workspace(p) is
+        return workspace::build_all(p, o, use_lock, member_selection(p))
+    end
+    return pipeline::build_one(p, o, use_lock, false)
+end
+
+pub fn run(release: bool, debug: bool, verbose: bool, target: string, platform: string, args: string,
+           use_lock: bool) -> int is
+    let p0: project::Project = project::load_here()
+    if !project::is_loaded(p0) is return no_project() end
+    let mut p: project::Project = project::load_here()
+    if workspace::is_workspace(p0) is
+        ;; `bit run` runs one member: -p NAME, or the one in the current directory
+        let sel: string = member_selection(p0)
+        if sel == "" is
+            ui::fail("this is a workspace — say which member to run:  bit run -p <member>   (bit ws list)")
+            return 1
+        end
+        let ms: [workspace::Member] = workspace::list(p0)
+        let mut found: bool = false
+        let mut i: int = 0
+        while i < array_len(ms) is
+            if ms[i].mb_name == sel || ms[i].mb_path == sel || util::basename(ms[i].mb_path) == sel is
+                if ms[i].mb_kind != "bit" is
+                    ui::fail(ms[i].mb_name + " is not a bit member — run its binary from " + ms[i].mb_dir + "/cache/build/")
+                    return 1
+                end
+                p = project::load(ms[i].mb_dir)
+                found = true
+            end
+            i += 1
+        end
+        if !found is
+            ui::fail("no workspace member named '" + sel + "'")
+            return 1
+        end
+    end
+    let o: build::BuildOpts = build::opts_with_targets(effective_opts(p, release, debug, verbose, target, platform, "", ""), false, false, false, flags::bin())
+    if features::activate(p, flags::features(), flags::no_default(), flags::all_features(), verbose) != 0 is return 1 end
+    if workflow::ensure_deps(p, verbose, build::opts_release(o), use_lock, false) != 0 is
+        ui::fail("some dependencies could not be installed")
+        return 1
+    end
+    return build::run_project(p, o, args, false)
+end
+
+pub fn check(verbose: bool) -> int is
+    let p: project::Project = project::load_here()
+    if !project::is_loaded(p) is return no_project() end
+    ui::blank()
+    if workspace::is_workspace(p) is
+        let ms: [workspace::Member] = workspace::ordered(workspace::list(p))
+        let sel: string = member_selection(p)
+        let mut rc: int = 0
+        let mut i: int = 0
+        while i < array_len(ms) is
+            if ms[i].mb_kind == "bit" && (sel == "" || ms[i].mb_name == sel || ms[i].mb_path == sel || util::basename(ms[i].mb_path) == sel) is
+                ui::line(ui::cyan("▸") + " " + ui::bold(ms[i].mb_name))
+                if build::check_project(project::load(ms[i].mb_dir), verbose) != 0 is rc = 1 end
+            end
+            i += 1
+        end
+        ui::blank()
+        return rc
+    end
+    let rc2: int = build::check_project(p, verbose)
+    ui::blank()
+    return rc2
+end
+
+pub fn test(filter: string, verbose: bool, release: bool) -> int is
+    let p: project::Project = project::load_here()
+    if !project::is_loaded(p) is return no_project() end
+    if workspace::is_workspace(p) is
+        return workspace::test_all(p, filter, verbose, release, member_selection(p))
+    end
+    return devtools::cmd_test(p, filter, verbose, release)
+end
+
+pub fn clean(everything: bool) -> int is
+    let p: project::Project = project::load_here()
+    if !project::is_loaded(p) is return no_project() end
+    if workspace::is_workspace(p) is
+        if workspace::clean_all(p) != 0 is return 1 end
+    else is
+        if build::clean_project(p) is
+            ui::ok("removed " + project::cache_root(p))
+        else is
+            ui::fail("could not remove " + project::cache_root(p))
+            return 1
+        end
+    end
+    if everything is
+        let n: int = installer::clean_old()
+        ui::ok("removed " + to_string(n) + " old library version(s)")
+    end
+    return 0
+end
+
+;; ── bare `bit` ───────────────────────────────────────────────────────────────
+
+pub fn auto(verbose: bool) -> int is
+    let p: project::Project = project::load_here()
+    if !project::is_loaded(p) is return no_project() end
+
+    let o0: build::BuildOpts = build::opts_default(p)
+    let o: build::BuildOpts = build::opts_new(build::opts_release(o0), verbose, project::get(p, "default-build", "target", ""),
+                                             project::get(p, "default-build", "platform", ""),
+                                             project::get(p, "default-build", "emit", ""))
+
+    let before: string = project::get(p, "default-build", "before", "")
+    if before != "" is
+        ui::line(ui::dim("before: " + before))
+        if build::shell_in_root(p, before) != 0 is
+            ui::fail("[default-build] before failed")
+            return 1
+        end
+    end
+
+    let rc: int = if workspace::is_workspace(p) then workspace::build_all(p, o, true, member_selection(p)) else pipeline::build_one(p, o, true, false)
+    if rc != 0 is return 1 end
+
+    let after: string = project::get(p, "default-build", "after", "")
+    if after != "" is
+        ui::line(ui::dim("after: " + after))
+        if build::shell_in_root(p, after) != 0 is
+            ui::fail("[default-build] after failed")
+            return 1
+        end
+    end
+
+    if project::get_bool(p, "default-build", "run", false) && !workspace::is_workspace(p) is
+        return build::run_project(p, o, project::get(p, "default-build", "args", ""), true)
+    end
+    return 0
+end
