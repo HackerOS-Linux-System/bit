@@ -79,8 +79,11 @@ fn dep_dir(p: project::Project, d: project::Dep) -> string is
         if string_starts_with(rel, "/") is return rel end
         return project::root_of(p) + "/" + rel
     end
-    let name: string = if kind == "git" then string_replace(util::basename(project::dep_arg(d)), ".git", "") else project::dep_name(d)
-    return util::libs_dir() + "/" + name + "/current"
+    if project::is_registry_kind(kind) is
+        return project::cache_libs(p) + "/" + kind + "/" + project::dep_name(d)
+    end
+    if project::is_builtin_kind(kind) is return "" end
+    return util::libs_dir() + "/" + project::dep_name(d) + "/current"
 end
 
 fn add_path(paths: string, dir: string) -> string is
@@ -100,7 +103,7 @@ fn collect(p: project::Project, verbose: bool, is_dep: bool, triple: string, dep
     let mut i: int = 0
     while i < array_len(deps) is
         let dir: string = dep_dir(p, deps[i])
-        if dir_exists(dir) && project::dep_kind(deps[i]) != "invalid" is
+        if dir != "" && dir_exists(dir) && project::dep_kind(deps[i]) != "invalid" is
             let sub: project::Project = project::load_with_cache(dir, dir + "/.bit")
             paths = collect(sub, verbose, true, triple, depth + 1, paths)
             if paths == "\x00FAILED" is return paths end
