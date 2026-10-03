@@ -14,7 +14,7 @@ pub fn run_command(p: project::Project, name: string, args: string) -> int is
         ui::fail("no command '" + name + "' in [commands] of Bit.hk")
         return 1
     end
-    let cmd: string = if string_contains(body, "{args}") then string_replace(body, "{args}", args)
+    let cmd: string = if string_contains(body, "{{args}}") then string_replace(body, "{{args}}", args)
                       else if args != "" then body + " " + args
                       else body
     ui::line(ui::dim("$ " + cmd))
