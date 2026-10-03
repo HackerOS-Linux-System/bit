@@ -1,7 +1,10 @@
 mod util
 mod ui
 mod net
-use "std -> json" from "json"
+;; NOTE: no `use "std -> json"` here. Importing the std wrapper mangles its fns to
+;; json_get_str / json_set_str / json_stringify_pretty …, which collide with the LLVM
+;; builtins of the same names (self-recursion / wrong arity -> invalid IR). `json::get_str`,
+;; `json::set_str` and `json::empty_object` resolve straight to those builtins instead.
 
 pub struct LibEntry is
     pub ie_name:     string
@@ -12,6 +15,7 @@ pub struct LibEntry is
     pub ie_lang:     string
     pub ie_rev:      string
     pub ie_checksum: string
+    pub ie_dir:      string     ;; directory inside the repository ("" = the root)
 end
 
 pub fn e_name(e: LibEntry)     -> string   is return e.ie_name end
@@ -22,6 +26,7 @@ pub fn e_author(e: LibEntry)   -> string   is return e.ie_author end
 pub fn e_lang(e: LibEntry)     -> string   is return e.ie_lang end
 pub fn e_rev(e: LibEntry)      -> string   is return e.ie_rev end
 pub fn e_checksum(e: LibEntry) -> string   is return e.ie_checksum end
+pub fn e_dir(e: LibEntry)      -> string   is return e.ie_dir end
 
 pub struct Index is
     pub ix_items: [LibEntry]
@@ -132,20 +137,49 @@ fn guess_lang(tags: [string], explicit: string) -> string is
     return ""
 end
 
-;; Accepts every spelling users type: "h#", "H#", "hsharp", "hl", "hacker lang", "hs"…
+;; Accepts every spelling users type: "h#", "H#", "hsharp", "H-Sharp", "hl", "hacker lang", "hs",
+;; "HackerScript", "hacker-script", "Hacker Script", "hcs"… (case, spaces, dashes, quotes and brackets are ignored).
 pub fn normalize_lang(raw: string) -> string is
-    let t: string = string_replace(string_replace(string_lower(string_trim(raw)), " ", ""), "-", "")
-    if t == "h#" || t == "hsharp" || t == "hsh" is return "hsharp" end
-    if t == "hl" || t == "hackerlang" is return "hackerlang" end
-    if t == "hs" || t == "hcs" || t == "hackerscript" is return "hackerscript" end
+    let mut t: string = string_lower(string_trim(raw))
+    t = string_replace(string_replace(string_replace(t, " ", ""), "-", ""), "_", "")
+    t = string_replace(string_replace(string_replace(t, "\"", ""), "[", ""), "]", "")
+    if t == "h#" || t == "hsharp" || t == "hsh" || t == "hs#" is return "hsharp" end
+    if t == "hl" || t == "hackerlang" || t == "hacklang" is return "hackerlang" end
+    if t == "hs" || t == "hcs" || t == "hackerscript" || t == "hackerc" || t == "virus" is return "hackerscript" end
     return ""
+end
+
+;; The languages named by a `lang` value: one ("HackerScript"), a csv ("h#, HackerScript") or an
+;; array (["h#", "HackerScript"]). Unknown words are skipped; the result has no duplicates.
+pub fn parse_langs(raw: string) -> [string] is
+    let mut out: [string] = []
+    let mut t: string = string_trim(raw)
+    if string_starts_with(t, "[") && string_ends_with(t, "]") is
+        t = string_slice(t, 1, string_len(t) - 1)
+    end
+    let parts: [string] = string_split(t, ",")
+    let mut i: int = 0
+    while i < array_len(parts) is
+        let l: string = normalize_lang(parts[i])
+        if l != "" is
+            let mut seen: bool = false
+            let mut j: int = 0
+            while j < array_len(out) is
+                if out[j] == l is seen = true end
+                j += 1
+            end
+            if !seen is out = array_push(out, l) end
+        end
+        i += 1
+    end
+    return out
 end
 
 ;; std `json` on the compiled (AOT) backend reads *flat* objects only (no nested
 ;; values, no arrays). repository.json is `{ "libraries": [ {flat}, {flat}, … ] }`,
 ;; so all that is done by hand is cutting the text into one chunk per library
 ;; object; every field is then read with std `json::get_str`.
-fn chop_objects(text: string) -> [string] is
+pub fn chop_objects(text: string) -> [string] is
     let n: int = string_len(text)
     let mut start: int = string_find(text, "\"libraries\"")
     if start < 0 is start = 0 end
@@ -213,6 +247,39 @@ fn first_of(obj: string, k1: string, k2: string, k3: string) -> string is
     return json::get_str(obj, k3)
 end
 
+;; Where the library's repository is. An entry may say it as a url (`target` / `url` / `git`), as
+;; `"github": "org/repo"` (also gitlab / codeberg / bitbucket), or as `"org"` + `"repo"` (+ `"host"`).
+fn entry_target(o: string) -> string is
+    let t: string = first_of(o, "target", "url", "git")
+    if t != "" is return t end
+    let forges: [string] = ["github", "gitlab", "codeberg", "bitbucket", "sourcehut"]
+    let mut i: int = 0
+    while i < array_len(forges) is
+        let v: string = json::get_str(o, forges[i])
+        if v != "" is return util::forge_url(forges[i], v) end
+        i += 1
+    end
+    let org: string = first_of(o, "org", "organization", "owner")
+    let repo: string = json::get_str(o, "repo")
+    if org != "" && repo != "" is return util::forge_url(json::get_str(o, "host"), org + "/" + repo) end
+    return ""
+end
+
+;; The library's directory inside the repository: `"dir"` / `"subdir"` / `"path"`, or `url#dir`.
+fn entry_dir(o: string, target: string) -> string is
+    let d: string = first_of(o, "dir", "subdir", "directory")
+    if d != "" is return d end
+    let hash: int = string_find(target, "#")
+    if hash >= 0 is return string_slice(target, hash + 1, string_len(target)) end
+    return ""
+end
+
+fn strip_fragment(target: string) -> string is
+    let hash: int = string_find(target, "#")
+    if hash < 0 is return target end
+    return string_slice(target, 0, hash)
+end
+
 fn parse_entries(text: string) -> [LibEntry] is
     let items: [string] = chop_objects(text)
     let mut out: [LibEntry] = []
@@ -222,9 +289,11 @@ fn parse_entries(text: string) -> [LibEntry] is
         let name: string = json::get_str(o, "name")
         let tags: [string] = tags_of(o)
         if name != "" is
+            let target: string = entry_target(o)
             out = array_push(out, LibEntry {
                 ie_name:     name,
-                ie_target:   first_of(o, "target", "url", "git"),
+                ie_target:   strip_fragment(target),
+                ie_dir:      entry_dir(o, target),
                 ie_desc:     json::get_str(o, "description"),
                 ie_tags:     tags,
                 ie_author:   json::get_str(o, "author"),
@@ -275,7 +344,7 @@ pub fn index_find(ix: Index, name: string) -> LibEntry is
         i += 1
     end
     return LibEntry { ie_name: "", ie_target: "", ie_desc: "", ie_tags: [], ie_author: "",
-                      ie_lang: "", ie_rev: "", ie_checksum: "" }
+                      ie_lang: "", ie_rev: "", ie_checksum: "", ie_dir: "" }
 end
 
 fn entry_matches(e: LibEntry, q: string) -> bool is
