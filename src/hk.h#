@@ -139,7 +139,14 @@ end
 
 ;; Keys (in file order) of a section — direct children only.
 pub fn hk_keys(h: Hk, section: string) -> [string] is
-    return h.hk_cfg.keys(real_section(h, section))
+    ;; Guard: hk-parser's `hk_map_key_count` returns the C `int` -1 for a missing path or a
+    ;; non-map value. H# `int` is 64-bit and the C return is not sign-extended, so that -1
+    ;; arrived as 4294967295 and `keys()` looped ~4 billion times (one regex compile per
+    ;; iteration) -> the binary seemed to hang / print nothing. Only ask for keys of a real map.
+    let path: string = real_section(h, section)
+    if !h.hk_cfg.has(path) is return [] end
+    if h.hk_cfg.type_of(path) != "map" is return [] end
+    return h.hk_cfg.keys(path)
 end
 
 ;; `[a, b, "c"]` -> ["a", "b", "c"]   (a bare `a, b` list works too)
