@@ -1,0 +1,184 @@
+mod util
+mod ui
+mod hk
+
+;; ── User settings ────────────────────────────────────────────────────────────
+;; Kept in  <bit dir>/settings.hk  (default ~/.hackeros/bit/settings.hk):
+;;
+;;   ! bit settings
+;;   [settings]
+;;   -> jobs => 8
+;;   -> offline => false
+;;
+;; A setting only fills in what the environment leaves unset, so `BIT_JOBS=2 bit install`
+;; and `--jobs 2` always win over the file.
+
+pub fn path() -> string is
+    return util::bit_dir() + "/settings.hk"
+end
+
+;; key -> (environment variable, what it does, allowed values)
+fn catalog() -> [string] is
+    return [
+        "jobs|BIT_JOBS|parallel downloads / builds|a number (default 4)",
+        "offline|BIT_OFFLINE|never touch the network|true | false",
+        "plain|BIT_PLAIN|no animations, one line per step|true | false",
+        "color|NO_COLOR|coloured output|auto | never",
+        "index-url|BIT_INDEX_URL|where the library index comes from|a URL or a file path",
+        "extra-indexes|BIT_EXTRA_INDEXES|additional indexes, comma separated|URLs or file paths",
+        "vira-list-url|BIT_VIRA_LIST_URL|where `vira` dependencies are looked up|a URL"
+    ]
+end
+
+fn cat_field(entry: string, n: int) -> string is
+    let parts: [string] = string_split(entry, "|")
+    if n < array_len(parts) is return parts[n] end
+    return ""
+end
+
+fn known_key(key: string) -> bool is
+    let c: [string] = catalog()
+    let mut i: int = 0
+    while i < array_len(c) is
+        if cat_field(c[i], 0) == key is return true end
+        i += 1
+    end
+    return false
+end
+
+fn load() -> hk::Hk is
+    if !file_exists(path()) is return hk::hk_empty() end
+    return hk::hk_parse(file_read(path()))
+end
+
+pub fn get(key: string, fallback: string) -> string is
+    return hk::hk_get(load(), "settings", key, fallback)
+end
+
+fn write_all(keys: [string], vals: [string]) -> bool is
+    util::mkdir_p(util::dirname(path()))
+    let mut text: string = "! bit settings — edit with `bit settings set <key> <value>`\n[settings]\n"
+    let mut i: int = 0
+    while i < array_len(keys) is
+        text = text + "-> " + keys[i] + " => " + vals[i] + "\n"
+        i += 1
+    end
+    file_write(path(), text)
+    return true
+end
+
+pub fn set(key: string, value: string) -> int is
+    if !known_key(key) is
+        ui::fail("unknown setting '" + key + "'   (bit settings)")
+        return 1
+    end
+    let h: hk::Hk = load()
+    let cur: [string] = hk::hk_keys(h, "settings")
+    let mut keys: [string] = []
+    let mut vals: [string] = []
+    let mut done: bool = false
+    let mut i: int = 0
+    while i < array_len(cur) is
+        keys = array_push(keys, cur[i])
+        if cur[i] == key is
+            vals = array_push(vals, value)
+            done = true
+        else is
+            vals = array_push(vals, hk::hk_get(h, "settings", cur[i], ""))
+        end
+        i += 1
+    end
+    if !done is
+        keys = array_push(keys, key)
+        vals = array_push(vals, value)
+    end
+    write_all(keys, vals)
+    ui::ok(key + " = " + value)
+    return 0
+end
+
+pub fn unset(key: string) -> int is
+    let h: hk::Hk = load()
+    let cur: [string] = hk::hk_keys(h, "settings")
+    let mut keys: [string] = []
+    let mut vals: [string] = []
+    let mut i: int = 0
+    while i < array_len(cur) is
+        if cur[i] != key is
+            keys = array_push(keys, cur[i])
+            vals = array_push(vals, hk::hk_get(h, "settings", cur[i], ""))
+        end
+        i += 1
+    end
+    write_all(keys, vals)
+    ui::ok(key + " reset to its default")
+    return 0
+end
+
+pub fn reset() -> int is
+    util::run("rm -f " + util::sq(path()))
+    ui::ok("all settings reset")
+    return 0
+end
+
+;; Copies the file's values into the environment (only where it is still unset).
+pub fn apply() is
+    if !file_exists(path()) is return end
+    let h: hk::Hk = load()
+    let c: [string] = catalog()
+    let mut i: int = 0
+    while i < array_len(c) is
+        let key: string = cat_field(c[i], 0)
+        let env: string = cat_field(c[i], 1)
+        let v: string = hk::hk_get(h, "settings", key, "")
+        if v != "" && env_get(env) == "" is
+            if key == "offline" || key == "plain" is
+                if string_lower(v) == "true" || v == "1" || string_lower(v) == "yes" is env_set(env, "1") end
+            else if key == "color" is
+                if string_lower(v) == "never" || string_lower(v) == "off" is env_set(env, "1") end
+            else is
+                env_set(env, v)
+            end
+        end
+        i += 1
+    end
+end
+
+;; `bit settings [list|get K|set K V|unset K|reset|path]`
+pub fn cmd_settings(action: string, key: string, value: string) -> int is
+    if action == "set" is
+        if key == "" || value == "" is
+            ui::fail("usage: bit settings set <key> <value>")
+            return 2
+        end
+        return set(key, value)
+    end
+    if action == "unset" is return unset(key) end
+    if action == "reset" is return reset() end
+    if action == "path" is
+        write(path())
+        return 0
+    end
+    if action == "get" is
+        if !known_key(key) is
+            ui::fail("unknown setting '" + key + "'")
+            return 1
+        end
+        write(get(key, ""))
+        return 0
+    end
+    ui::blank()
+    ui::heading("Settings  " + ui::dim(path()))
+    let c: [string] = catalog()
+    let mut i: int = 0
+    while i < array_len(c) is
+        let k: string = cat_field(c[i], 0)
+        let v: string = get(k, "")
+        ui::line(ui::cyan(string_pad_right(k, 15)) + string_pad_right(if v == "" then ui::dim("(default)") else v, 14) + ui::dim(cat_field(c[i], 2) + "   [" + cat_field(c[i], 3) + "]"))
+        i += 1
+    end
+    ui::blank()
+    ui::note("bit settings set <key> <value>      bit settings unset <key>      bit settings reset")
+    ui::blank()
+    return 0
+end
