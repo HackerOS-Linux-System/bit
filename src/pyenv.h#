@@ -1,0 +1,102 @@
+mod util
+mod ui
+mod hk
+mod project
+
+;; ── Python packages ──────────────────────────────────────────────────────────
+;; For code that needs real (compiled) Python packages — `pypi` dependencies in [dependencies]
+;; only fetch pure-Python sources. This keeps a virtual environment in cache/env/python:
+;;
+;;   bit python add requests 2.31        install one package
+;;   bit python install                  install [python-dependencies] from Bit.hk
+;;   bit python list                     what is installed
+;;
+;;   [python-dependencies]
+;;   -> requests => 2.31
+;;   -> numpy => newest
+
+fn venv_dir(p: project::Project) -> string is
+    return project::cache_env(p) + "/python"
+end
+
+fn python_bin() -> string is
+    return util::first_tool(["python3", "python"])
+end
+
+fn ensure_venv(p: project::Project) -> bool is
+    let py: string = python_bin()
+    if py == "" is
+        ui::fail("python3 not found")
+        ui::note("install it, e.g.  sudo apt install python3 python3-venv")
+        return false
+    end
+    if file_exists(venv_dir(p) + "/bin/python") is return true end
+    util::mkdir_p(project::cache_env(p))
+    if util::run(py + " -m venv " + util::sq(venv_dir(p))) != 0 is
+        ui::fail("cannot create a virtual environment  (python3-venv missing?)")
+        return false
+    end
+    return true
+end
+
+fn requirement(pkg: string, ver: string) -> string is
+    let v: string = string_trim(ver)
+    if v == "" || v == "newest" || v == "latest" || v == "*" is return pkg end
+    if string_starts_with(v, "=") || string_starts_with(v, ">") || string_starts_with(v, "<") || string_starts_with(v, "~") || string_starts_with(v, "!") is
+        return pkg + v
+    end
+    if string_starts_with(v, "^") is return pkg + ">=" + string_slice(v, 1, string_len(v)) end
+    return pkg + "==" + v
+end
+
+pub fn add(p: project::Project, pkg: string, ver: string) -> int is
+    if pkg == "" is
+        ui::fail("usage: bit python add <package> [version]")
+        return 2
+    end
+    if !ensure_venv(p) is return 1 end
+    let req: string = requirement(pkg, ver)
+    ui::line(ui::dim("pip install " + req))
+    if util::run(util::sq(venv_dir(p) + "/bin/pip") + " install --quiet " + util::sq(req)) != 0 is
+        ui::fail("pip could not install " + req)
+        return 1
+    end
+    ui::ok(req + "  " + ui::dim("→ " + venv_dir(p)))
+    return 0
+end
+
+pub fn install_all(p: project::Project) -> int is
+    let keys: [string] = hk::hk_keys(p.pj_hk, "python-dependencies")
+    if array_len(keys) == 0 is
+        ui::note("no [python-dependencies] in Bit.hk")
+        return 0
+    end
+    let mut bad: int = 0
+    let mut i: int = 0
+    while i < array_len(keys) is
+        if !string_contains(keys[i], ".") is
+            bad += add(p, keys[i], hk::hk_get(p.pj_hk, "python-dependencies", keys[i], ""))
+        end
+        i += 1
+    end
+    if bad > 0 is return 1 end
+    return 0
+end
+
+pub fn cmd_python(p: project::Project, action: string, pkg: string, ver: string) -> int is
+    if !project::is_loaded(p) is
+        ui::fail("no Bit.hk here")
+        return 1
+    end
+    if action == "list" is
+        if !file_exists(venv_dir(p) + "/bin/pip") is
+            ui::note("no Python environment yet — bit python add <package>")
+            return 0
+        end
+        return util::run(util::sq(venv_dir(p) + "/bin/pip") + " list")
+    end
+    if action == "install" is return install_all(p) end
+    if action == "add" is return add(p, pkg, ver) end
+    ui::fail("usage: bit python add <package> [version] | install | list")
+    return 2
+end
