@@ -1,0 +1,370 @@
+mod util
+mod ui
+mod index
+mod project
+mod build
+mod devtools
+mod external
+mod flags
+mod pipeline
+mod sysdeps
+
+;; ── Workspaces ───────────────────────────────────────────────────────────────
+;;
+;;   [workspace]
+;;   -> members => [core, cli, libs/*]          `dir/*` = every sub-directory
+;;   -> mode => special                         members may be written in different languages
+;;   -> languages
+;;   --> core => h#                             h# | hl | hs | rust | c | cpp | zig | go | odin | crystal | python
+;;   --> fast => rust
+;;
+;; `bit build` at the root builds every member, dependencies first (a member that lists another
+;; member as a `path` dependency is built after it); inside a member it builds just that member.
+;; `-p NAME` picks one. In `standard` mode every member has its own Bit.hk; in `special` mode a
+;; member written in another language needs no Bit.hk — it is built with its own toolchain.
+
+pub struct Member is
+    pub mb_path: string     ;; relative to the workspace root (`libs/json`)
+    pub mb_dir:  string     ;; absolute
+    pub mb_name: string
+    pub mb_kind: string     ;; bit | external | unknown
+    pub mb_lang: string     ;; hsharp | hackerlang | hackerscript | rust | c | … | ""
+end
+
+pub fn is_workspace(p: project::Project) -> bool is
+    return project::is_loaded(p) && array_len(project::members(p)) > 0
+end
+
+fn make_member(p: project::Project, path: string) -> Member is
+    let dir: string = project::root_of(p) + "/" + path
+    let special: bool = project::ws_mode(p) == "special"
+    let declared: string = project::ws_declared_lang(p, path)
+    let has_manifest: bool = project::manifest_in(dir) != ""
+    let bit_lang: string = index::normalize_lang(declared)
+    let ext_lang: string = external::normalize(declared)
+
+    if special && declared != "" is
+        if bit_lang != "" is
+            return Member { mb_path: path, mb_dir: dir, mb_name: util::basename(path), mb_kind: "bit", mb_lang: bit_lang }
+        end
+        if ext_lang != "" is
+            return Member { mb_path: path, mb_dir: dir, mb_name: util::basename(path), mb_kind: "external", mb_lang: ext_lang }
+        end
+        return Member { mb_path: path, mb_dir: dir, mb_name: util::basename(path), mb_kind: "unknown", mb_lang: declared }
+    end
+    if has_manifest is
+        let mp: project::Project = project::load(dir)
+        return Member { mb_path: path, mb_dir: dir, mb_name: project::name_of(mp), mb_kind: "bit", mb_lang: bit_lang }
+    end
+    if special is
+        let d: string = external::detect(dir)
+        if d != "" is
+            return Member { mb_path: path, mb_dir: dir, mb_name: util::basename(path), mb_kind: "external", mb_lang: d }
+        end
+    end
+    return Member { mb_path: path, mb_dir: dir, mb_name: util::basename(path), mb_kind: "unknown", mb_lang: "" }
+end
+
+pub fn list(p: project::Project) -> [Member] is
+    let paths: [string] = project::member_paths(p)
+    let mut out: [Member] = []
+    let mut i: int = 0
+    while i < array_len(paths) is
+        out = array_push(out, make_member(p, paths[i]))
+        i += 1
+    end
+    return out
+end
+
+;; ── Build order ──────────────────────────────────────────────────────────────
+
+fn real(path: string) -> string is
+    return util::capture("realpath -m " + util::sq(path))
+end
+
+;; Directories of the workspace members a member depends on through `path` dependencies.
+fn path_deps_of(m: Member) -> [string] is
+    let mut out: [string] = []
+    if m.mb_kind != "bit" is return out end
+    let mp: project::Project = project::load(m.mb_dir)
+    let deps: [project::Dep] = project::deps_in(mp, "dependencies")
+    let mut i: int = 0
+    while i < array_len(deps) is
+        if project::dep_kind(deps[i]) == "path" is
+            let rel: string = project::dep_arg(deps[i])
+            out = array_push(out, real(if string_starts_with(rel, "/") then rel else m.mb_dir + "/" + rel))
+        end
+        i += 1
+    end
+    return out
+end
+
+fn all_in(needed: [string], placed: [string]) -> bool is
+    let mut i: int = 0
+    while i < array_len(needed) is
+        if !util::array_has(placed, needed[i]) is return false end
+        i += 1
+    end
+    return true
+end
+
+;; Members in build order: dependencies first, otherwise the order of `members`.
+pub fn ordered(ms: [Member]) -> [Member] is
+    let mut dirs: [string] = []
+    let mut i: int = 0
+    while i < array_len(ms) is
+        dirs = array_push(dirs, real(ms[i].mb_dir))
+        i += 1
+    end
+    let mut placed: [string] = []
+    let mut out: [Member] = []
+    let mut pass: int = 0
+    while array_len(out) < array_len(ms) && pass <= array_len(ms) is
+        let mut progressed: bool = false
+        i = 0
+        while i < array_len(ms) is
+            if !util::array_has(placed, dirs[i]) is
+                let deps: [string] = path_deps_of(ms[i])
+                ;; only dependencies on other members matter
+                let mut inside: [string] = []
+                let mut k: int = 0
+                while k < array_len(deps) is
+                    if util::array_has(dirs, deps[k]) && deps[k] != dirs[i] is inside = array_push(inside, deps[k]) end
+                    k += 1
+                end
+                if all_in(inside, placed) is
+                    placed = array_push(placed, dirs[i])
+                    out = array_push(out, ms[i])
+                    progressed = true
+                end
+            end
+            i += 1
+        end
+        if !progressed is
+            ;; a cycle: take the rest in file order
+            i = 0
+            while i < array_len(ms) is
+                if !util::array_has(placed, dirs[i]) is
+                    ui::warn("circular path dependencies around '" + ms[i].mb_name + "' — built in file order")
+                    placed = array_push(placed, dirs[i])
+                    out = array_push(out, ms[i])
+                end
+                i += 1
+            end
+        end
+        pass += 1
+    end
+    return out
+end
+
+fn selected(ms: [Member], only: string) -> [Member] is
+    if only == "" is return ms end
+    let mut out: [Member] = []
+    let mut i: int = 0
+    while i < array_len(ms) is
+        if ms[i].mb_name == only || ms[i].mb_path == only || util::basename(ms[i].mb_path) == only is out = array_push(out, ms[i]) end
+        i += 1
+    end
+    return out
+end
+
+fn kind_label(m: Member) -> string is
+    if m.mb_kind == "bit" is
+        if m.mb_lang != "" is return project::lang_label(m.mb_lang) end
+        return "bit"
+    end
+    if m.mb_kind == "external" is return external::label(m.mb_lang) end
+    return "?"
+end
+
+fn unknown_member(m: Member, special: bool) -> int is
+    if special is
+        ui::bad(m.mb_name + "  " + ui::red("cannot tell what language this member is written in"))
+        ui::note("declare it:  [workspace] -> languages  --> " + util::basename(m.mb_path) + " => rust | c | cpp | zig | go | odin | crystal | python | h# | hl | hs")
+    else is
+        ui::bad(m.mb_name + "  " + ui::red("has no Bit.hk") + " " + ui::dim("(a standard workspace needs one per member; mode => special allows other languages)"))
+    end
+    return 1
+end
+
+;; ── build ────────────────────────────────────────────────────────────────────
+
+fn build_member(p: project::Project, m: Member, o: build::BuildOpts, use_lock: bool) -> int is
+    let special: bool = project::ws_mode(p) == "special"
+    if m.mb_kind == "unknown" is return unknown_member(m, special) end
+    if m.mb_kind == "bit" is
+        let mp: project::Project = project::load(m.mb_dir)
+        let own: bool = array_len(project::langs(mp)) > 0
+        let o2: build::BuildOpts = if m.mb_lang != "" && !own then build::opts_with_lang(o, m.mb_lang) else o
+        return pipeline::build_one(mp, o2, use_lock, true)
+    end
+    if !external::preflight(m.mb_lang) is return 1 end
+    let profile: string = if build::opts_release(o) then "release" else "debug"
+    let out: string = m.mb_dir + "/cache/build/" + profile
+    util::mkdir_p(out)
+    let cmd: string = external::build_command(m.mb_dir, m.mb_name, m.mb_lang, build::opts_release(o), out)
+    if cmd == "" is
+        ui::fail(m.mb_name + ": no build command for " + m.mb_lang)
+        return 1
+    end
+    let t0: int = time_ms()
+    let rc: int = external::run_in(m.mb_dir, cmd, build::opts_verbose(o))
+    if rc != 0 is
+        ui::bad(external::label(m.mb_lang) + "  " + m.mb_name + "  " + ui::red("failed"))
+        return 1
+    end
+    if m.mb_lang == "rust" is
+        util::run("cp -f " + util::sq(out + "/" + m.mb_name + "-target/" + util::capture("uname -m") + "-unknown-linux-musl/" + profile + "/" + m.mb_name) + " " + util::sq(out + "/" + m.mb_name) + " 2>/dev/null")
+    end
+    ui::ok(external::label(m.mb_lang) + "  " + m.mb_name + "  " + ui::dim("(" + util::elapsed_str(time_ms() - t0) + ")  → " + out))
+    return 0
+end
+
+;; Builds the members (all, or `only`), dependencies first. Stops at the first failure.
+pub fn build_all(p: project::Project, o: build::BuildOpts, use_lock: bool, only: string) -> int is
+    let ms: [Member] = selected(ordered(list(p)), only)
+    if array_len(ms) == 0 is
+        ui::fail(if only != "" then "no workspace member named '" + only + "'" else "the workspace has no members")
+        if only != "" is ui::note("members:  bit ws list") end
+        return 1
+    end
+    ui::blank()
+    ui::line(ui::bold("workspace") + " " + ui::bold(project::name_of(p)) + "  " + ui::dim(to_string(array_len(ms)) + " member(s), mode " + project::ws_mode(p)))
+    let t0: int = time_ms()
+    let mut i: int = 0
+    while i < array_len(ms) is
+        ui::blank()
+        ui::line(ui::cyan("▸") + " " + ui::bold(ms[i].mb_name) + "  " + ui::dim(kind_label(ms[i]) + "  " + ms[i].mb_path))
+        if build_member(p, ms[i], o, use_lock) != 0 is
+            ui::blank()
+            ui::fail("workspace build stopped at '" + ms[i].mb_name + "' (" + to_string(i) + " of " + to_string(array_len(ms)) + " member(s) built)")
+            return 1
+        end
+        i += 1
+    end
+    if only == "" && array_len(project::langs(p)) > 0 is
+        ui::blank()
+        ui::line(ui::cyan("▸") + " " + ui::bold(project::name_of(p)) + "  " + ui::dim("the workspace root's own sources"))
+        if pipeline::build_one(p, o, use_lock, false) != 0 is return 1 end
+    end
+    ui::blank()
+    ui::ok("workspace built  " + ui::dim(util::elapsed_str(time_ms() - t0)))
+    ui::blank()
+    return 0
+end
+
+;; ── test / clean ─────────────────────────────────────────────────────────────
+
+pub fn test_all(p: project::Project, filter: string, verbose: bool, release: bool, only: string) -> int is
+    let ms: [Member] = selected(ordered(list(p)), only)
+    if array_len(ms) == 0 is
+        ui::fail("no member to test")
+        return 1
+    end
+    let mut failed: int = 0
+    let mut i: int = 0
+    while i < array_len(ms) is
+        let m: Member = ms[i]
+        ui::blank()
+        ui::line(ui::cyan("▸") + " " + ui::bold(m.mb_name) + "  " + ui::dim(kind_label(m)))
+        if m.mb_kind == "bit" is
+            if devtools::cmd_test(project::load(m.mb_dir), filter, verbose, release) != 0 is failed += 1 end
+        else if m.mb_kind == "external" is
+            let cmd: string = external::test_command(m.mb_dir, m.mb_lang)
+            if !external::preflight(m.mb_lang) is
+                failed += 1
+            else if cmd == "" is
+                ui::note("no test command for " + external::label(m.mb_lang) + " — skipped")
+            else if external::run_in(m.mb_dir, cmd, verbose) != 0 is
+                ui::bad(m.mb_name + "  " + ui::red("tests failed"))
+                failed += 1
+            else is
+                ui::ok(m.mb_name + "  " + ui::dim("tests passed"))
+            end
+        else is
+            failed += unknown_member(m, project::ws_mode(p) == "special")
+        end
+        i += 1
+    end
+    if failed > 0 is
+        ui::fail(to_string(failed) + " member(s) failed")
+        return 1
+    end
+    return 0
+end
+
+pub fn clean_all(p: project::Project) -> int is
+    let ms: [Member] = list(p)
+    let mut i: int = 0
+    while i < array_len(ms) is
+        util::rm_rf(ms[i].mb_dir + "/cache")
+        i += 1
+    end
+    util::rm_rf(project::cache_root(p))
+    ui::ok("cleaned the workspace and " + to_string(array_len(ms)) + " member(s)")
+    return 0
+end
+
+;; ── info / list ──────────────────────────────────────────────────────────────
+
+fn status_of(m: Member) -> string is
+    if m.mb_kind == "external" is
+        if array_len(external::missing_tools(m.mb_lang)) == 0 is return ui::green("toolchain ok") end
+        return ui::red("toolchain missing")
+    end
+    if m.mb_kind == "bit" is
+        if m.mb_lang == "" is return ui::dim("Bit.hk") end
+        if build::have_toolchain(m.mb_lang) is return ui::green("toolchain ok") end
+        return ui::red("toolchain missing")
+    end
+    return ui::red("unknown language")
+end
+
+pub fn info(p: project::Project) -> int is
+    ui::blank()
+    ui::heading("Workspace  " + ui::dim(project::name_of(p) + " " + project::version_of(p)))
+    ui::line("mode      " + (if project::ws_mode(p) == "special" then ui::magenta("special") + ui::dim("  (members in different languages)") else "standard"))
+    ui::line("root      " + project::root_of(p))
+    let ms: [Member] = ordered(list(p))
+    ui::line("members   " + to_string(array_len(ms)) + ui::dim("  in build order"))
+    ui::blank()
+    let mut seen: [string] = []
+    let mut i: int = 0
+    while i < array_len(ms) is
+        let m: Member = ms[i]
+        let status: string = status_of(m)
+        ui::line(string_pad_right(to_string(i + 1) + ".", 4) + ui::cyan(string_pad_right(m.mb_name, 18)) + string_pad_right(kind_label(m), 14) + string_pad_right(m.mb_path, 22) + status)
+        if m.mb_kind == "external" && array_len(external::missing_tools(m.mb_lang)) > 0 && !util::array_has(seen, m.mb_lang) is
+            ui::note("      " + external::install_hint(m.mb_lang))
+            seen = array_push(seen, m.mb_lang)
+        end
+        i += 1
+    end
+    ui::blank()
+    return 0
+end
+
+pub fn list_names(p: project::Project) -> int is
+    let ms: [Member] = ordered(list(p))
+    let mut i: int = 0
+    while i < array_len(ms) is
+        write(ms[i].mb_name + "  " + ms[i].mb_path)
+        i += 1
+    end
+    return 0
+end
+
+;; `bit ws [info|list|build|test|clean] [member]`
+pub fn cmd_ws(p: project::Project, action: string, arg: string, o: build::BuildOpts, use_lock: bool, release: bool) -> int is
+    if !is_workspace(p) is
+        ui::fail("this is not a workspace  (add  [workspace] -> members => [...]  to Bit.hk, or: bit new-ws <name>)")
+        return 1
+    end
+    if action == "" || action == "info" is return info(p) end
+    if action == "list" || action == "ls" is return list_names(p) end
+    if action == "build" is return build_all(p, o, use_lock, arg) end
+    if action == "test" is return test_all(p, "", build::opts_verbose(o), release, arg) end
+    if action == "clean" is return clean_all(p) end
+    ui::fail("unknown workspace action '" + action + "'   (info | list | build | test | clean)")
+    return 2
+end
