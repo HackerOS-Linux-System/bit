@@ -9,6 +9,7 @@ mod lock
 mod project
 mod build
 mod installer
+mod registry
 
 fn project_lock_path(p: project::Project) -> string is
     return project::root_of(p) + "/Bit.lock"
@@ -85,74 +86,134 @@ fn pick_rev(d: project::Dep, pl: lock::Lock, use_lock: bool) -> Pick is
     return Pick { pk_rev: rev, pk_range: "", pk_err: "" }
 end
 
-;; Installs/links one dependency. Returns the name it is installed under ("" on failure).
+
+;; What ensure_one did for one dependency.
+pub struct Outcome is
+    pub oc_ok:    bool             ;; false: the dependency could not be satisfied
+    pub oc_lock:  bool             ;; true: `oc_entry` goes into Bit.lock
+    pub oc_entry: lock::Locked
+end
+
+fn no_entry() -> lock::Locked is
+    return lock::empty_entry()
+end
+
+fn failed() -> Outcome is
+    return Outcome { oc_ok: false, oc_lock: false, oc_entry: no_entry() }
+end
+
+fn fine_no_lock() -> Outcome is
+    return Outcome { oc_ok: true, oc_lock: false, oc_entry: no_entry() }
+end
+
+;; The project lock pins a checksum — an installed tree that differs from it is refused.
+fn integrity_ok(dname: string, locked: lock::Locked, actual_tagged: string, use_lock: bool) -> bool is
+    if !use_lock || lock::locked_checksum(locked) == "" || actual_tagged == "" is return true end
+    if lock::locked_checksum(locked) == actual_tagged is return true end
+    ui::bad(dname + "  " + ui::red("does not match Bit.lock") + " " + ui::dim("(pinned " +
+            util::short_hash(checksum::untag(lock::locked_checksum(locked))) + ", installed " +
+            util::short_hash(checksum::untag(actual_tagged)) + ")"))
+    ui::note("investigate, or re-resolve with:  bit upgrade " + dname)
+    return false
+end
+
+fn ensure_registry(p: project::Project, d: project::Dep, pl: lock::Lock, use_lock: bool, force: bool, verbose: bool) -> Outcome is
+    let dname: string = project::dep_name(d)
+    let kind: string = project::dep_kind(d)
+    let locked: lock::Locked = lock::lock_get(pl, dname)
+    let version: string = installer::install_registry(project::cache_libs(p), d, lock::locked_version(locked), use_lock, force, verbose)
+    if version == "" is return failed() end
+    let dest: string = installer::registry_dir(project::cache_libs(p), d)
+    let sum: string = checksum::tag(checksum::dir_checksum(dest))
+    if !integrity_ok(dname, locked, sum, use_lock && lock::locked_version(locked) == version) is return failed() end
+    ui::ok(dname + "  " + ui::dim(kind + " " + version + (if project::dep_package(d) != dname then "  (" + project::dep_package(d) + ")" else "")))
+    return Outcome { oc_ok: true, oc_lock: true, oc_entry: lock::Locked {
+        lk_name: dname, lk_version: version, lk_commit: "", lk_url: registry::registry_url(kind),
+        lk_checksum: sum, lk_lang: "", lk_output: "source", lk_at: util::now_iso(),
+        lk_range: project::dep_range(d), lk_tag: "", lk_source: kind, lk_dir: ""
+    } }
+end
+
+;; Installs/links one dependency.
 fn ensure_one(p: project::Project, d: project::Dep, pk: Pick, pl: lock::Lock, use_lock: bool, force: bool,
-              verbose: bool, release: bool) -> string is
+              verbose: bool, release: bool) -> Outcome is
     let dname: string = project::dep_name(d)
     let kind: string = project::dep_kind(d)
 
     if kind == "invalid" is
-        ui::bad(dname + "  " + ui::red("declared dynamic") + " — bit links libraries statically")
-        return ""
+        ui::bad(dname + "  " + ui::red("`" + project::dep_arg(d) + "` is not a dependency source") + " — name a version or a source (git, path, pypi, …); system libraries go in [system-dependencies]")
+        return failed()
     end
 
     if kind == "path" is
         let dir: string = resolve_path(p, project::dep_arg(d))
         if !dir_exists(dir) is
             ui::bad(dname + "  " + ui::red("path not found: ") + dir)
-            return ""
+            return failed()
         end
         link_into_cache(p, dname, dir)
         ui::ok(dname + "  " + ui::dim("path " + dir))
-        return ""      ;; path deps are not part of the global install/lock
+        return fine_no_lock()      ;; path deps are not part of the global install/lock
+    end
+
+    if project::is_registry_kind(kind) || project::is_builtin_kind(kind) is
+        if project::is_builtin_kind(kind) is
+            ui::ok(dname + "  " + ui::dim(kind + "  (part of the language's standard library)"))
+            return fine_no_lock()
+        end
+        return ensure_registry(p, d, pl, use_lock, force, verbose)
     end
 
     if pk.pk_err != "" is
         ui::bad(dname + "  " + ui::red(pk.pk_err))
-        return ""
+        return failed()
     end
 
     let locked: lock::Locked = lock::lock_get(pl, dname)
     let spec: string = spec_of(d)
-    let opts: installer::InstallOpts = installer::iopts(force, true, project::dep_output(d),
-                                                       project::dep_lang(d), "", release, verbose)
-    if installer::install_lib(spec, pk.pk_rev, opts) != 0 is return "" end
+    let base: installer::InstallOpts = installer::iopts(force, true, project::dep_output(d), project::dep_lang(d), "", release, verbose)
+    let opts: installer::InstallOpts = installer::with_origin(base, if kind == "git" then dname else "", project::dep_dir(d), kind)
+    if installer::install_lib(spec, pk.pk_rev, opts) != 0 is return failed() end
 
-    let installed: string = if kind == "git" then installer::repo_name_from_url(project::dep_arg(d)) else dname
     let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
-    let now: lock::Locked = lock::lock_get(gl, installed)
-
-    ;; integrity: the project lock pins a checksum — the installed tree must match it
-    if use_lock && lock::locked_checksum(locked) != "" && lock::locked_checksum(now) != "" is
-        if lock::locked_checksum(locked) != lock::locked_checksum(now) is
-            ui::bad(dname + "  " + ui::red("does not match Bit.lock") + " " + ui::dim("(pinned " +
-                    util::short_hash(checksum::untag(lock::locked_checksum(locked))) + ", installed " +
-                    util::short_hash(checksum::untag(lock::locked_checksum(now))) + ")"))
-            ui::note("investigate, or re-resolve with:  bit upgrade " + dname)
-            return ""
-        end
+    let now: lock::Locked = lock::lock_get(gl, dname)
+    if lock::locked_name(now) == "" is
+        ui::bad(dname + "  " + ui::red("was installed under a different name") + " " + ui::dim("(the index calls it something else — use its exact name)"))
+        return failed()
     end
+    if !integrity_ok(dname, locked, lock::locked_checksum(now), use_lock) is return failed() end
 
-    link_into_cache(p, dname, installer::current_dir(installed))
-    return installed
+    link_into_cache(p, dname, installer::current_dir(dname))
+    let tag: string = if semver::parse(pk.pk_rev) >= 0 then pk.pk_rev else lock::locked_tag(now)
+    return Outcome { oc_ok: true, oc_lock: true, oc_entry: lock::Locked {
+        lk_name: dname, lk_version: lock::locked_version(now), lk_commit: lock::locked_commit(now), lk_url: lock::locked_url(now),
+        lk_checksum: lock::locked_checksum(now), lk_lang: lock::locked_lang(now), lk_output: lock::locked_output(now),
+        lk_at: lock::locked_at(now), lk_range: pk.pk_range, lk_tag: tag,
+        lk_source: kind, lk_dir: project::dep_dir(d)
+    } }
 end
 
-;; Returns the number of dependencies that could not be satisfied.
-pub fn ensure_deps(p: project::Project, verbose: bool, release: bool, use_lock: bool, force: bool) -> int is
-    let deps: [project::Dep] = project::deps(p)
+;; Installs a list of dependencies (the project's [dependencies], or its [dev-dependencies]).
+;; Returns the number that could not be satisfied.
+fn ensure_list(p: project::Project, deps: [project::Dep], label: string, verbose: bool, release: bool,
+               use_lock: bool, force: bool) -> int is
     if array_len(deps) == 0 is return 0 end
 
     project::cache_ensure(p)
-    ui::line(ui::bold("dependencies") + " " + ui::dim("(" + to_string(array_len(deps)) + ")") +
+    ui::line(ui::bold(label) + " " + ui::dim("(" + to_string(array_len(deps)) + ")") +
              (if net::offline() then "  " + ui::yellow("offline") else "") +
              (if locked_only() then "  " + ui::dim("--locked") else ""))
     let mut pl: lock::Lock = lock::lock_read(project_lock_path(p))
 
-    ;; 1. decide the revision of every dependency (ranges → tags)
+    ;; 1. decide the revision of every git dependency (ranges → tags)
     let mut picks: [Pick] = []
     let mut i: int = 0
     while i < array_len(deps) is
-        picks = array_push(picks, pick_rev(deps[i], pl, use_lock))
+        if project::is_git_kind(project::dep_kind(deps[i])) is
+            picks = array_push(picks, pick_rev(deps[i], pl, use_lock))
+        else is
+            picks = array_push(picks, Pick { pk_rev: "", pk_range: "", pk_err: "" })
+        end
         i += 1
     end
 
@@ -161,8 +222,7 @@ pub fn ensure_deps(p: project::Project, verbose: bool, release: bool, use_lock: 
     i = 0
     while i < array_len(deps) is
         let d: project::Dep = deps[i]
-        let k: string = project::dep_kind(d)
-        if (k == "index" || k == "git") && picks[i].pk_err == "" && (force || !installer::is_installed(project::dep_name(d))) is
+        if project::is_git_kind(project::dep_kind(d)) && picks[i].pk_err == "" && (force || !installer::is_installed(project::dep_name(d))) is
             let url: string = installer::spec_url(spec_of(d))
             if url != "" is items = array_push(items, url + "\t" + picks[i].pk_rev) end
         end
@@ -171,30 +231,30 @@ pub fn ensure_deps(p: project::Project, verbose: bool, release: bool, use_lock: 
     net::prefetch(items, verbose)
 
     ;; 3. install / link, one by one
-    let mut failed: int = 0
+    let mut bad: int = 0
     i = 0
     while i < array_len(deps) is
-        let d: project::Dep = deps[i]
-        let installed: string = ensure_one(p, d, picks[i], pl, use_lock, force, verbose, release)
-        if installed == "" && project::dep_kind(d) != "path" is
-            failed += 1
-        else if installed != "" is
-            let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
-            let e: lock::Locked = lock::lock_get(gl, installed)
-            let tag: string = if semver::parse(picks[i].pk_rev) >= 0 then picks[i].pk_rev else lock::locked_tag(e)
-            pl = lock::lock_set(pl, lock::Locked {
-                lk_name: project::dep_name(d), lk_version: lock::locked_version(e),
-                lk_commit: lock::locked_commit(e), lk_url: lock::locked_url(e),
-                lk_checksum: lock::locked_checksum(e), lk_lang: lock::locked_lang(e),
-                lk_output: lock::locked_output(e), lk_at: lock::locked_at(e),
-                lk_range: picks[i].pk_range, lk_tag: tag
-            })
+        let out: Outcome = ensure_one(p, deps[i], picks[i], pl, use_lock, force, verbose, release)
+        if !out.oc_ok is
+            bad += 1
+        else if out.oc_lock is
+            pl = lock::lock_set(pl, out.oc_entry)
         end
         i += 1
     end
-    if failed == 0 && !locked_only() is lock::lock_write(project_lock_path(p), pl) end
+    if bad == 0 && !locked_only() is lock::lock_write(project_lock_path(p), pl) end
     ui::blank()
-    return failed
+    return bad
+end
+
+;; Returns the number of [dependencies] that could not be satisfied.
+pub fn ensure_deps(p: project::Project, verbose: bool, release: bool, use_lock: bool, force: bool) -> int is
+    return ensure_list(p, project::deps(p), "dependencies", verbose, release, use_lock, force)
+end
+
+;; [dev-dependencies] — only `bit test` needs them.
+pub fn ensure_dev_deps(p: project::Project, verbose: bool, release: bool, use_lock: bool, force: bool) -> int is
+    return ensure_list(p, project::dev_deps(p), "dev-dependencies", verbose, release, use_lock, force)
 end
 
 ;; `bit outdated`: what `bit upgrade` would change. Returns the number of outdated dependencies.
@@ -211,7 +271,7 @@ pub fn outdated(p: project::Project) -> int is
     while i < array_len(deps) is
         let d: project::Dep = deps[i]
         let k: string = project::dep_kind(d)
-        if k == "index" || k == "git" is
+        if project::is_git_kind(k) is
             let tags: [string] = net::remote_tags(installer::spec_url(spec_of(d)))
             let locked: lock::Locked = lock::lock_get(pl, project::dep_name(d))
             let cur: string = util::or_default(lock::locked_tag(locked), util::short_hash(lock::locked_commit(locked)))
@@ -225,54 +285,22 @@ pub fn outdated(p: project::Project) -> int is
                      util::or_default(in_range, "-") + " → " + util::or_default(newest, "-")) +
                      (if range != "" then "  " + ui::dim("(" + range + ")") else ""))
             if is_old is count += 1 end
+        else if project::is_registry_kind(k) && k != "vira" is
+            let locked: lock::Locked = lock::lock_get(pl, project::dep_name(d))
+            let range: string = project::dep_range(d)
+            let cur: string = lock::locked_version(locked)
+            let in_range: string = registry::resolve(k, project::dep_package(d), range)
+            let newest: string = registry::newest(k, project::dep_package(d))
+            let is_old: bool = in_range != "" && cur != "" && in_range != cur
+            let beyond: bool = newest != "" && in_range != "" && newest != in_range
+            let mark: string = if is_old then ui::yellow("↑") else if beyond then ui::cyan("»") else ui::green("✓")
+            ui::line(mark + " " + project::dep_name(d) + "  " + ui::dim(k + "  " + util::or_default(cur, "not installed") + " → " +
+                     util::or_default(in_range, "-") + " → " + util::or_default(newest, "-")) +
+                     (if range != "" then "  " + ui::dim("(" + range + ")") else ""))
+            if is_old is count += 1 end
         end
         i += 1
     end
     if count == 0 is ui::ok("everything is up to date within its version ranges") end
     return count
-end
-
-;; ── bare `bit` ───────────────────────────────────────────────────────────────
-
-pub fn auto(verbose: bool) -> int is
-    let p: project::Project = project::load_here()
-    if !project::is_loaded(p) is
-        ui::fail("no Bit.hk found in " + project::cwd() + " or any parent directory")
-        ui::note("create a project:  bit init <name>      all commands:  bit --help")
-        return 1
-    end
-
-    let o0: build::BuildOpts = build::opts_default(p)
-    let o: build::BuildOpts = build::opts_new(build::opts_release(o0), verbose, project::get(p, "default-build", "target", ""),
-                                             project::get(p, "default-build", "platform", ""),
-                                             project::get(p, "default-build", "emit", ""))
-
-    let before: string = project::get(p, "default-build", "before", "")
-    if before != "" is
-        ui::line(ui::dim("before: " + before))
-        if build::shell_in_root(p, before) != 0 is
-            ui::fail("[default-build] before failed")
-            return 1
-        end
-    end
-
-    if ensure_deps(p, verbose, build::opts_release(o), true, false) != 0 is
-        ui::fail("some dependencies could not be installed")
-        return 1
-    end
-    if build::build_project(p, o) != 0 is return 1 end
-
-    let after: string = project::get(p, "default-build", "after", "")
-    if after != "" is
-        ui::line(ui::dim("after: " + after))
-        if build::shell_in_root(p, after) != 0 is
-            ui::fail("[default-build] after failed")
-            return 1
-        end
-    end
-
-    if project::get_bool(p, "default-build", "run", false) is
-        return build::run_project(p, o, project::get(p, "default-build", "args", ""), true)
-    end
-    return 0
 end
