@@ -102,6 +102,20 @@ pub fn is_url(s: string) -> bool is
            string_starts_with(s, "git://") || string_starts_with(s, "file://")
 end
 
+;; `org/repo` on a forge (`github`, `gitlab`, `codeberg`, `bitbucket`, `sourcehut` or any host) -> clone url.
+pub fn forge_url(host: string, org_repo: string) -> string is
+    let h: string = string_lower(string_trim(host))
+    let mut path: string = string_trim(org_repo)
+    while string_starts_with(path, "/") is path = string_slice(path, 1, string_len(path)) end
+    if h == "" || h == "github" is return "https://github.com/" + path end
+    if h == "gitlab" is return "https://gitlab.com/" + path end
+    if h == "codeberg" is return "https://codeberg.org/" + path end
+    if h == "bitbucket" is return "https://bitbucket.org/" + path end
+    if h == "sourcehut" || h == "sr.ht" is return "https://git.sr.ht/~" + path end
+    if string_contains(h, ".") is return "https://" + h + "/" + path end
+    return "https://github.com/" + path
+end
+
 ;; First 12 characters of a commit id (the directory name of an installed lib).
 pub fn short_hash(h: string) -> string is
     if string_len(h) <= 12 is return h end
@@ -209,3 +223,15 @@ end
 
 pub fn cache_dir() -> string is return bit_dir() + "/cache" end
 pub fn tmp_dir() -> string is return bit_dir() + "/tmp" end
+
+;; Splits on spaces, dropping empty pieces.
+pub fn words(s: string) -> [string] is
+    let parts: [string] = string_split(string_trim(s), " ")
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(parts) is
+        if parts[i] != "" is out = array_push(out, parts[i]) end
+        i += 1
+    end
+    return out
+end
