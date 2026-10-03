@@ -10,8 +10,20 @@ mod installer
 mod workflow
 mod commands
 mod scaffold
+mod driver
+mod registry
+mod semver
+mod sysdeps
+mod features
+mod workspace
+mod devtools
+mod pyenv
+mod settings
+mod external
+mod flags
+mod pipeline
 
-pub fn version() -> string is return "1.0.0" end
+pub fn version() -> string is return "1.1.0" end
 
 pub fn print_version() is
     write("bit " + version() + " — package manager for H#, Hacker Lang and HackerScript")
@@ -27,29 +39,46 @@ pub fn print_help() is
     write("")
     write("  " + ui::bold("PROJECT"))
     write("    init [name] [--lang h#|hl|hs] [--lib]   new project (or initialise the current directory)")
-    write("    build [--release] [--target h#|hl|hs] [--platform P] [--emit bin|hlib|so|a|obj]")
+    write("    build [--release] [--target h#|hl|hs] [--platform P] [--emit bin|hlib|so|a|rlib|obj]")
+    write("      [--bin NAME] [--wasm] [--jar] [--library]   extra binaries (src/bin/*.h#, cmd/bin/*.hcs), wasm32, jar, rlib")
+    write("    build <file.hcs|file.h#>     compile one file without a Bit.hk          (virus build <file>)")
+    write("      [--features a,b] [--all-features] [--no-default-features] [--no-system-check]")
     write("                                 without flags: uses [default-build] from Bit.hk")
-    write("    run [-- args]                build and run          check   syntax + type check")
+    write("    run [--bin NAME] [-- args]   build and run          check   syntax + type check")
+    write("    test [filter]                run #[test] functions (needs [dev-dependencies] too)")
+    write("    fmt [file] [--check]         format sources         lint [file]   show warnings only")
+    write("    doc [dir]                    HTML documentation from `;;` comments")
+    write("    lsp [h#|hs]                  language server on stdio        repair <code>   explain E0001 / W0002 …")
     write("    clean [--all]                remove cache/ (--all: also old installed versions)")
     write("    cache                        show / create the project cache/ directories")
     write("    x <name> [args]              run a custom command from [commands] (also: bit <name>)")
     write("    commands                     list custom commands")
     write("    publish                      validate Bit.hk and print the index entry to submit")
     write("")
+    write("  " + ui::bold("WORKSPACES"))
+    write("    new-ws <name> [--special]    new workspace (special: members in different languages)")
+    write("    ws [info|list|build|test|clean] [member]     build at the root = every member, dependencies first")
+    write("    -p <member>                  pick one member of a workspace (for build / run / test / check)")
+    write("")
     write("  " + ui::bold("LIBRARIES") + "  " + ui::dim("installed to ~/.hackeros/libs/, checksummed, linked statically"))
-    write("    install [name|git-url ...]   install libraries (no name: the project's [dependencies])")
+    write("    install [name|git-url ...]   install libraries (no name: [dependencies] + [dev-dependencies])")
+    write("    install <source> <name> [--version V]   virus style, = add: pypi crates npm jsr vira bytes bit std core")
     write("      [--output hlib|so|a|obj] [--target h#|hl|hs] [--no-build] [--release] [--force]")
-    write("      versions in [dependencies]:  -> regex => ^1.2   ~1.2.3   >=1.0 <2.0   1.x   rev <tag|branch|commit>")
-    write("    add <name> [rev]             install + add to [dependencies] in Bit.hk")
-    write("    remove <name> [--global]     remove from the project (or uninstall)")
+    write("    add <name|url|kind:name> [version|rev] [--dev]     install + add to Bit.hk")
+    write("      silver            newest        silver 0.1   that exact version      silver ^0.1   a range")
+    write("      github:org/repo#dir   a directory of a repository      pypi:requests 2.31   crates:serde ^1   npm:x   jsr:@s/x   vira:zlib")
+    write("    remove <name> [--global]     remove from the project (or uninstall)      (also: remove <source> <name>)")
     write("    upgrade [name] [--dry-run]   re-resolve version ranges, fetch the newest matches, refresh Bit.lock")
     write("    outdated                     locked → newest-in-range → newest version of every dependency")
-    write("    migrate [--check] [file]     rewrite an old-syntax Bit.hk / old lock file (--check: CI, exit 1 if needed)")
+    write("    features                     list the project's [features]")
+    write("    system [check|install|list]  [system-dependencies]: look for native libraries, install the missing ones")
+    write("    python add <pkg> [ver] | install | list     Python packages in cache/env/python")
     write("    list                         installed libraries")
     write("    search [text|all] [--lang h#|hl|hs]")
     write("    info <name>                  index entry + install state")
     write("    update                       refresh the library index")
     write("    verify [name]                re-check installed checksums against bit.lock")
+    write("    settings [get|set|unset|reset|path] [key] [value]     user settings (jobs, offline, plain, index-url, …)")
     write("    doctor                       toolchains, tools, index, checksums")
     write("    langs                        which language toolchains are installed")
     write("")
@@ -58,16 +87,87 @@ pub fn print_help() is
     write("    --locked        install exactly what Bit.lock says (fails if it is out of date) — for CI")
     write("    --offline       never use the network (installed libraries + cached index only)     BIT_OFFLINE=1")
     write("    --jobs <n>      parallel clones (default 4)      BIT_JOBS   BIT_TIMEOUT=<s>   BIT_RETRIES=<n>")
+    write("    --no-system-check   build without checking [system-dependencies]      BIT_NO_SYSTEM_CHECK=1")
     write("")
     write("  " + ui::dim("Index: " + index::index_url()))
     write("")
 end
 
+;; ── virus compatibility ──────────────────────────────────────────────────────
+;; `virus install <source> <name> [--version V]`, `virus remove <source> <name>` and
+;; `virus build <file>` keep working, so bit can stand in for virus completely.
+
+pub fn is_virus_source(w: string) -> bool is
+    return w == "pypi" || w == "crates" || w == "npm" || w == "jsr" || w == "vira" ||
+           w == "std" || w == "core" || w == "bytes" || w == "bit"
+end
+
+;; virus-style install:  bit install crates itoa --version 1.0   ==  bit add crates:itoa 1.0
+pub fn cmd_install_source(source: string, name: string, version: string, output: string, target: string,
+                          no_build: bool, release: bool, verbose: bool, dev: bool) -> int is
+    if name == "" is
+        ui::fail("usage: bit install <source> <name> [--version V]    sources: pypi crates npm jsr vira bytes bit std core")
+        return 1
+    end
+    ;; `bytes` and `bit` are the library index itself: a plain name
+    let spec: string = if source == "bytes" || source == "bit" then name else source + ":" + name
+    return cmd_add(spec, version, output, target, no_build, release, verbose, dev)
+end
+
+;; Single-file build (`bit build main.hcs`, `bit build tool.h#`) without a Bit.hk.
+pub fn cmd_build_file(file: string, release: bool, verbose: bool, output: string) -> int is
+    if !file_exists(file) is
+        ui::fail("no such file: " + file)
+        return 1
+    end
+    let base: string = util::basename(file)
+    let dot: int = string_find(base, ".")
+    let stem: string = if dot > 0 then string_slice(base, 0, dot) else base
+    let out: string = if output != "" then output else stem
+    if string_ends_with(file, ".h#") is
+        let tool: string = build::tool_for("hsharp")
+        if tool == "" is
+            ui::fail("no H# compiler found")
+            ui::note(build::missing_tool_hint("hsharp"))
+            return 1
+        end
+        return util::run(tool + " compile " + util::sq(file) + " -o " + util::sq(out) + (if release then " --release" else ""))
+    end
+    if !string_ends_with(file, ".hcs") is
+        ui::fail("bit build <file> takes a .hcs (HackerScript) or .h# (H#) file")
+        return 1
+    end
+    let tool: string = build::tool_for("hackerscript")
+    if tool == "" is
+        ui::fail("no hackerc found")
+        ui::note(build::missing_tool_hint("hackerscript"))
+        return 1
+    end
+    if !util::tool_exists("cargo") is
+        ui::fail("cargo is needed to compile HackerScript output (hackerc → Rust)")
+        return 1
+    end
+    let crate: string = string_replace(stem, "-", "_")
+    let work: string = util::tmp_dir() + "/single-" + stem
+    util::rm_rf(work)
+    util::mkdir_p(work)
+    let rc1: int = util::run(tool + " build " + util::sq(file) + " -o " + util::sq(work) + " --crate-name " + crate + " --bin-name " + stem)
+    if rc1 != 0 is return rc1 end
+    let rc2: int = util::run("cargo build" + (if release then " --release" else "") + " --manifest-path " + util::sq(work + "/Cargo.toml") +
+                             " --target-dir " + util::sq(work + "/target"))
+    if rc2 != 0 is return rc2 end
+    let built: string = work + "/target/" + (if release then "release" else "debug") + "/" + stem
+    let rc3: int = util::run("cp -f " + util::sq(built) + " " + util::sq(out))
+    if rc3 == 0 is ui::ok("built " + out) end
+    return rc3
+end
+
+
 ;; ── init ─────────────────────────────────────────────────────────────────────
 
 ;; bare `bit`: everything Bit.hk describes.
 pub fn cmd_auto(verbose: bool) -> int is
-    return workflow::auto(verbose)
+    return driver::auto(verbose)
 end
 
 pub fn cmd_init(name: string, lang: string, is_lib: bool) -> int is
@@ -86,71 +186,26 @@ end
 
 ;; ── build / run / check / clean / cache ──────────────────────────────────────
 
-fn flags_given(release: bool, target: string, platform: string, emit: string) -> bool is
-    return release || target != "" || platform != "" || emit != ""
-end
-
-fn effective_opts(p: project::Project, release: bool, debug: bool, verbose: bool, target: string,
-                  platform: string, emit: string, sign: string) -> build::BuildOpts is
-    let mut o: build::BuildOpts = build::opts_default(p)
-    if flags_given(release, target, platform, emit) || debug is
-        o = build::opts_new(release, verbose, target, platform, emit)
-    else is
-        o = build::opts_new(build::opts_release(o), verbose, project::get(p, "default-build", "target", ""),
-                            project::get(p, "default-build", "platform", ""),
-                            project::get(p, "default-build", "emit", ""))
-    end
-    if sign != "" is o = build::opts_with_sign(o, sign) end
-    return o
-end
-
 pub fn cmd_build(release: bool, debug: bool, verbose: bool, target: string, platform: string, emit: string,
                  sign: string, use_lock: bool) -> int is
-    let p: project::Project = need_project()
-    if !project::is_loaded(p) is return no_project_error() end
-    let o: build::BuildOpts = effective_opts(p, release, debug, verbose, target, platform, emit, sign)
-    if workflow::ensure_deps(p, verbose, build::opts_release(o), use_lock, false) != 0 is
-        ui::fail("some dependencies could not be installed")
-        return 1
-    end
-    return build::build_project(p, o)
+    return driver::build(release, debug, verbose, target, platform, emit, sign, use_lock)
 end
 
 pub fn cmd_run(release: bool, debug: bool, verbose: bool, target: string, platform: string, args: string,
                use_lock: bool) -> int is
-    let p: project::Project = need_project()
-    if !project::is_loaded(p) is return no_project_error() end
-    let o: build::BuildOpts = effective_opts(p, release, debug, verbose, target, platform, "", "")
-    if workflow::ensure_deps(p, verbose, build::opts_release(o), use_lock, false) != 0 is
-        ui::fail("some dependencies could not be installed")
-        return 1
-    end
-    return build::run_project(p, o, args, false)
+    return driver::run(release, debug, verbose, target, platform, args, use_lock)
 end
 
 pub fn cmd_check(verbose: bool) -> int is
-    let p: project::Project = need_project()
-    if !project::is_loaded(p) is return no_project_error() end
-    ui::blank()
-    let rc: int = build::check_project(p, verbose)
-    ui::blank()
-    return rc
+    return driver::check(verbose)
+end
+
+pub fn cmd_test(filter: string, verbose: bool, release: bool) -> int is
+    return driver::test(filter, verbose, release)
 end
 
 pub fn cmd_clean(everything: bool) -> int is
-    let p: project::Project = need_project()
-    if !project::is_loaded(p) is return no_project_error() end
-    if build::clean_project(p) is
-        ui::ok("removed " + project::cache_root(p))
-    else is
-        ui::fail("could not remove " + project::cache_root(p))
-        return 1
-    end
-    if everything is
-        let n: int = installer::clean_old()
-        ui::ok("removed " + to_string(n) + " old library version(s)")
-    end
-    return 0
+    return driver::clean(everything)
 end
 
 pub fn cmd_cache() -> int is
@@ -193,7 +248,7 @@ fn write_lines(path: string, lines: [string]) is
     file_write(path, util::join(lines, "\n"))
 end
 
-fn manifest_add_dep(p: project::Project, name: string, value: string) -> bool is
+fn manifest_add_dep(p: project::Project, name: string, value: string, section: string) -> bool is
     let path: string = project::manifest_of(p)
     if path == "" is return false end
     let lines: [string] = string_split(file_read(path), "\n")
@@ -203,7 +258,7 @@ fn manifest_add_dep(p: project::Project, name: string, value: string) -> bool is
     while i < array_len(lines) is
         out = array_push(out, lines[i])
         let t: string = string_trim(lines[i])
-        if !done && string_starts_with(t, "[") && hk::norm_section(string_slice(t, 1, string_len(t) - 1)) == "dependencies" is
+        if !done && string_starts_with(t, "[") && hk::norm_section(string_slice(t, 1, string_len(t) - 1)) == section is
             out = array_push(out, "-> " + name + " => " + value)
             done = true
         end
@@ -211,7 +266,7 @@ fn manifest_add_dep(p: project::Project, name: string, value: string) -> bool is
     end
     if !done is
         out = array_push(out, "")
-        out = array_push(out, "[dependencies]")
+        out = array_push(out, "[" + section + "]")
         out = array_push(out, "-> " + name + " => " + value)
         out = array_push(out, "")
     end
@@ -232,7 +287,8 @@ fn manifest_remove_dep(p: project::Project, name: string) -> bool is
         let t: string = string_trim(lines[i])
         let mut keep: bool = true
         if string_starts_with(t, "[") && string_ends_with(t, "]") is
-            in_deps = hk::norm_section(string_slice(t, 1, string_len(t) - 1)) == "dependencies"
+            let sec: string = hk::norm_section(string_slice(t, 1, string_len(t) - 1))
+            in_deps = sec == "dependencies" || sec == "dev-dependencies"
             skipping = false
         else if in_deps && string_starts_with(t, "-->") && skipping is
             keep = false
@@ -265,8 +321,26 @@ pub fn cmd_install(names: [string], output: string, target: string, platform: st
             ui::fail("name a library to install:  bit install <name>")
             return 1
         end
-        let rc: int = workflow::ensure_deps(p, verbose, release, use_lock, force)
-        if rc != 0 is return 1 end
+        let mut bad: int = 0
+        if workspace::is_workspace(p) is
+            let ms: [workspace::Member] = workspace::list(p)
+            let mut i: int = 0
+            while i < array_len(ms) is
+                if ms[i].mb_kind == "bit" is
+                    let mp: project::Project = project::load(ms[i].mb_dir)
+                    features::activate(mp, flags::features_for(mp, true), flags::no_default(), flags::all_features(), verbose)
+                    ui::line(ui::cyan("▸") + " " + ui::bold(ms[i].mb_name))
+                    bad += workflow::ensure_deps(mp, verbose, release, use_lock, force)
+                    bad += workflow::ensure_dev_deps(mp, verbose, release, use_lock, force)
+                end
+                i += 1
+            end
+        else is
+            if features::activate(p, flags::features(), flags::no_default(), flags::all_features(), verbose) != 0 is return 1 end
+            bad += workflow::ensure_deps(p, verbose, release, use_lock, force)
+            bad += workflow::ensure_dev_deps(p, verbose, release, use_lock, force)
+        end
+        if bad != 0 is return 1 end
         ui::ok("dependencies installed")
         return 0
     end
@@ -283,32 +357,93 @@ pub fn cmd_install(names: [string], output: string, target: string, platform: st
     return 0
 end
 
+;; ── bit add ──────────────────────────────────────────────────────────────────
+;;   bit add silver                    newest version from the index
+;;   bit add silver 0.1                exactly 0.1  (also: silver@0.1, ^0.1, >=0.1 <1)
+;;   bit add silver v1.4               a tag / branch / commit of the index entry
+;;   bit add https://host/org/repo     a git repository  (#dir picks a directory of it)
+;;   bit add github:org/repo#crates/x  a repository on a forge (github gitlab codeberg bitbucket sourcehut)
+;;   bit add pypi:requests 2.31        crates:serde ^1   npm:left-pad   jsr:@std/fs   vira:zlib
+;;   bit add ../mine                   a path dependency
+;;   --dev                             add to [dev-dependencies]
+
+fn split_prefix(arg: string) -> [string] is
+    let colon: int = string_find(arg, ":")
+    if colon <= 0 || util::is_url(arg) is return ["", arg] end
+    let head: string = string_lower(string_slice(arg, 0, colon))
+    let rest: string = string_slice(arg, colon + 1, string_len(arg))
+    if project::is_registry_kind(head) || project::is_builtin_kind(head) || head == "git" || head == "github" || head == "gitlab" ||
+       head == "codeberg" || head == "bitbucket" || head == "sourcehut" is
+        return [head, rest]
+    end
+    return ["", arg]
+end
+
+;; (dependency key, value for Bit.hk) for what the user typed.
+fn add_spec(arg_in: string, rev_in: string) -> [string] is
+    let mut arg: string = arg_in
+    let mut rev: string = rev_in
+    let at: int = string_find(arg, "@")
+    if at > 0 && !util::is_url(arg) && !string_starts_with(arg, "@") && !string_contains(arg, "/") && rev == "" is
+        rev = string_slice(arg, at + 1, string_len(arg))
+        arg = string_slice(arg, 0, at)
+    end
+    let pre: [string] = split_prefix(arg)
+    let kind: string = pre[0]
+    let body: string = pre[1]
+    let ver: string = if rev == "" then "" else if semver::is_range(rev) then rev else "rev " + rev
+    let ver_only: string = if rev == "" then "newest" else rev
+
+    if kind == "pypi" || kind == "crates" || kind == "npm" || kind == "jsr" || kind == "vira" is
+        let key: string = if kind == "jsr" || string_starts_with(body, "@") then util::basename(body) else body
+        return [key, kind + (if rev != "" then " " + ver_only else "")]
+    end
+    if kind == "std" || kind == "core" is return [body, kind] end
+    if kind == "github" || kind == "gitlab" || kind == "codeberg" || kind == "bitbucket" || kind == "sourcehut" is
+        let repo: string = if string_contains(body, "#") then string_slice(body, 0, string_find(body, "#")) else body
+        return [util::basename(repo), kind + " " + body + (if rev != "" then " " + rev else "")]
+    end
+    if kind == "git" || util::is_url(body) is
+        let url: string = if string_contains(body, "#") then string_slice(body, 0, string_find(body, "#")) else body
+        return [installer::repo_name_from_url(url), "git " + body + (if rev != "" then " " + rev else "")]
+    end
+    if string_starts_with(body, ".") || string_starts_with(body, "/") || string_starts_with(body, "~") is
+        return [util::basename(body), "path " + body]
+    end
+    if rev == "" is return [body, "newest"] end
+    return [body, if semver::is_range(rev) then rev else "rev " + rev]
+end
+
 pub fn cmd_add(name: string, rev: string, output: string, target: string, no_build: bool, release: bool,
-               verbose: bool) -> int is
+               verbose: bool, dev: bool) -> int is
     if name == "" is
-        ui::fail("usage: bit add <name|git-url> [rev]")
+        ui::fail("usage: bit add <name | git-url | kind:name> [version | rev]   [--dev]")
+        ui::note("e.g.  bit add silver 0.1    bit add github:org/repo#dir    bit add pypi:requests 2.31")
         return 1
     end
     let p: project::Project = need_project()
     if !project::is_loaded(p) is return no_project_error() end
+    let section: string = if dev then "dev-dependencies" else "dependencies"
 
-    let is_git: bool = util::is_url(name)
-    let dep_key: string = if is_git then installer::repo_name_from_url(name) else name
-    if hk::hk_has(project::hk_of(p), "dependencies", dep_key) is
-        ui::note(dep_key + " is already in [dependencies]")
+    let spec: [string] = add_spec(name, rev)
+    let key: string = spec[0]
+    let value: string = spec[1]
+    if !util::valid_name(key) is
+        ui::fail("'" + key + "' is not a valid dependency name")
+        return 1
+    end
+    if hk::hk_has(project::hk_of(p), section, key) is
+        ui::note(key + " is already in [" + section + "]")
     else is
-        let value: string = if is_git then "git " + name + (if rev != "" then " " + rev else "")
-                            else if rev != "" then "rev " + rev else "*"
-        manifest_add_dep(p, dep_key, value)
+        manifest_add_dep(p, key, value, section)
+        ui::ok("[" + section + "]  " + key + " => " + value)
     end
 
-    let o: installer::InstallOpts = installer::iopts(false, !no_build, output, target, "", release, verbose)
     ui::blank()
-    let rc: int = installer::install_lib(name, rev, o)
-    ui::blank()
-    if rc != 0 is return 1 end
     let fresh: project::Project = project::load(project::root_of(p))
-    return workflow::ensure_deps(fresh, verbose, release, false, false)
+    let rc: int = if dev then workflow::ensure_dev_deps(fresh, verbose, release, false, false) else workflow::ensure_deps(fresh, verbose, release, false, false)
+    if rc != 0 is return 1 end
+    return 0
 end
 
 pub fn cmd_remove(name: string, global: bool) -> int is
@@ -318,12 +453,19 @@ pub fn cmd_remove(name: string, global: bool) -> int is
     end
     let p: project::Project = need_project()
     let mut touched: bool = false
-    if project::is_loaded(p) && hk::hk_has(project::hk_of(p), "dependencies", name) is
+    let in_deps: bool = project::is_loaded(p) && (hk::hk_has(project::hk_of(p), "dependencies", name) || hk::hk_has(project::hk_of(p), "dev-dependencies", name))
+    if in_deps is
         if manifest_remove_dep(p, name) is
-            util::run("rm -f " + util::sq(project::cache_libs(p) + "/" + name))
+            util::run("rm -rf " + util::sq(project::cache_libs(p) + "/" + name))
+            let kinds: [string] = ["pypi", "crates", "npm", "jsr", "vira"]
+            let mut k: int = 0
+            while k < array_len(kinds) is
+                util::run("rm -rf " + util::sq(project::cache_libs(p) + "/" + kinds[k] + "/" + name))
+                k += 1
+            end
             let pl: string = project::root_of(p) + "/Bit.lock"
             lock::lock_write(pl, lock::lock_del(lock::lock_read(pl), name))
-            ui::ok(name + " removed from [dependencies]")
+            ui::ok(name + " removed from Bit.hk")
             touched = true
         end
     end
@@ -373,65 +515,6 @@ pub fn cmd_outdated() -> int is
     if n > 0 is
         ui::note(to_string(n) + " dependenc" + (if n == 1 then "y" else "ies") + " can be upgraded:  bit upgrade [name]")
     end
-    return 0
-end
-
-;; `bit migrate [--check] [file]` — rewrites a Bit.hk written in bit's old dialect
-;; (`;;` comments, `key = value`, a value plus `-->` sub-keys, trailing comments)
-;; into the hk-parser grammar, and converts old lock files. --check changes nothing
-;; and exits 1 when something would be rewritten (for CI).
-pub fn cmd_migrate(check_only: bool, path_arg: string) -> int is
-    let mut manifest: string = path_arg
-    let mut root: string = ""
-    if manifest == "" is
-        let p: project::Project = project::load_here()
-        if !project::is_loaded(p) is return no_project_error() end
-        manifest = project::manifest_of(p)
-        root = project::root_of(p)
-    end
-    ui::blank()
-    let mut pending: int = 0
-    let mut broken: int = 0
-
-    let text: string = file_read(manifest)
-    let fixed: string = hk::migrate_text(text)
-    if fixed == text is
-        ui::ok(manifest + "  " + ui::dim("already uses the current syntax"))
-    else if !hk::hk_valid(text) is
-        ui::bad(manifest + "  " + ui::red("cannot be parsed even after migration — fix it by hand"))
-        broken += 1
-    else if check_only is
-        ui::warn(manifest + " uses the old syntax — run `bit migrate`")
-        pending += 1
-    else is
-        util::run("cp -f " + util::sq(manifest) + " " + util::sq(manifest + ".bak"))
-        file_write(manifest, fixed)
-        ui::ok(manifest + "  " + ui::dim("migrated (backup: " + manifest + ".bak)"))
-    end
-
-    ;; lock files: the project's Bit.lock and the global bit.lock
-    let locks: [string] = if root != "" then [root + "/Bit.lock", lock::global_lock_path()] else [lock::global_lock_path()]
-    let mut i: int = 0
-    while i < array_len(locks) is
-        let lp: string = locks[i]
-        if file_exists(lp) is
-            if lock::is_old_format(file_read(lp)) is
-                if check_only is
-                    ui::warn(lp + " is in the old lock format — run `bit migrate`")
-                    pending += 1
-                else is
-                    lock::lock_read(lp)      ;; converts and rewrites (keeps <lock>.old)
-                    ui::ok(lp + "  " + ui::dim("converted to the current format"))
-                end
-            else is
-                ui::ok(lp + "  " + ui::dim("current format"))
-            end
-        end
-        i += 1
-    end
-    ui::blank()
-    if broken > 0 is return 2 end
-    if check_only && pending > 0 is return 1 end
     return 0
 end
 
@@ -599,6 +682,15 @@ pub fn cmd_doctor() -> int is
     end
 
     ui::blank()
+    let ext: [string] = external::supported()
+    let mut e: int = 0
+    while e < array_len(ext) is
+        tool_line(external::label(ext[e]), array_len(external::missing_tools(ext[e])) == 0, external::install_hint(ext[e]))
+        e += 1
+    end
+    ui::note("(Rust, C, C++, Zig, Go, Odin, Crystal, Python are only needed for `mode => special` workspaces and lang => hackerscript)")
+
+    ui::blank()
     ui::line(ui::dim("index     " + index::index_url()))
     ui::line(ui::dim("libraries " + util::libs_dir()))
     ui::line(ui::dim("state     " + util::bit_dir()))
@@ -611,6 +703,90 @@ pub fn cmd_doctor() -> int is
     end
     ui::fail("found problems above")
     return 1
+end
+
+
+;; ── tools / workspace / features / system / settings ─────────────────────────
+
+pub fn cmd_fmt(file: string, check: bool, verbose: bool) -> int is
+    let p: project::Project = need_project()
+    if !project::is_loaded(p) is return no_project_error() end
+    ui::blank()
+    let rc: int = devtools::cmd_fmt(p, file, check, verbose)
+    ui::blank()
+    return rc
+end
+
+pub fn cmd_lint(file: string, verbose: bool) -> int is
+    let p: project::Project = need_project()
+    if !project::is_loaded(p) is return no_project_error() end
+    ui::blank()
+    let rc: int = devtools::cmd_lint(p, file, verbose)
+    ui::blank()
+    return rc
+end
+
+pub fn cmd_lsp(which: string) -> int is
+    return devtools::cmd_lsp(which)
+end
+
+pub fn cmd_repair(code: string) -> int is
+    return devtools::cmd_repair(code)
+end
+
+pub fn cmd_doc(out: string) -> int is
+    let p: project::Project = need_project()
+    if !project::is_loaded(p) is return no_project_error() end
+    ui::blank()
+    let rc: int = devtools::cmd_doc(p, out)
+    ui::blank()
+    return rc
+end
+
+pub fn cmd_python(action: string, pkg: string, ver: string) -> int is
+    let p: project::Project = need_project()
+    if !project::is_loaded(p) is return no_project_error() end
+    return pyenv::cmd_python(p, action, pkg, ver)
+end
+
+pub fn cmd_settings(action: string, key: string, value: string) -> int is
+    return settings::cmd_settings(action, key, value)
+end
+
+pub fn cmd_features() -> int is
+    let p: project::Project = need_project()
+    if !project::is_loaded(p) is return no_project_error() end
+    return features::cmd_features(p)
+end
+
+pub fn cmd_system(action: string) -> int is
+    let p: project::Project = need_project()
+    if !project::is_loaded(p) is return no_project_error() end
+    if workspace::is_workspace(p) is
+        let ms: [workspace::Member] = workspace::list(p)
+        let mut rc: int = 0
+        let mut i: int = 0
+        while i < array_len(ms) is
+            if ms[i].mb_kind == "bit" is
+                ui::line(ui::cyan("▸") + " " + ui::bold(ms[i].mb_name))
+                if sysdeps::cmd_system(project::load(ms[i].mb_dir), action) != 0 is rc = 1 end
+            end
+            i += 1
+        end
+        return rc
+    end
+    return sysdeps::cmd_system(p, action)
+end
+
+pub fn cmd_ws(action: string, arg: string, release: bool, verbose: bool, use_lock: bool) -> int is
+    let p: project::Project = project::load_here()
+    if !project::is_loaded(p) is return no_project_error() end
+    let o: build::BuildOpts = driver::effective_opts(p, release, false, verbose, "", "", "", "")
+    return workspace::cmd_ws(p, action, arg, o, use_lock, release)
+end
+
+pub fn cmd_new_ws(name: string, special: bool) -> int is
+    return scaffold::new_workspace(name, special)
 end
 
 ;; ── publish ──────────────────────────────────────────────────────────────────
