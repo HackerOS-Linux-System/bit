@@ -271,6 +271,122 @@ pub fn entry_for(p: Project, lang: string, kind: string) -> string is
     return first_existing(p.pj_root, ["main.hl", "src/main.hl", "source-code/main.hl"])
 end
 
+;; ── [edition] (H# only) ──────────────────────────────────────────────────────
+;;
+;;   [package]
+;;   -> lang => h#
+;;   [edition]
+;;   -> edition   => 2026     default H# edition for files without `using "<year>"`
+;;   -> toolchain => 0.9      the H# this project needs: `h# --version` must report 0.9 or NEWER
+;;
+;; The section belongs to H# alone: it is read only when `lang` names H# (explicitly — `h#`,
+;; `hsharp`, `H-Sharp`, or a list containing one of them). For `hl` / `hs` (HackerScript) or a
+;; Bit.hk without `lang` it is ignored, and `bit check` / `bit build` say so. Both keys are optional.
+;;
+;;   edition    precedence for a file without `using`:  h# --edition flag  >  HSHARP_EDITION
+;;              >  [edition]  >  newest edition. A file's own `using "<year>"` always wins, and a
+;;              dependency keeps its own [edition].
+;;   toolchain  a minimum, not a pin: a newer H# is fine, an older one is an error (see
+;;              `build::check_toolchain`, which asks the compiler itself via `h# --version`).
+
+;; The raw `[edition] -> edition` value ("" = not set). Quotes are stripped; `edition => 2026` and
+;; `edition => "2026"` are the same.
+pub fn edition_raw(p: Project) -> string is
+    return string_trim(get(p, "edition", "edition", ""))
+end
+
+;; The raw `[edition] -> toolchain` value ("" = not set), e.g. "1.1".
+pub fn toolchain_raw(p: Project) -> string is
+    return string_trim(get(p, "edition", "toolchain", ""))
+end
+
+;; Is `lang` explicitly H# (alone or in a list)?
+pub fn declares_hsharp(p: Project) -> bool is
+    let declared: string = get(p, "package", "lang", get(p, "build", "lang", ""))
+    if declared == "" || string_lower(declared) == "auto" is return false end
+    return util::array_has(index::parse_langs(declared), "hsharp")
+end
+
+;; Does the manifest have an [edition] section at all?
+pub fn has_edition_section(p: Project) -> bool is
+    return has_section(p, "edition")
+end
+
+;; A year like 2026: exactly four digits. (Which years exist is the compiler's call — `h#` rejects
+;; an unknown or too-new edition with the list of supported ones; bit only guards the shape.)
+pub fn edition_well_formed(v: string) -> bool is
+    if string_len(v) != 4 is return false end
+    let mut i: int = 0
+    while i < 4 is
+        let c: string = string_slice(v, i, i + 1)
+        if !(c == "0" || c == "1" || c == "2" || c == "3" || c == "4" || c == "5" || c == "6" || c == "7" || c == "8" || c == "9") is return false end
+        i += 1
+    end
+    return true
+end
+
+;; The edition to hand to `h#` (`--edition`): "" unless the project is H# *and* sets a well-formed
+;; [edition]. This is the single place that decides whether the section applies.
+pub fn hsharp_edition(p: Project) -> string is
+    if !declares_hsharp(p) is return "" end
+    let v: string = edition_raw(p)
+    if !edition_well_formed(v) is return "" end
+    return v
+end
+
+;; The minimum H# version (packed, see semver::parse) this project asks for; -1 when the project
+;; is not H#, has no `toolchain`, or the value is not a plain version (`1.1`, `v1.1.2`).
+pub fn hsharp_toolchain(p: Project) -> int is
+    if !declares_hsharp(p) is return -1 end
+    let v: string = toolchain_raw(p)
+    if v == "" is return -1 end
+    return semver::parse(v)
+end
+
+;; Problems with the [edition] section, one message each (empty = fine). Errors only — see
+;; `edition_warnings` for "ignored" notices.
+pub fn edition_errors(p: Project) -> [string] is
+    let mut out: [string] = []
+    if !has_edition_section(p) || !declares_hsharp(p) is return out end
+    let v: string = edition_raw(p)
+    let t: string = toolchain_raw(p)
+    if v == "" && t == "" is
+        out = array_push(out, "[edition] is empty — set `-> edition => 2026` and/or `-> toolchain => 0.9`")
+    end
+    if v != "" && !edition_well_formed(v) is
+        out = array_push(out, "[edition] -> edition => " + v + " is not a year (expected four digits, e.g. 2026)")
+    end
+    if t != "" && semver::parse(t) < 0 is
+        out = array_push(out, "[edition] -> toolchain => " + t + " is not a version (expected e.g. 0.9 or 1.1.2 — it is a minimum: newer H# is accepted)")
+    end
+    return out
+end
+
+;; Notices for an [edition] section that bit will not use.
+pub fn edition_warnings(p: Project) -> [string] is
+    let mut out: [string] = []
+    if !has_edition_section(p) || declares_hsharp(p) is return out end
+    out = array_push(out, "[edition] (edition, toolchain) is only used when `lang => h#` — ignored here (set `-> lang => h#` in [package], or remove the section)")
+    return out
+end
+
+;; Prints the warnings, then the errors; returns the number of errors.
+pub fn edition_report(p: Project) -> int is
+    let w: [string] = edition_warnings(p)
+    let mut i: int = 0
+    while i < array_len(w) is
+        ui::warn("Bit.hk: " + w[i])
+        i += 1
+    end
+    let e: [string] = edition_errors(p)
+    i = 0
+    while i < array_len(e) is
+        ui::fail("Bit.hk: " + e[i])
+        i += 1
+    end
+    return array_len(e)
+end
+
 ;; ── [build] / [lib] / [default-build] ────────────────────────────────────────
 
 ;; Static linking is not optional in bit. `link => dynamic` is rejected by build.
