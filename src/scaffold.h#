@@ -15,6 +15,12 @@ fn manifest(name: string, lang: string, is_lib: bool) -> string is
         "-> license     => MIT\n" +
         "! lang: h# | hl | hs | HackerScript   (several: h#, HackerScript)\n" +
         "-> lang        => " + lang_key + "\n\n"
+    if lang == "hsharp" is
+        m = m + "! default edition for files without `using \"<year>\"` (read only because lang => h#)\n" +
+            "[edition]\n" +
+            "-> edition => 2026\n" +
+            "! -> toolchain => 0.9      minimum H# version (`h# --version`); newer is fine, older is an error\n\n"
+    end
     if lang == "hackerlang" is
         m = m + "[layout]\n" +
             "! Hacker Lang must be told where its code is\n" +
