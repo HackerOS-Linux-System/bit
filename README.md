@@ -30,6 +30,10 @@ A bare `bit` reads `Bit.hk` → installs missing dependencies → builds with `[
 -> mem-mode => ...                ;; passed to h#
 -> flags    => ...                ;; extra flags for the compiler
 
+[edition]                         ;; H# ONLY — read when `lang => h#`, ignored (with a warning) for hl / hs
+-> edition   => 2026              ;; default edition for files without `using "<year>"` (passed as `h# --edition`)
+-> toolchain => 0.9               ;; minimum H#: `h# --version` must report 0.9 or newer (older = error)
+
 [lib]
 -> output => hlib                 ;; hlib (default) | so | a | obj
 
@@ -177,3 +181,29 @@ bit is written in H# and built on three libraries, none of which is re-implement
 bash scripts/bootstrap-ci.sh
 h# compile src/main.h# -o cache/build/release/bit --release
 ```
+
+## H# editions and toolchain (`[edition]`)
+
+For `lang => h#` projects the optional `[edition]` section pins two things:
+
+```
+[package]
+-> lang => h#
+
+[edition]
+-> edition   => 2026     ;; default edition for source files that don't say `using "2026"`
+-> toolchain => 0.9      ;; minimum H# version
+```
+
+- **`edition`** is handed to `h#` as `--edition <year>` for `bit build`, `check` and `test`
+  (and to `h# lib build`, which records it in the `.hlib` manifest). A file's own `using "<year>"`
+  still wins for that file; a dependency keeps *its own* `[edition]`. Without the key, `h#` uses the
+  newest edition it knows. A malformed value (`2O26`, `26`) is reported by bit, naming `Bit.hk`;
+  an edition the compiler doesn't know is reported by `h#` with the list of supported ones.
+- **`toolchain`** is a *minimum*, not a pin. Before building, checking or testing, bit runs
+  `h# --version` (honouring `BIT_HSHARP`) and compares: the same version or a **newer** one is fine,
+  an **older** one stops the build with
+  `this project needs H# 1.1 or newer (toolchain => 1.1), but `h# --version` reports 0.9.0`.
+  Values are plain versions (`1.1`, `v1.1.2`) — ranges are not accepted here.
+- Both keys apply **only to H#**. With `lang => hl` / `hs` (or no `lang`), the section is ignored and
+  `bit check` / `bit build` say so. `bit new` writes `[edition] -> edition => 2026` for H# projects.
