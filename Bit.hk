@@ -1,10 +1,13 @@
 [package]
 -> name        => bit
--> version     => 0.0.1
--> description => Package manager for H#, Hacker Lang and HackerScript
+-> version     => 0.1.0
+-> description => Package manager for HackerOS programing languages.
 -> authors     => ["HackerOS Team <hackeros068@gmail.com>"]
 -> license     => Apache-2.0
 -> lang        => h#
+
+[edition]
+-> edition => 2026
 
 [layout]
 -> src => src
