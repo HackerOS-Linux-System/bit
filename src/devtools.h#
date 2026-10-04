@@ -120,7 +120,7 @@ pub fn cmd_lint(p: project::Project, only: string, verbose: bool) -> int is
         ui::fail("nothing to lint — no sources found")
         return 1
     end
-    let mut errors: int = 0
+    let mut errors: int = project::edition_report(p)
     let mut warnings: int = 0
     let mut i: int = 0
     while i < array_len(langs) is
@@ -131,12 +131,14 @@ pub fn cmd_lint(p: project::Project, only: string, verbose: bool) -> int is
             ui::bad(project::lang_label(lang) + "  toolchain not found")
             ui::note(build::missing_tool_hint(lang))
             errors += 1
+        else if lang == "hsharp" && build::check_toolchain(p) != 0 is
+            errors += 1
         else is
             let tool: string = build::tool_for(lang)
             let files: [string] = files_of(p, lang, only)
             let mut cmd: string = ""
             if lang == "hsharp" is
-                cmd = tool + " check" + quoted(files) + " 2>&1"
+                cmd = tool + " check" + quoted(files) + build::edition_flag(p) + " 2>&1"
             else is
                 let e: string = if only != "" then only else if project::entry_for(p, lang, "bin") != "" then project::entry_for(p, lang, "bin") else project::entry_for(p, lang, "lib")
                 cmd = tool + " lint " + util::sq(e) + " 2>&1"
@@ -352,7 +354,7 @@ fn run_file_tests(p: project::Project, rel: string, filter: string, verbose: boo
     let out_bin: string = project::cache_build(p) + "/test/" + string_replace(rel, "/", "_")
     util::mkdir_p(util::dirname(out_bin))
     file_write(harness, harness_text(content, picked))
-    let rc: int = util::run(build::in_root(p, build::tool_for("hsharp") + " compile " + util::sq(harness) + " -o " + util::sq(out_bin) +
+    let rc: int = util::run(build::in_root(p, build::tool_for("hsharp") + " compile " + util::sq(harness) + " -o " + util::sq(out_bin) + build::edition_flag(p) +
                                               (if verbose then "" else " >/dev/null 2>&1")))
     util::run("rm -f " + util::sq(harness))
     if rc != 0 is
@@ -380,6 +382,7 @@ fn run_file_tests(p: project::Project, rel: string, filter: string, verbose: boo
 end
 
 pub fn cmd_test(p: project::Project, filter: string, verbose: bool, release: bool) -> int is
+    if build::check_toolchain(p) != 0 is return 1 end
     ui::blank()
     ui::heading("bit test")
     if !build::have_toolchain("hsharp") is
