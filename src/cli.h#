@@ -812,6 +812,12 @@ pub fn cmd_publish() -> int is
     end
     if !has_lib is problems = array_push(problems, "no library entry point (src/lib.h#, lib/mod.hcs or [layout] lib-entry)") end
     if project::link_mode(p) != "static" is problems = array_push(problems, "[build] link must be static") end
+    let ed_errs: [string] = project::edition_errors(p)
+    let mut ei: int = 0
+    while ei < array_len(ed_errs) is
+        problems = array_push(problems, ed_errs[ei])
+        ei += 1
+    end
     let bad: string = build::static_offenders(p)
     if bad != "" is problems = array_push(problems, "uses `extern dynamic`") end
     let origin: string = util::capture("git -C " + util::sq(project::root_of(p)) + " remote get-url origin 2>/dev/null")
