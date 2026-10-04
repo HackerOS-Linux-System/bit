@@ -46,6 +46,36 @@ pub fn show(v: int) -> string is
     return to_string(v / 1000000000) + "." + to_string((v / 1000000) % 1000) + "." + to_string(v % 1000000)
 end
 
+;; The version printed by a tool's `--version` banner (`h# 0.9.0`, `h# v0.9.0 (abc123)`,
+;; `H# 0.9.0-rc1`): the first token that looks like `N.N[.N]`, with a `v` prefix and any
+;; `-pre` / `+build` suffix dropped. -1 when the text has no version.
+pub fn from_banner(text: string) -> int is
+    let flat: string = string_replace(string_replace(string_replace(string_replace(text, "\n", " "), "\r", " "), "(", " "), ")", " ")
+    let parts: [string] = string_split(flat, " ")
+    let mut i: int = 0
+    while i < array_len(parts) is
+        let mut t: string = string_trim(parts[i])
+        if string_starts_with(t, "v") || string_starts_with(t, "V") is t = string_slice(t, 1, string_len(t)) end
+        let mut cut: int = string_len(t)
+        let dash: int = string_find(t, "-")
+        if dash >= 0 && dash < cut is cut = dash end
+        let plus: int = string_find(t, "+")
+        if plus >= 0 && plus < cut is cut = plus end
+        t = string_slice(t, 0, cut)
+        if string_contains(t, ".") is
+            let v: int = parse(t)
+            if v >= 0 is return v end
+        end
+        i += 1
+    end
+    return -1
+end
+
+;; Newer or equal is fine; older is not. (`have`/`wanted` are packed versions, see `parse`.)
+pub fn at_least(have: int, wanted: int) -> bool is
+    return have >= wanted
+end
+
 ;; Does a dependency value look like a range (as opposed to a git ref / url / "git ...")?
 pub fn is_range(s: string) -> bool is
     let t: string = string_trim(s)
