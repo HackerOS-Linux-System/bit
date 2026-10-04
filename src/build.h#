@@ -7,6 +7,7 @@ mod task
 mod native
 mod sysdeps
 mod net
+mod semver
 
 pub struct BuildOpts is
     pub bo_release:  bool
@@ -227,6 +228,43 @@ fn flags_of(p: project::Project) -> string is
     return " " + f
 end
 
+;; ` --edition <year>` for `h#` when [edition] applies (H# projects only), else "". Without it
+;; h# falls back to HSHARP_EDITION, then Bit.hk itself, then the newest edition.
+pub fn edition_flag(p: project::Project) -> string is
+    let e: string = project::hsharp_edition(p)
+    if e == "" is return "" end
+    return " --edition " + e
+end
+
+;; `[edition] -> toolchain => 1.1` (H# projects only): asks the installed compiler for its version
+;; (`h# --version`) and requires it to be that version or NEWER. Older is an error, newer is fine.
+;; 0 = ok (or nothing to check), 1 = too old / unreadable / no H#. Honours BIT_HSHARP like every
+;; other H# call.
+pub fn check_toolchain(p: project::Project) -> int is
+    let wanted: int = project::hsharp_toolchain(p)
+    if wanted < 0 is return 0 end
+    let tool: string = tool_for("hsharp")
+    if tool == "" is
+        ui::fail("Bit.hk: [edition] toolchain => " + project::toolchain_raw(p) + " but no H# compiler was found")
+        ui::note(missing_tool_hint("hsharp"))
+        return 1
+    end
+    let banner: string = util::capture(util::sq(tool) + " --version 2>&1 | head -1")
+    let have: int = semver::from_banner(banner)
+    if have < 0 is
+        ui::fail("Bit.hk: [edition] toolchain => " + project::toolchain_raw(p) + " but `" + tool + " --version` printed no version" +
+                 (if string_trim(banner) != "" then ": " + string_trim(banner) else ""))
+        return 1
+    end
+    if !semver::at_least(have, wanted) is
+        ui::fail("Bit.hk: this project needs H# " + semver::show(wanted) + " or newer (toolchain => " + project::toolchain_raw(p) +
+                 "), but `h# --version` reports " + semver::show(have))
+        ui::note("upgrade H#:  hacker unpack h#    — or lower `toolchain` in the [edition] section of Bit.hk")
+        return 1
+    end
+    return 0
+end
+
 fn build_hsharp_bin(p: project::Project, o: BuildOpts, entry: string, out: string) -> int is
     let tool: string = tool_for("hsharp")
     let plat: string = build_platform(p, o)
@@ -235,6 +273,7 @@ fn build_hsharp_bin(p: project::Project, o: BuildOpts, entry: string, out: strin
         (if o.bo_release then " --release" else "") +
         (if plat != "" then " --target " + plat else "") +
         (if mem != "" then " --mem-mode " + mem else "") +
+        edition_flag(p) +
         (if o.bo_verbose then " --verbose" else "") + flags_of(p)
     ;; NOTE: `--dynamic` is never passed — h# links statically by default.
     return run_step(p, "H#  " + util::basename(out), cmd, o.bo_verbose)
@@ -249,6 +288,7 @@ fn build_hsharp_lib(p: project::Project, o: BuildOpts, entry: string, dir: strin
             " --lib-version " + util::sq(project::version_of(p)) +
             (if plat != "" then " --target " + plat else "") +
             (if o.bo_release then " --release" else "") +
+            edition_flag(p) +
             (if o.bo_sign != "" then " --sign " + util::sq(o.bo_sign) else "")
         return run_step(p, "H#  " + name + ".hlib", cmd, o.bo_verbose)
     end
@@ -258,7 +298,7 @@ fn build_hsharp_lib(p: project::Project, o: BuildOpts, entry: string, dir: strin
                        else name + ".o"
     let cmd: string = tool + " compile " + util::sq(entry) + " --emit " + emit + " -o " + util::sq(dir + "/" + file) +
         (if o.bo_release then " --release" else "") +
-        (if plat != "" then " --target " + plat else "") + flags_of(p)
+        (if plat != "" then " --target " + plat else "") + edition_flag(p) + flags_of(p)
     return run_step(p, "H#  " + file, cmd, o.bo_verbose)
 end
 
@@ -798,7 +838,12 @@ pub fn build_project(p: project::Project, o: BuildOpts) -> int is
         return 1
     end
 
+    ;; [edition] (H# only): a malformed value stops the build here, with Bit.hk named, instead of
+    ;; surfacing later as a compiler error; for hl/hs projects the section is just reported as ignored.
+    if project::edition_report(p) > 0 is return 1 end
+
     let langs: [string] = target_langs(p, o)
+    if util::array_has(langs, "hsharp") && check_toolchain(p) != 0 is return 1 end
     if util::array_has(langs, "hackerscript") && ensure_using(p) != 0 is return 1 end
     if array_len(langs) == 0 is
         ui::fail("nothing to build: no " + project::src_dir(p) + "/ (H#), " + project::cmd_dir(p) + "/ or " +
