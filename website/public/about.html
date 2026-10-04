@@ -66,6 +66,7 @@ bit                           # does everything Bit.hk describes</pre></div>
       <tr><th>Section</th><th>Purpose</th></tr>
       <tr><td><code>[package]</code></td><td>name, version, description, authors, license, <code>lang</code></td></tr>
       <tr><td><code>[layout]</code></td><td>where the code is. Auto-detected: <code>src/</code> = H#, <code>cmd/</code> + <code>lib/</code> = HackerScript. Hacker Lang needs <code>hl-entry</code>.</td></tr>
+      <tr><td><code>[edition]</code></td><td>H# only (<code>lang =&gt; h#</code>): <code>edition</code> (default edition for files without <code>using</code>), <code>toolchain</code> (minimum <code>h# --version</code>; newer is fine, older is an error)</td></tr>
       <tr><td><code>[build]</code></td><td><code>target</code> (h# / hl / hs), <code>platform</code>, <code>link</code> (static), <code>mem-mode</code>, <code>flags</code></td></tr>
       <tr><td><code>[lib]</code></td><td>library output: hlib (default), so, a, obj</td></tr>
       <tr><td><code>[default-build]</code></td><td><code>profile</code>, <code>target</code>, <code>platform</code>, <code>emit</code>, <code>run</code>, <code>args</code>, <code>before</code>, <code>after</code></td></tr>
