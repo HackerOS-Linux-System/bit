@@ -83,6 +83,7 @@ fn dep_dir(p: project::Project, d: project::Dep) -> string is
         return project::cache_libs(p) + "/" + kind + "/" + project::dep_name(d)
     end
     if project::is_builtin_kind(kind) is return "" end
+    if util::libs_flat() is return util::libs_dir() + "/" + project::dep_name(d) end
     return util::libs_dir() + "/" + project::dep_name(d) + "/current"
 end
 
