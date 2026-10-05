@@ -215,6 +215,12 @@ pub fn libs_dir() -> string is
     return home() + "/.hackeros/libs"
 end
 
+;; `[directories] file => project` keeps every library inside the project: <root>/cache/libs/<name>/
+;; holds the sources directly (no <commit>/ level, no `current` link, nothing outside the project).
+pub fn libs_flat() -> bool is
+    return env_get("BIT_LIBS_FLAT") == "1"
+end
+
 pub fn bit_dir() -> string is
     let o: string = env_get("BIT_DIR")
     if o != "" is return o end
