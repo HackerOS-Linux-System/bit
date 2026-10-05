@@ -15,10 +15,16 @@ mod registry
 pub fn lib_root(name: string) -> string is return util::libs_dir() + "/" + name end
 
 pub fn lib_dir(name: string, commit: string) -> string is
+    if util::libs_flat() is return util::libs_dir() + "/" + name end
     return util::libs_dir() + "/" + name + "/" + commit
 end
 
-pub fn current_dir(name: string) -> string is return lib_root(name) + "/current" end
+;; Where the version bit resolves for `name` lives: `<libs>/<name>/current` (a link to <commit>/),
+;; or — with `[directories] file => project` — the library's own directory.
+pub fn current_dir(name: string) -> string is
+    if util::libs_flat() is return lib_root(name) end
+    return lib_root(name) + "/current"
+end
 
 pub fn is_installed(name: string) -> bool is
     let l: lock::Lock = lock::lock_read(lock::global_lock_path())
@@ -83,7 +89,7 @@ fn lib_manifest(dir: string) -> hk::Hk is
     let mut i: int = 0
     while i < array_len(candidates) is
         if file_exists(dir + "/" + candidates[i]) is
-            return hk::hk_parse(file_read(dir + "/" + candidates[i]))
+            return hk::hk_parse_at(dir + "/" + candidates[i], file_read(dir + "/" + candidates[i]))
         end
         i += 1
     end
@@ -302,7 +308,9 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
     end
 
     ;; current symlink, before the build so tools can already see the sources
-    util::run("ln -sfn " + util::sq(version) + " " + util::sq(current_dir(name)))
+    if !util::libs_flat() is
+        util::run("ln -sfn " + util::sq(version) + " " + util::sq(current_dir(name)))
+    end
 
     ;; 6. build
     let mut artifact: string = ""
@@ -495,6 +503,8 @@ end
 
 ;; Deletes installed commits that are not the locked one, and stale temp clones.
 pub fn clean_old() -> int is
+    ;; project-local libraries keep one version in <cache>/libs/<name>/ — nothing old to remove
+    if util::libs_flat() is return 0 end
     let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
     let mut removed: int = 0
     let mut i: int = 0
