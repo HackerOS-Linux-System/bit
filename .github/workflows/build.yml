@@ -34,7 +34,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable   # hk-parser's native part
 
       # H# comes from the official install scripts of the H-Sharp repository
-      # (install-utils.sh + install.sh); hk-parser and progress-bar from bit.io.
+      # (install-utils.sh + install.sh); hk-parser, progress-bar and nidus from bit.io.
       - name: Install H# and bit's libraries
         run: bash scripts/bootstrap-ci.sh
 
