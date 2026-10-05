@@ -310,6 +310,15 @@
         "skia"
       ],
       "author": "Bit Developers"
+    },
+    {
+      "name": "colors",
+      "target": "https://github.com/bit-io/colors",
+      "description": "Colors library for bit.io. Written in H#.",
+      "tags": [
+        "colors"
+      ],
+      "author": "Bit Developers"
     }
   ]
 }
