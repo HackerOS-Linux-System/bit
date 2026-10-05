@@ -120,7 +120,7 @@ pub fn cmd_lint(p: project::Project, only: string, verbose: bool) -> int is
         ui::fail("nothing to lint — no sources found")
         return 1
     end
-    let mut errors: int = project::edition_report(p)
+    let mut errors: int = project::edition_report(p) + project::directories_report(p)
     let mut warnings: int = 0
     let mut i: int = 0
     while i < array_len(langs) is
