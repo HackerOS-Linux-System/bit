@@ -21,6 +21,7 @@
 [dependencies]
 -> progress-bar => newest
 -> hk-parser => newest
+-> nidus => newest
 
 [commands]
 -> check
