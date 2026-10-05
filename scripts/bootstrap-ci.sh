@@ -15,6 +15,7 @@
 #   HSHARP_RAW        base URL of the H-Sharp install scripts
 #   HK_PARSER_REPO    default https://github.com/bit-io/hk-parser
 #   PROGRESS_BAR_REPO default https://github.com/bit-io/progress-bar
+#   NIDUS_REPO        default https://github.com/bit-io/nidus
 #   HK_PARSER_REF / PROGRESS_BAR_REF   branch, tag or commit (default: the default branch)
 #   SKIP_HSHARP=1     skip step 1 (H# already installed)
 set -euo pipefail
@@ -22,6 +23,7 @@ set -euo pipefail
 HSHARP_RAW="${HSHARP_RAW:-https://raw.githubusercontent.com/HackerOS-Linux-System/H-Sharp/main/install-remove/Every-Linux}"
 HK_PARSER_REPO="${HK_PARSER_REPO:-https://github.com/bit-io/hk-parser}"
 PROGRESS_BAR_REPO="${PROGRESS_BAR_REPO:-https://github.com/bit-io/progress-bar}"
+NIDUS_REPO="${NIDUS_REPO:-https://github.com/bit-io/nidus}"
 PKG_CACHE="$HOME/.hackeros/H#/build/cache/packages"
 
 say() { printf '\n==> %s\n' "$*"; }
@@ -61,9 +63,10 @@ fetch() { # name url ref
   echo "$name @ $(git -C "$dest" rev-parse --short HEAD)"
 }
 
-say "fetching hk-parser and progress-bar"
+say "fetching hk-parser, progress-bar and nidus"
 fetch hk-parser    "$HK_PARSER_REPO"    "${HK_PARSER_REF:-}"
 fetch progress-bar "$PROGRESS_BAR_REPO" "${PROGRESS_BAR_REF:-}"
+fetch nidus        "$NIDUS_REPO"        "${NIDUS_REF:-}"
 
 # bit itself is compiled by `h#` (not by bit), so the native part of hk-parser has to
 # be built here once. Projects built *with* bit do not need this: bit runs the
