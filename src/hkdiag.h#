@@ -1,0 +1,547 @@
+use "bit -> nidus" from "nidus"
+mod semver
+
+;; ── Bit.hk diagnostics ───────────────────────────────────────────────────────
+;;
+;; hk-parser answers "valid / not valid" and one error string. That is not enough for a manifest
+;; people edit by hand: a stray symbol, a misspelled section or an option bit has never heard of
+;; used to be swallowed silently. This module reads Bit.hk itself, line by line, and reports what
+;; it finds the way `cargo` reports a bad Cargo.toml — the offending text underlined, an error
+;; code, a "did you mean" and a fix — rendered by the nidus library (bit.io).
+;;
+;;   error    syntax that cannot be read, or a value that is not allowed here
+;;   warning  an unknown section / option (it is ignored), a duplicate, the old syntax
+;;
+;; `lint` is pure (text in, findings out) and does not touch nidus; `report` renders.
+
+pub struct Finding is
+    pub f_sev:   int       ;; 0 error · 1 warning · 2 advice
+    pub f_code:  string    ;; stable id, e.g. bit::hk::unknown_option
+    pub f_msg:   string
+    pub f_off:   int       ;; byte offset of the underlined text in the manifest
+    pub f_len:   int
+    pub f_label: string    ;; text under the underline
+    pub f_help:  string
+end
+
+fn finding(sev: int, code: string, msg: string, off: int, len: int, label: string, help: string) -> Finding is
+    let mut l: int = len
+    if l < 1 is l = 1 end
+    return Finding { f_sev: sev, f_code: code, f_msg: msg, f_off: off, f_len: l, f_label: label, f_help: help }
+end
+
+;; ── What Bit.hk may contain ──────────────────────────────────────────────────
+
+fn sections_all() -> [string] is
+    return ["package", "project", "layout", "build", "default-build", "lib", "edition", "directories",
+            "workspace", "hooks", "native-sources", "dependencies", "dev-dependencies",
+            "build-dependencies", "system-dependencies", "commands", "features"]
+end
+
+;; Sections whose keys are chosen by the user (dependency names, command names, feature names).
+fn section_is_free(s: string) -> bool is
+    return s == "dependencies" || s == "dev-dependencies" || s == "build-dependencies" ||
+           s == "system-dependencies" || s == "commands" || s == "features"
+end
+
+;; Keys bit reads in a fixed section ([] for free / unknown sections).
+fn section_keys(s: string) -> [string] is
+    if s == "package" || s == "project" is
+        return ["name", "version", "description", "authors", "author", "license", "lang", "repository",
+                "homepage", "documentation", "readme", "keywords", "categories", "publish"]
+    end
+    if s == "layout" is
+        ;; plus every `<lang>-entry` / `<lang>-lib-entry` (hsharp-entry, hl-lib-entry, …) — see `layout_entry_key`
+        return ["src", "lib", "cmd", "entry", "lib-entry", "tests", "examples", "include"]
+    end
+    if s == "build" is
+        return ["link", "target", "lang", "mem-mode", "mem_mode", "native", "native-lib-path",
+                "native-skip-if", "platform", "flags", "lib-output"]
+    end
+    if s == "default-build" is
+        return ["profile", "emit", "target", "platform", "wasm", "jar", "library", "run", "args", "before", "after"]
+    end
+    if s == "lib" is return ["output"] end
+    if s == "edition" is return ["edition", "toolchain"] end
+    if s == "directories" is return ["file", "before-build"] end
+    if s == "workspace" is return ["members", "mode", "exclude"] end
+    if s == "hooks" is
+        return ["pre-build", "post-build", "pre-install", "post-install", "pre-test", "post-test", "pre-publish", "post-publish"]
+    end
+    if s == "native-sources" is return ["c", "cpp", "flags", "include"] end
+    return []
+end
+
+;; `-> hsharp-entry`, `-> hl-lib-entry`, `-> hackerscript-entry` … : the per-language entry files.
+fn layout_entry_key(k: string) -> bool is
+    return string_ends_with(k, "-entry")
+end
+
+;; `[Default build]`, `[default_build]` and `[default-build]` are the same section.
+fn norm_section(raw: string) -> string is
+    let t: string = string_lower(string_trim(raw))
+    return string_replace(string_replace(t, " ", "-"), "_", "-")
+end
+
+fn has_item(items: [string], needle: string) -> bool is
+    let mut i: int = 0
+    while i < array_len(items) is
+        if items[i] == needle is return true end
+        i += 1
+    end
+    return false
+end
+
+;; ── "did you mean" ───────────────────────────────────────────────────────────
+
+fn edit_distance(a: string, b: string) -> int is
+    let la: int = string_len(a)
+    let lb: int = string_len(b)
+    let mut prev: [int] = []
+    let mut j: int = 0
+    while j <= lb is
+        prev = array_push(prev, j)
+        j += 1
+    end
+    let mut i: int = 1
+    while i <= la is
+        let ca: string = string_slice(a, i - 1, i)
+        let mut cur: [int] = [i]
+        j = 1
+        while j <= lb is
+            let cost: int = if ca == string_slice(b, j - 1, j) then 0 else 1
+            let mut best: int = prev[j - 1] + cost
+            if prev[j] + 1 < best is best = prev[j] + 1 end
+            if cur[j - 1] + 1 < best is best = cur[j - 1] + 1 end
+            cur = array_push(cur, best)
+            j += 1
+        end
+        prev = cur
+        i += 1
+    end
+    return prev[lb]
+end
+
+;; The candidate closest to `name` (within a typo or two), or "".
+pub fn suggest(name: string, candidates: [string]) -> string is
+    let n: string = string_lower(name)
+    let limit: int = if string_len(n) <= 4 then 1 else 2
+    let mut best: string = ""
+    let mut best_d: int = 99
+    let mut i: int = 0
+    while i < array_len(candidates) is
+        let d: int = edit_distance(n, candidates[i])
+        if d < best_d is
+            best_d = d
+            best = candidates[i]
+        end
+        i += 1
+    end
+    if best_d <= limit is return best end
+    return ""
+end
+
+fn did_you_mean(name: string, candidates: [string], fallback: string) -> string is
+    let s: string = suggest(name, candidates)
+    if s != "" is return "did you mean `" + s + "`?" end
+    return fallback
+end
+
+fn join_words(items: [string]) -> string is
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < array_len(items) is
+        if i > 0 is out = out + ", " end
+        out = out + items[i]
+        i += 1
+    end
+    return out
+end
+
+;; ── Small scanners (quote-aware) ─────────────────────────────────────────────
+
+fn is_blank(c: string) -> bool is
+    return c == " " || c == "\t"
+end
+
+fn leading_blanks(s: string) -> int is
+    let mut i: int = 0
+    while i < string_len(s) && is_blank(string_slice(s, i, i + 1)) is i += 1 end
+    return i
+end
+
+;; Index of the `!` that starts a trailing comment: outside quotes, at the start or after a blank.
+fn find_comment(s: string) -> int is
+    let mut in_q: bool = false
+    let mut i: int = 0
+    while i < string_len(s) is
+        let c: string = string_slice(s, i, i + 1)
+        if c == "\\" && in_q is
+            i += 2
+        else is
+            if c == "\"" is in_q = !in_q end
+            if c == "!" && !in_q && (i == 0 || is_blank(string_slice(s, i - 1, i))) is return i end
+            i += 1
+        end
+    end
+    return -1
+end
+
+;; Index of the first `=>` outside quotes, or -1.
+fn find_arrow(s: string) -> int is
+    let mut in_q: bool = false
+    let mut i: int = 0
+    while i + 1 < string_len(s) is
+        let c: string = string_slice(s, i, i + 1)
+        if c == "\"" is in_q = !in_q end
+        if !in_q && c == "=" && string_slice(s, i + 1, i + 2) == ">" is return i end
+        i += 1
+    end
+    return -1
+end
+
+fn key_char_ok(c: string) -> bool is
+    if c >= "a" && c <= "z" is return true end
+    if c >= "A" && c <= "Z" is return true end
+    if c >= "0" && c <= "9" is return true end
+    return c == "_" || c == "-" || c == "." || c == ":" || c == "/" || c == "@" || c == "+" || c == "#"
+end
+
+;; Offset (inside `s`) of the first character a key may not contain, or -1.
+fn bad_key_char(s: string) -> int is
+    let mut i: int = 0
+    while i < string_len(s) is
+        if !key_char_ok(string_slice(s, i, i + 1)) is return i end
+        i += 1
+    end
+    return -1
+end
+
+fn unquote(v: string) -> string is
+    let t: string = string_trim(v)
+    if string_len(t) >= 2 && string_starts_with(t, "\"") && string_ends_with(t, "\"") is
+        return string_slice(t, 1, string_len(t) - 1)
+    end
+    return t
+end
+
+;; ── Values that only some options may take ───────────────────────────────────
+
+fn one_of(sec: string, key: string, raw: string, allowed: [string], off: int, len: int) -> [Finding] is
+    let v: string = string_lower(unquote(raw))
+    if has_item(allowed, v) is return [] end
+    let hint: string = did_you_mean(v, allowed, "allowed: " + join_words(allowed))
+    return [finding(0, "bit::hk::bad_value",
+            "`" + unquote(raw) + "` is not a valid value for `" + key + "` in [" + sec + "]",
+            off, len, "not one of: " + join_words(allowed), hint)]
+end
+
+fn check_value(sec: string, key: string, raw: string, off: int, len: int) -> [Finding] is
+    let v: string = unquote(raw)
+    if sec == "directories" && key == "file" is
+        return one_of(sec, key, raw, ["default", "home", "root", "project"], off, len)
+    end
+    if sec == "edition" && key == "edition" is
+        let mut ok: bool = string_len(v) == 4
+        let mut i: int = 0
+        while ok && i < 4 is
+            let c: string = string_slice(v, i, i + 1)
+            if c < "0" || c > "9" is ok = false end
+            i += 1
+        end
+        if !ok is
+            return [finding(0, "bit::hk::bad_edition", "`" + v + "` is not an H# edition",
+                    off, len, "expected a four-digit year", "write it as `-> edition => 2026`")]
+        end
+        return []
+    end
+    if sec == "edition" && key == "toolchain" is
+        if semver::parse(v) < 0 is
+            return [finding(0, "bit::hk::bad_toolchain", "`" + v + "` is not a version",
+                    off, len, "expected e.g. 0.9 or 1.1.2",
+                    "`toolchain` is a minimum: `h# --version` must report this version or a newer one")]
+        end
+        return []
+    end
+    if sec == "build" && key == "link" is
+        if string_lower(v) != "static" is
+            return [finding(0, "bit::hk::bad_value", "`" + v + "` is not a valid value for `link` in [build]",
+                    off, len, "bit builds statically linked programs only", "use `-> link => static`")]
+        end
+        return []
+    end
+    if sec == "build" && (key == "mem-mode" || key == "mem_mode") is
+        return one_of(sec, key, raw, ["default", "safety", "arc", "arena", "pointers"], off, len)
+    end
+    if sec == "default-build" && key == "profile" is
+        return one_of(sec, key, raw, ["debug", "release"], off, len)
+    end
+    if sec == "lib" && key == "output" is
+        return one_of(sec, key, raw, ["hlib", "so", "a", "obj", "rlib", "lib", "static", "archive", "shared",
+                                      "dylib", "object", "o", "rust", "rust-lib"], off, len)
+    end
+    return []
+end
+
+;; ── The linter ───────────────────────────────────────────────────────────────
+
+;; Reads the manifest text and returns everything wrong with it, in file order.
+pub fn lint(text: string) -> [Finding] is
+    let mut out: [Finding] = []
+    let lines: [string] = string_split(text, "\n")
+
+    let mut base: int = 0                       ;; byte offset of the current line
+    let mut sec: string = ""                    ;; normalised name of the current section ("" = none yet)
+    let mut sec_known: bool = false
+    let mut sections_seen: [string] = []
+    let mut keys_seen: [string] = []            ;; level-1 keys of the current section
+    let mut prev_level: int = 0                 ;; nesting level of the previous `->` line (0 = none)
+    let mut told_legacy: bool = false
+
+    let mut li: int = 0
+    while li < array_len(lines) is
+        let mut ln: string = lines[li]
+        let line_len: int = string_len(ln)
+        if string_ends_with(ln, "\r") is ln = string_slice(ln, 0, string_len(ln) - 1) end
+        let lead: int = leading_blanks(ln)
+        let t: string = string_slice(ln, lead, string_len(ln))
+        let at: int = base + lead              ;; offset of the first visible character
+
+        if t == "" || string_starts_with(t, "!") is
+            ;; blank / comment
+
+        else if string_starts_with(t, ";;") is
+            if !told_legacy is
+                told_legacy = true
+                out = array_push(out, finding(1, "bit::hk::legacy_comment", "`;;` comments are the old Bit.hk syntax",
+                        at, 2, "use `!` instead", "`bit migrate` rewrites an old-syntax Bit.hk (and `;;` still works until then)"))
+            end
+
+        else if string_starts_with(t, "[") is
+            ;; ── [section] ──
+            let close: int = string_find(t, "]")
+            if close < 0 is
+                out = array_push(out, finding(0, "bit::hk::unclosed_section", "section header is missing its closing `]`",
+                        at, string_len(t), "this `[` is never closed", "write it as `[" + string_trim(string_slice(t, 1, string_len(t))) + "]`"))
+                sec = ""
+                sec_known = false
+            else is
+                let raw_name: string = string_slice(t, 1, close)
+                let name: string = norm_section(raw_name)
+                let after: string = string_trim(string_slice(t, close + 1, string_len(t)))
+                if after != "" && !string_starts_with(after, "!") is
+                    out = array_push(out, finding(0, "bit::hk::trailing_text", "unexpected text after the section header",
+                            at + close + 1 + leading_blanks(string_slice(t, close + 1, string_len(t))), string_len(after),
+                            "nothing may follow `]` except a `!` comment", "put it on its own line, or start it with `!`"))
+                end
+                let bad: int = bad_key_char(string_replace(string_replace(raw_name, " ", ""), "_", ""))
+                if name == "" is
+                    out = array_push(out, finding(0, "bit::hk::empty_section", "empty section name",
+                            at, close + 1, "a section needs a name", "e.g. `[package]`"))
+                else if bad >= 0 is
+                    out = array_push(out, finding(0, "bit::hk::bad_section_name",
+                            "section name contains `" + string_slice(string_replace(string_replace(raw_name, " ", ""), "_", ""), bad, bad + 1) + "`",
+                            at + 1, close - 1, "letters, digits and `-` only", "e.g. `[default-build]`"))
+                else is
+                    let canon: string = if name == "project" then "package" else name
+                    sec = name
+                    sec_known = has_item(sections_all(), name)
+                    keys_seen = []
+                    prev_level = 0
+                    if has_item(sections_seen, canon) is
+                        out = array_push(out, finding(1, "bit::hk::duplicate_section", "section [" + name + "] is defined more than once",
+                                at, close + 1, "defined again here", "merge the two sections"))
+                    end
+                    sections_seen = array_push(sections_seen, canon)
+                    if !sec_known is
+                        out = array_push(out, finding(1, "bit::hk::unknown_section", "unknown section [" + name + "]",
+                                at, close + 1, "bit does not read this section",
+                                did_you_mean(name, sections_all(), "known sections: " + join_words(sections_all()))))
+                    end
+                end
+            end
+
+        else if string_starts_with(t, "-") is
+            ;; ── -> key => value   (one more dash per nesting level) ──
+            let mut dashes: int = 0
+            while string_slice(t, dashes, dashes + 1) == "-" is dashes += 1 end
+            if string_slice(t, dashes, dashes + 1) != ">" is
+                out = array_push(out, finding(0, "bit::hk::bad_option", "expected `->` at the start of an option",
+                        at, dashes + 1, "an option starts with `->` (`-->` for nested keys)", "write it as `-> key => value`"))
+            else is
+                let level: int = dashes
+                let body_start: int = dashes + 1
+                let body_all: string = string_slice(t, body_start, string_len(t))
+                let cpos: int = find_comment(body_all)
+                let body: string = if cpos >= 0 then string_slice(body_all, 0, cpos) else body_all
+                let arrow: int = find_arrow(body)
+                let key_raw: string = if arrow >= 0 then string_slice(body, 0, arrow) else body
+                let key: string = string_trim(key_raw)
+                let key_off: int = at + body_start + leading_blanks(key_raw)
+                let val_raw: string = if arrow >= 0 then string_slice(body, arrow + 2, string_len(body)) else ""
+                let val: string = string_trim(val_raw)
+                let val_off: int = at + body_start + arrow + 2 + leading_blanks(val_raw)
+
+                if sec == "" is
+                    out = array_push(out, finding(0, "bit::hk::outside_section", "option outside of any section",
+                            at, string_len(t), "no section header above this line", "start with a section, e.g. `[package]`"))
+                else if key == "" is
+                    out = array_push(out, finding(0, "bit::hk::missing_key", "option has no name",
+                            at, body_start, "expected `-> key => value`", "put the option name after `->`"))
+                else is
+                    let bad: int = bad_key_char(key)
+                    let single_eq: int = if arrow < 0 then string_find(key, "=") else -1
+                    if single_eq >= 0 is
+                        out = array_push(out, finding(0, "bit::hk::expected_arrow", "expected `=>` between the option name and its value",
+                                key_off + single_eq, 1, "`=` is not an assignment here",
+                                "write it as `-> " + string_trim(string_slice(key, 0, single_eq)) + " => " + string_trim(string_slice(key, single_eq + 1, string_len(key))) + "`"))
+                    else if bad >= 0 is
+                        let ch: string = string_slice(key, bad, bad + 1)
+                        let help: string = if ch == " " then "an option name has no spaces — separate the name from its value with `=>`"
+                                           else if ch == "=" then "use `=>` (not `=`) between the name and the value"
+                                           else "option names use letters, digits and `_ - . : / @ + #`"
+                        out = array_push(out, finding(0, "bit::hk::bad_key",
+                                "unexpected `" + (if ch == " " then "space" else ch) + "` in option name",
+                                key_off + bad, 1, "not allowed here", help))
+                    else is
+                        if level > prev_level + 1 || (prev_level == 0 && level > 1) is
+                            out = array_push(out, finding(0, "bit::hk::bad_nesting",
+                                    if prev_level == 0 then "nested option has no parent option above it"
+                                    else "nesting jumps from level " + to_string(prev_level) + " to " + to_string(level),
+                                    at, dashes + 1, "one level deeper than its parent", "a nested key sits directly under its parent: `->` then `-->` then `--->`"))
+                        end
+                        prev_level = level
+
+                        if level == 1 is
+                            if has_item(keys_seen, key) is
+                                out = array_push(out, finding(1, "bit::hk::duplicate_key", "`" + key + "` is set more than once in [" + sec + "]",
+                                        key_off, string_len(key), "set again here", "the last value wins — remove one"))
+                            end
+                            keys_seen = array_push(keys_seen, key)
+                            let canon: string = if sec == "project" then "package" else sec
+                            if sec_known && !section_is_free(canon) is
+                                let known: [string] = section_keys(canon)
+                                if !has_item(known, string_lower(key)) && !(canon == "layout" && layout_entry_key(string_lower(key))) is
+                                    out = array_push(out, finding(1, "bit::hk::unknown_option", "unknown option `" + key + "` in [" + sec + "]",
+                                            key_off, string_len(key), "bit does not read this option",
+                                            did_you_mean(string_lower(key), known, "known options: " + join_words(known))))
+                                end
+                            end
+                            if arrow >= 0 && val != "" is
+                                if string_starts_with(val, "\"") && (string_len(val) < 2 || !string_ends_with(val, "\"")) is
+                                    out = array_push(out, finding(0, "bit::hk::unterminated_string", "string is never closed",
+                                            val_off, string_len(val), "this `\"` has no closing partner", "add the closing `\"`"))
+                                else if string_starts_with(val, "[") && !string_ends_with(val, "]") is
+                                    out = array_push(out, finding(0, "bit::hk::unclosed_array", "array is missing its closing `]`",
+                                            val_off, string_len(val), "this `[` is never closed", "add the closing `]`"))
+                                else is
+                                    out = array_concat(out, check_value(canon, string_lower(key), val, val_off, string_len(val)))
+                                end
+                            end
+                            if arrow >= 0 && val == "" && sec == "directories" is
+                                out = array_push(out, finding(0, "bit::hk::missing_value", "`" + key + "` has no value",
+                                        key_off, string_len(key), "nothing after `=>`", "give it a value, e.g. `-> file => default`"))
+                            end
+                        end
+                    end
+                end
+            end
+
+        else is
+            ;; ── anything else ──
+            let eq: int = string_find(t, "=")
+            let head: string = if eq > 0 then string_trim(string_slice(t, 0, eq)) else ""
+            if eq > 0 && sec != "" && head != "" && bad_key_char(head) < 0 is
+                if !told_legacy is
+                    told_legacy = true
+                    out = array_push(out, finding(1, "bit::hk::legacy_syntax", "`key = value` is the old Bit.hk syntax",
+                            at, string_len(t), "old-style option", "write it as `-> " + head + " => …`, or run `bit migrate`"))
+                end
+            else is
+                let ch: string = string_slice(t, 0, 1)
+                out = array_push(out, finding(0, "bit::hk::unexpected_symbol", "unexpected `" + ch + "` in Bit.hk",
+                        at, 1, "not a section, an option or a comment",
+                        "a line is a `[section]`, an option `-> key => value`, or a comment starting with `!`"))
+            end
+        end
+
+        base += line_len + 1
+        li += 1
+    end
+    return out
+end
+
+pub fn count_errors(fs: [Finding]) -> int is
+    let mut n: int = 0
+    let mut i: int = 0
+    while i < array_len(fs) is
+        if fs[i].f_sev == 0 is n += 1 end
+        i += 1
+    end
+    return n
+end
+
+;; ── Rendering (nidus) ────────────────────────────────────────────────────────
+
+fn to_diagnostic(f: Finding, path: string, text: string) -> nidus::Diagnostic is
+    let mut d: nidus::Diagnostic = nidus::error(f.f_msg)
+    if f.f_sev == 1 is d = d.as_warning() end
+    if f.f_sev == 2 is d = d.as_advice() end
+    d = d.with_code(f.f_code)
+    d = d.with_source(path, text)
+    d = d.with_label(nidus::primary_label(f.f_off, f.f_len, f.f_label))
+    if f.f_help != "" is d = d.with_help(f.f_help) end
+    return d
+end
+
+fn plural(n: int, one: string, many: string) -> string is
+    if n == 1 is return "1 " + one end
+    return to_string(n) + " " + many
+end
+
+;; Prints every finding with nidus. Returns the number of errors.
+pub fn report(path: string, text: string) -> int is
+    let fs: [Finding] = lint(text)
+    if array_len(fs) == 0 is return 0 end
+    let cfg: nidus::Config = nidus::config_default()
+    let mut errors: int = 0
+    let mut warnings: int = 0
+    let mut i: int = 0
+    write("")
+    while i < array_len(fs) is
+        write(nidus::render(to_diagnostic(fs[i], path, text), cfg))
+        if fs[i].f_sev == 0 is errors += 1 else is warnings += 1 end
+        i += 1
+    end
+    let mut parts: [string] = []
+    if errors > 0 is parts = array_push(parts, plural(errors, "error", "errors")) end
+    if warnings > 0 is parts = array_push(parts, plural(warnings, "warning", "warnings")) end
+    write("  " + path + ": " + join_words(parts))
+    write("")
+    return errors
+end
+
+;; Like `report`, but a manifest that was already reported by this process is not reported again
+;; (commands load the project several times). The record lives in the environment.
+pub fn already_reported(path: string) -> bool is
+    return string_contains("\n" + env_get("BIT_HK_REPORTED"), "\n" + path + "\n")
+end
+
+pub fn report_once(path: string, text: string) -> int is
+    let seen: string = env_get("BIT_HK_REPORTED")
+    if string_contains("\n" + seen, "\n" + path + "\n") is return 0 end
+    env_set("BIT_HK_REPORTED", seen + path + "\n")
+    return report(path, text)
+end
+
+;; A manifest that hk-parser rejected although no rule above explains why: show hk-parser's own
+;; message in the same style, pointing at the file as a whole.
+pub fn report_parser_error(path: string, text: string, message: string) is
+    let mut d: nidus::Diagnostic = nidus::error("cannot parse the manifest")
+    d = d.with_code("bit::hk::parse")
+    d = d.with_source(path, text)
+    d = d.with_label(nidus::primary_label(0, 1, message))
+    d = d.with_help("check the syntax against the Bit.hk grammar in bit's README")
+    write("")
+    write(nidus::render(d, nidus::config_default()))
+end
