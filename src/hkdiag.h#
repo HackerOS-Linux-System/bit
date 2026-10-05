@@ -201,10 +201,9 @@ fn find_arrow(s: string) -> int is
 end
 
 fn key_char_ok(c: string) -> bool is
-    if c >= "a" && c <= "z" is return true end
-    if c >= "A" && c <= "Z" is return true end
-    if c >= "0" && c <= "9" is return true end
-    return c == "_" || c == "-" || c == "." || c == ":" || c == "/" || c == "@" || c == "+" || c == "#"
+    if c == "" is return false end
+    ;; membership test, not `c >= "a"` — string ordering is not something to lean on
+    return string_find("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.:/@+#", c) >= 0
 end
 
 ;; Offset (inside `s`) of the first character a key may not contain, or -1.
@@ -245,8 +244,7 @@ fn check_value(sec: string, key: string, raw: string, off: int, len: int) -> [Fi
         let mut ok: bool = string_len(v) == 4
         let mut i: int = 0
         while ok && i < 4 is
-            let c: string = string_slice(v, i, i + 1)
-            if c < "0" || c > "9" is ok = false end
+            if string_find("0123456789", string_slice(v, i, i + 1)) < 0 is ok = false end
             i += 1
         end
         if !ok is
@@ -481,7 +479,13 @@ pub fn count_errors(fs: [Finding]) -> int is
     return n
 end
 
-;; ── Rendering (nidus) ────────────────────────────────────────────────────────
+;; ── Rendering ────────────────────────────────────────────────────────────────
+;;
+;; Diagnostics are produced in a CHILD PROCESS (`bit __hk-diag <Bit.hk>`). Reading a broken manifest
+;; is exactly the moment bit must not fall over, so the part that formats text (nidus, or the plain
+;; fallback) runs isolated: if that child crashes or exits non-zero, bit simply tries the plain
+;; formatter, and as a last resort prints one line — it never goes down with it.
+;; BIT_HK_DIAG=inproc renders in this process instead (useful to debug a crash).
 
 fn to_diagnostic(f: Finding, path: string, text: string) -> nidus::Diagnostic is
     let mut d: nidus::Diagnostic = nidus::error(f.f_msg)
@@ -499,49 +503,183 @@ fn plural(n: int, one: string, many: string) -> string is
     return to_string(n) + " " + many
 end
 
-;; Prints every finding with nidus. Returns the number of errors.
-pub fn report(path: string, text: string) -> int is
-    let fs: [Finding] = lint(text)
-    if array_len(fs) == 0 is return 0 end
-    let cfg: nidus::Config = nidus::config_default()
-    let mut errors: int = 0
-    let mut warnings: int = 0
-    let mut i: int = 0
-    write("")
-    while i < array_len(fs) is
-        write(nidus::render(to_diagnostic(fs[i], path, text), cfg))
-        if fs[i].f_sev == 0 is errors += 1 else is warnings += 1 end
-        i += 1
-    end
+fn summary_line(path: string, errors: int, warnings: int) -> string is
     let mut parts: [string] = []
     if errors > 0 is parts = array_push(parts, plural(errors, "error", "errors")) end
     if warnings > 0 is parts = array_push(parts, plural(warnings, "warning", "warnings")) end
-    write("  " + path + ": " + join_words(parts))
-    write("")
-    return errors
+    return "  " + path + ": " + join_words(parts)
 end
 
-;; Like `report`, but a manifest that was already reported by this process is not reported again
-;; (commands load the project several times). The record lives in the environment.
+;; All findings drawn with nidus (graphical / minimal / … as nidus picks for this terminal).
+fn render_nidus(path: string, text: string, fs: [Finding]) -> string is
+    let cfg: nidus::Config = nidus::config_default()
+    let mut out: string = ""
+    let mut errors: int = 0
+    let mut warnings: int = 0
+    let mut i: int = 0
+    while i < array_len(fs) is
+        out = out + "\n" + nidus::render(to_diagnostic(fs[i], path, text), cfg)
+        if fs[i].f_sev == 0 is errors += 1 else is warnings += 1 end
+        i += 1
+    end
+    return out + "\n" + summary_line(path, errors, warnings) + "\n"
+end
+
+;; 1-based line and column of byte offset `off` in `text`.
+fn line_col(text: string, off: int) -> [int] is
+    let mut line: int = 1
+    let mut col: int = 1
+    let mut i: int = 0
+    while i < off && i < string_len(text) is
+        if string_slice(text, i, i + 1) == "\n" is
+            line += 1
+            col = 1
+        else is
+            col += 1
+        end
+        i += 1
+    end
+    return [line, col]
+end
+
+;; The same findings, no nidus: a plain rustc-style layout. Used only when the nidus child failed.
+fn render_plain(path: string, text: string, fs: [Finding]) -> string is
+    let lines: [string] = string_split(text, "\n")
+    let mut out: string = ""
+    let mut errors: int = 0
+    let mut warnings: int = 0
+    let mut i: int = 0
+    while i < array_len(fs) is
+        let f: Finding = fs[i]
+        let kind: string = if f.f_sev == 0 then "error" else if f.f_sev == 1 then "warning" else "advice"
+        let lc: [int] = line_col(text, f.f_off)
+        let ln: int = lc[0]
+        let src: string = if ln - 1 < array_len(lines) then lines[ln - 1] else ""
+        let gutter: string = string_repeat(" ", string_len(to_string(ln)))
+        out = out + "\n" + kind + "[" + f.f_code + "]: " + f.f_msg + "\n"
+        out = out + gutter + "--> " + path + ":" + to_string(ln) + ":" + to_string(lc[1]) + "\n"
+        out = out + gutter + " |\n"
+        out = out + to_string(ln) + " | " + src + "\n"
+        out = out + gutter + " | " + string_repeat(" ", lc[1] - 1) + string_repeat("^", f.f_len) + " " + f.f_label + "\n"
+        if f.f_help != "" is out = out + gutter + " = help: " + f.f_help + "\n" end
+        if f.f_sev == 0 is errors += 1 else is warnings += 1 end
+        i += 1
+    end
+    return out + "\n" + summary_line(path, errors, warnings) + "\n"
+end
+
+;; ── the child side ───────────────────────────────────────────────────────────
+
+;; `bit __hk-diag <Bit.hk>`   (plain = false)   nidus
+;; `bit __hk-lint <Bit.hk>`   (plain = true)    no nidus
+;; First line is `@@errors=<n>`, then the rendering.
+pub fn child_main(path: string, plain: bool) -> int is
+    let text: string = file_read(path)
+    let fs: [Finding] = lint(text)
+    write("@@errors=" + to_string(count_errors(fs)))
+    if array_len(fs) == 0 is return 0 end
+    if plain is
+        write(render_plain(path, text, fs))
+    else is
+        write(render_nidus(path, text, fs))
+    end
+    return 0
+end
+
+;; `bit __hk-msg <Bit.hk> <message>` — one finding that has no position of its own (hk-parser said no).
+pub fn child_message(path: string, message: string) -> int is
+    let text: string = file_read(path)
+    let f: Finding = finding(0, "bit::hk::parse", "cannot parse the manifest", 0, 1, message,
+                             "check the syntax against the Bit.hk grammar in bit's README")
+    write("@@errors=1")
+    write(render_nidus(path, text, [f]))
+    return 0
+end
+
+;; ── the parent side ──────────────────────────────────────────────────────────
+
+;; Path of the running `bit`.
+fn own_exe() -> string is
+    let args: [string] = env::args()
+    let a0: string = if array_len(args) > 0 then args[0] else "bit"
+    if string_contains(a0, "/") is return util::capture("readlink -f " + util::sq(a0) + " 2>/dev/null") end
+    let found: string = util::capture("command -v " + util::sq(a0) + " 2>/dev/null")
+    if found != "" is return util::capture("readlink -f " + util::sq(found) + " 2>/dev/null") end
+    return ""
+end
+
+;; Runs `bit <sub> <args>` isolated; "" if it could not run or did not exit 0, else its output.
+fn run_isolated(sub: string, args: string) -> string is
+    let exe: string = own_exe()
+    if exe == "" is return "" end
+    let out: string = util::capture("( " + util::sq(exe) + " " + sub + " " + args + " ) 2>/dev/null; echo \"@@rc=$?\"")
+    let m: int = string_find(out, "@@rc=")
+    if m < 0 is return "" end
+    if string_trim(string_slice(out, m + 5, string_len(out))) != "0" is return "" end
+    let body: string = string_slice(out, 0, m)
+    if !string_starts_with(body, "@@errors=") is return "" end
+    return body
+end
+
+;; Prints what a child produced; returns its error count.
+fn show_child(body: string) -> int is
+    let nl: int = string_find(body, "\n")
+    if nl < 0 is return str_to_int(string_trim(string_slice(body, 9, string_len(body)))) end
+    let n: int = str_to_int(string_trim(string_slice(body, 9, nl)))
+    write(string_slice(body, nl + 1, string_len(body)))
+    return n
+end
+
+fn report_inproc(path: string, text: string) -> int is
+    let fs: [Finding] = lint(text)
+    if array_len(fs) == 0 is return 0 end
+    write(render_nidus(path, text, fs))
+    return count_errors(fs)
+end
+
+fn diag_unavailable(path: string) is
+    write("")
+    write("  bit: " + path + " has problems, but they could not be displayed")
+    write("       (BIT_HK_DIAG=inproc shows the renderer's own failure)")
+    write("")
+end
+
+;; Shows every problem in the manifest at `path`. Returns the number of errors (0 = go on).
+pub fn report(path: string, text: string) -> int is
+    if env_get("BIT_HK_DIAG") == "inproc" is return report_inproc(path, text) end
+    let nid: string = run_isolated("__hk-diag", util::sq(path))
+    if nid != "" is return show_child(nid) end
+    let plain: string = run_isolated("__hk-lint", util::sq(path))
+    if plain != "" is return show_child(plain) end
+    diag_unavailable(path)
+    return 0
+end
+
 pub fn already_reported(path: string) -> bool is
     return string_contains("\n" + env_get("BIT_HK_REPORTED"), "\n" + path + "\n")
 end
 
+;; Like `report`, but a manifest that was already reported by this process is not reported again
+;; (commands load the project several times). The record lives in the environment.
 pub fn report_once(path: string, text: string) -> int is
-    let seen: string = env_get("BIT_HK_REPORTED")
-    if string_contains("\n" + seen, "\n" + path + "\n") is return 0 end
-    env_set("BIT_HK_REPORTED", seen + path + "\n")
+    if already_reported(path) is return 0 end
+    env_set("BIT_HK_REPORTED", env_get("BIT_HK_REPORTED") + path + "\n")
     return report(path, text)
 end
 
-;; A manifest that hk-parser rejected although no rule above explains why: show hk-parser's own
-;; message in the same style, pointing at the file as a whole.
+;; A manifest hk-parser rejected although no rule above explains why: show hk-parser's own message.
 pub fn report_parser_error(path: string, text: string, message: string) is
-    let mut d: nidus::Diagnostic = nidus::error("cannot parse the manifest")
-    d = d.with_code("bit::hk::parse")
-    d = d.with_source(path, text)
-    d = d.with_label(nidus::primary_label(0, 1, message))
-    d = d.with_help("check the syntax against the Bit.hk grammar in bit's README")
+    if env_get("BIT_HK_DIAG") == "inproc" is
+        let f: Finding = finding(0, "bit::hk::parse", "cannot parse the manifest", 0, 1, message, "check the syntax against the Bit.hk grammar in bit's README")
+        write(render_nidus(path, text, [f]))
+        return
+    end
+    let out: string = run_isolated("__hk-msg", util::sq(path) + " " + util::sq(message))
+    if out != "" is
+        let n: int = show_child(out)
+        return
+    end
     write("")
-    write(nidus::render(d, nidus::config_default()))
+    write("  bit: cannot parse " + path + ": " + message)
+    write("")
 end
