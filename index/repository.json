@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-10-1",
+  "updated_at": "2026-10-5",
   "libraries": [
     {
       "name": "mold",
@@ -299,6 +299,15 @@
         "webview",
         "tauri",
         "rust"
+      ],
+      "author": "Bit Developers"
+    },
+    {
+      "name": "BetterUI",
+      "target": "https://github.com/bit-io/BetterUI",
+      "description": "Modern UI library for bit.io. Written in HackerScript.",
+      "tags": [
+        "skia"
       ],
       "author": "Bit Developers"
     }
