@@ -1,5 +1,6 @@
 use "bit -> hk-parser" from "hkp"
 mod util
+mod hkdiag
 
 pub struct Hk is
     pub hk_cfg: hkp::HkConfig
@@ -20,9 +21,17 @@ end
 ;; is reported once and yields an empty document, so callers fall back to their
 ;; defaults.
 pub fn hk_parse(text: string) -> Hk is
+    return hk_parse_at("Bit.hk", text)
+end
+
+;; Same, for a manifest at `path`. A manifest hk-parser rejects is reported with nidus (the offending
+;; text underlined) — unless `hkdiag::report_once` already explained it.
+pub fn hk_parse_at(path: string, text: string) -> Hk is
     let cfg: hkp::HkConfig = hkp::parse(text)
     if !cfg.is_valid() is
-        write("bit: cannot parse manifest: " + hkp::last_error())
+        if !hkdiag::already_reported(path) is
+            hkdiag::report_parser_error(path, text, hkp::last_error())
+        end
         return hk_empty()
     end
     return Hk { hk_cfg: cfg }
