@@ -218,6 +218,72 @@ pub fn run_hook(p: project::Project, key: string, verbose: bool) -> int is
     return util::run(in_root(p, cmd))
 end
 
+;; ── [directories] before-build ───────────────────────────────────────────────
+;; `-> before-build => gen.sh` (or `[gen.sh, "cargo build -p bindings"]`): run in the project root
+;; before anything else is built — typically generating bindings for a Rust / C / other native part.
+
+fn has_script_ext(e: string) -> bool is
+    let l: string = string_lower(e)
+    return string_ends_with(l, ".sh") || string_ends_with(l, ".bash") || string_ends_with(l, ".zsh") ||
+           string_ends_with(l, ".h#") || string_ends_with(l, ".hl") || string_ends_with(l, ".py") ||
+           string_ends_with(l, ".lua") || string_ends_with(l, ".js") || string_ends_with(l, ".rb") ||
+           string_ends_with(l, ".pl")
+end
+
+;; What to execute for one `before-build` entry; "" = it names a script that does not exist.
+;;   a command line (spaces, pipes, …)  -> as written
+;;   an existing file                   -> by extension: bash / zsh / h# preview / hl run / python3 /
+;;                                         lua / node / ruby / perl; any other file: itself if
+;;                                         executable, else `sh`
+;;   a bare word (`make`)               -> as written
+pub fn script_command(p: project::Project, entry: string) -> string is
+    let e: string = string_trim(entry)
+    if e == "" is return "" end
+    if string_contains(e, " ") || string_contains(e, "|") || string_contains(e, "&") || string_contains(e, ";") ||
+       string_contains(e, "$") || string_contains(e, ">") || string_contains(e, "<") || string_contains(e, "(") is
+        return e
+    end
+    let path: string = if string_starts_with(e, "/") then e else project::root_of(p) + "/" + e
+    if !file_exists(path) is
+        if string_contains(e, "/") || has_script_ext(e) is return "" end
+        return e
+    end
+    let l: string = string_lower(e)
+    let q: string = util::sq(path)
+    if string_ends_with(l, ".sh") || string_ends_with(l, ".bash") is return "bash " + q end
+    if string_ends_with(l, ".zsh") is return "zsh " + q end
+    if string_ends_with(l, ".h#") is return tool_for("hsharp") + " preview " + q end
+    if string_ends_with(l, ".hl") is return tool_for("hackerlang") + " run " + q end
+    if string_ends_with(l, ".py") is return "python3 " + q end
+    if string_ends_with(l, ".lua") is return "lua " + q end
+    if string_ends_with(l, ".js") is return "node " + q end
+    if string_ends_with(l, ".rb") is return "ruby " + q end
+    if string_ends_with(l, ".pl") is return "perl " + q end
+    if util::run("test -x " + q) == 0 is return q end
+    return "sh " + q
+end
+
+;; Runs every `before-build` entry in order; stops at the first failure. 0 = fine.
+pub fn run_before_build(p: project::Project, verbose: bool) -> int is
+    let entries: [string] = project::before_build_entries(p)
+    let mut i: int = 0
+    while i < array_len(entries) is
+        let entry: string = entries[i]
+        let cmd: string = script_command(p, entry)
+        if cmd == "" is
+            ui::fail("[directories] before-build: `" + entry + "` was not found in " + project::root_of(p))
+            ui::note("a script path is relative to the project root; a command line may be written as it is")
+            return 1
+        end
+        if run_step(p, "before-build  " + entry, cmd, verbose) != 0 is
+            ui::fail("before-build failed: " + entry)
+            return 1
+        end
+        i += 1
+    end
+    return 0
+end
+
 ;; ── Per-language builders ────────────────────────────────────────────────────
 ;; Each returns 0 on success. `suffix` keeps outputs apart when a project builds
 ;; several languages at once ("" for a single language, "-hl"/"-hs" otherwise).
@@ -841,6 +907,7 @@ pub fn build_project(p: project::Project, o: BuildOpts) -> int is
     ;; [edition] (H# only): a malformed value stops the build here, with Bit.hk named, instead of
     ;; surfacing later as a compiler error; for hl/hs projects the section is just reported as ignored.
     if project::edition_report(p) > 0 is return 1 end
+    if project::directories_report(p) > 0 is return 1 end
 
     let langs: [string] = target_langs(p, o)
     if util::array_has(langs, "hsharp") && check_toolchain(p) != 0 is return 1 end
@@ -861,6 +928,8 @@ pub fn build_project(p: project::Project, o: BuildOpts) -> int is
         end
         sysdeps::export_paths(p)
     end
+    ;; [directories] before-build: generate bindings etc. before anything is built
+    if run_before_build(p, o.bo_verbose) != 0 is return 1 end
     if run_hook(p, "pre-build", o.bo_verbose) != 0 is
         ui::fail("pre-build hook failed")
         return 1
