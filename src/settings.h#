@@ -48,7 +48,7 @@ end
 
 fn load() -> hk::Hk is
     if !file_exists(path()) is return hk::hk_empty() end
-    return hk::hk_parse(file_read(path()))
+    return hk::hk_parse_at(path(), file_read(path()))
 end
 
 pub fn get(key: string, fallback: string) -> string is
