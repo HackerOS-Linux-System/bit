@@ -487,8 +487,8 @@ end
 ;; formatter, and as a last resort prints one line — it never goes down with it.
 ;; BIT_HK_DIAG=inproc renders in this process instead (useful to debug a crash).
 
-fn to_diagnostic(f: Finding, path: string, text: string) -> nidus::Diagnostic is
-    let mut d: nidus::Diagnostic = nidus::error(f.f_msg)
+fn to_diagnostic(f: Finding, path: string, text: string) -> nidus::diagnostic::Diagnostic is
+    let mut d: nidus::diagnostic::Diagnostic = nidus::error(f.f_msg)
     if f.f_sev == 1 is d = d.as_warning() end
     if f.f_sev == 2 is d = d.as_advice() end
     d = d.with_code(f.f_code)
@@ -512,7 +512,7 @@ end
 
 ;; All findings drawn with nidus (graphical / minimal / … as nidus picks for this terminal).
 fn render_nidus(path: string, text: string, fs: [Finding]) -> string is
-    let cfg: nidus::Config = nidus::config_default()
+    let cfg: nidus::style::Config = nidus::config_default()
     let mut out: string = ""
     let mut errors: int = 0
     let mut warnings: int = 0
