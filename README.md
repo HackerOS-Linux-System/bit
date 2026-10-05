@@ -249,3 +249,8 @@ error[bit::hk::bad_value]: `hmoe` is not a valid value for `file` in [directorie
 Errors (stray symbols, unclosed `[` / `"`, missing `=>`, bad nesting, invalid values) stop the command; warnings
 (unknown section or option, duplicates, the old `;;` / `key = value` syntax) are shown and ignored. Every
 manifest is reported once per run.
+
+The diagnostics are produced in a **child process** (`bit __hk-diag <Bit.hk>`, an internal command), so a failure in
+the renderer can never take `bit` down: if the nidus child fails, bit falls back to a plain layout (`bit __hk-lint`),
+and as a last resort prints a single line. `BIT_HK_DIAG=inproc` renders in-process instead — handy when debugging
+the renderer itself.
