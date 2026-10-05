@@ -81,7 +81,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq lua5.4 jq
 
       # H# through install-utils.sh + install.sh of the H-Sharp repository,
-      # then hk-parser and progress-bar from bit.io.
+      # then hk-parser, progress-bar and nidus from bit.io.
       - name: Install H# and bit's libraries
         run: bash scripts/bootstrap-ci.sh
 
