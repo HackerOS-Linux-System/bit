@@ -207,3 +207,45 @@ For `lang => h#` projects the optional `[edition]` section pins two things:
   Values are plain versions (`1.1`, `v1.1.2`) — ranges are not accepted here.
 - Both keys apply **only to H#**. With `lang => hl` / `hs` (or no `lang`), the section is ignored and
   `bit check` / `bit build` say so. `bit new` writes `[edition] -> edition => 2026` for H# projects.
+
+## Where libraries live, and what runs before the build (`[directories]`)
+
+Available for **every** language (`h#`, `hl`, `hs`):
+
+```
+[directories]
+-> file         => default      ! default | home | root | project
+-> before-build => gen.sh       ! a script, a command line, or a list: [gen.sh, "cargo build -p bindings"]
+```
+
+| `file` | libraries are |
+|---|---|
+| `default` | as before: in `~/.hackeros/libs` (the home of whoever runs bit — `/root/…` for root), linked into `<project>/cache/libs/` |
+| `home` | always in the current user's `~/.hackeros/libs` |
+| `root` | always in `/root/.hackeros/libs` |
+| `project` | **only** inside the project: `<project>/cache/libs/<name>/` holds the sources directly — no `<commit>/` level, no `current` link, nothing installed or linked anywhere else |
+
+An explicit `BIT_HOME` in the environment beats `file`. An unknown value is an error that suggests the closest one.
+
+**`before-build`** tells bit what to run *before* it builds the project (before `pre-build` and before the native
+part) — generating bindings for a Rust / C / other native part, for example. It runs in the project root; a script
+is started by its extension (`.sh .bash` → bash, `.zsh`, `.h#` → `h# preview`, `.hl`, `.py`, `.lua`, `.js`, `.rb`, `.pl`),
+any other file runs itself if executable (else `sh`), and anything that looks like a command line runs as written.
+A missing script, or a non-zero exit, stops the build. For a library this also runs when bit builds it after
+`bit install`.
+
+## Manifest diagnostics (nidus)
+
+`Bit.hk` problems are shown with **nidus** (bit.io) — the offending text underlined, an error code, a hint —
+instead of being swallowed:
+
+```
+error[bit::hk::unexpected_symbol]: unexpected `$` in Bit.hk
+warning[bit::hk::unknown_option]: unknown option `versoin` in [package]      did you mean `version`?
+warning[bit::hk::unknown_section]: unknown section [dependancies]              did you mean `dependencies`?
+error[bit::hk::bad_value]: `hmoe` is not a valid value for `file` in [directories]
+```
+
+Errors (stray symbols, unclosed `[` / `"`, missing `=>`, bad nesting, invalid values) stop the command; warnings
+(unknown section or option, duplicates, the old `;;` / `key = value` syntax) are shown and ignored. Every
+manifest is reported once per run.
