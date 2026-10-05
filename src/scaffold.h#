@@ -26,6 +26,11 @@ fn manifest(name: string, lang: string, is_lib: bool) -> string is
             "! Hacker Lang must be told where its code is\n" +
             "-> hl-entry => " + (if is_lib then "lib.hl" else "main.hl") + "\n\n"
     end
+    m = m + "! where libraries live and what runs before the build (every language):\n" +
+        "!   file => default | home | root | project      before-build => script or command\n" +
+        "! [directories]\n" +
+        "! -> file         => default\n" +
+        "! -> before-build => gen.sh\n\n"
     m = m + "[build]\n" +
         "! bit links everything statically\n" +
         "-> link => static\n" +
