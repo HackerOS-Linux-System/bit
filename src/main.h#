@@ -2,6 +2,7 @@ mod util
 mod ui
 mod cli
 mod settings
+mod hkdiag
 
 extern static [c] is
     fn exit(code: int)
@@ -219,6 +220,10 @@ fn main() is
             "update" => is rc = cli::cmd_update() end
             "verify" => is rc = cli::cmd_verify(first) end
             "doctor" => is rc = cli::cmd_doctor() end
+            ;; internal: Bit.hk diagnostics render in a child process (see hkdiag.h#)
+            "__hk-diag" => is rc = hkdiag::child_main(first, false) end
+            "__hk-lint" => is rc = hkdiag::child_main(first, true) end
+            "__hk-msg"  => is rc = hkdiag::child_message(first, arg_at(pos, 1)) end
             "langs" | "languages" => is rc = cli::cmd_langs() end
             "help" => is cli::print_help() end
             _ => is
