@@ -183,7 +183,8 @@ fn ensure_one(p: project::Project, d: project::Dep, pk: Pick, pl: lock::Lock, us
     end
     if !integrity_ok(dname, locked, lock::locked_checksum(now), use_lock) is return failed() end
 
-    link_into_cache(p, dname, installer::current_dir(dname))
+    ;; `[directories] file => project`: the library is already inside cache/libs/ — nothing to link
+    if !util::libs_flat() is link_into_cache(p, dname, installer::current_dir(dname)) end
     let tag: string = if semver::parse(pk.pk_rev) >= 0 then pk.pk_rev else lock::locked_tag(now)
     return Outcome { oc_ok: true, oc_lock: true, oc_entry: lock::Locked {
         lk_name: dname, lk_version: lock::locked_version(now), lk_commit: lock::locked_commit(now), lk_url: lock::locked_url(now),
