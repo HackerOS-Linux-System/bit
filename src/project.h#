@@ -3,6 +3,7 @@ mod ui
 mod hk
 mod index
 mod semver
+mod hkdiag
 
 pub struct Project is
     pub pj_root:     string
@@ -104,7 +105,7 @@ end
 
 pub fn load(root: string) -> Project is
     let m: string = manifest_in(root)
-    let h: hk::Hk = if m == "" then hk::hk_empty() else hk::hk_parse(file_read(m))
+    let h: hk::Hk = if m == "" then hk::hk_empty() else hk::hk_parse_at(m, file_read(m))
     return Project {
         pj_root: root,
         pj_name: hk::hk_pkg(h, "name", util::basename(root)),
@@ -132,7 +133,13 @@ pub fn load_here() -> Project is
     if root == "" is
         return Project { pj_root: "", pj_name: "", pj_version: "", pj_manifest: "", pj_hk: hk::hk_empty(), pj_cache: "" }
     end
-    return load(root)
+    ;; the project the user is working in: every problem in its Bit.hk is reported (nidus) once,
+    ;; and its [directories] decide where libraries live for the rest of the process
+    let m: string = manifest_in(root)
+    if m != "" is hkdiag::report_once(m, file_read(m)) end
+    let p: Project = load(root)
+    apply_directories(p)
+    return p
 end
 
 pub fn is_loaded(p: Project) -> bool is return p.pj_root != "" end
@@ -379,12 +386,98 @@ pub fn edition_report(p: Project) -> int is
         i += 1
     end
     let e: [string] = edition_errors(p)
+    ;; hkdiag (nidus) has already drawn these under the offending text when the manifest was loaded
+    let shown: bool = hkdiag::already_reported(p.pj_manifest)
     i = 0
     while i < array_len(e) is
-        ui::fail("Bit.hk: " + e[i])
+        if !shown is ui::fail("Bit.hk: " + e[i]) end
         i += 1
     end
     return array_len(e)
+end
+
+;; Errors in [directories]; returns how many. (Printed plainly only if nidus did not already show them.)
+pub fn directories_report(p: Project) -> int is
+    let e: [string] = dir_mode_errors(p)
+    let shown: bool = hkdiag::already_reported(p.pj_manifest)
+    let mut i: int = 0
+    while i < array_len(e) is
+        if !shown is ui::fail("Bit.hk: " + e[i]) end
+        i += 1
+    end
+    return array_len(e)
+end
+
+;; ── [directories] (every language) ───────────────────────────────────────────
+;;
+;;   [directories]
+;;   -> file         => default   where the libraries this project uses are kept:
+;;                                  default  as before: ~/.hackeros/libs (the home of whoever runs bit —
+;;                                           /root/... for root), linked into <project>/cache/libs/
+;;                                  home     always ~/.hackeros/libs of the current user
+;;                                  root     always /root/.hackeros/libs
+;;                                  project  only inside the project: <project>/cache/libs/<name>/ —
+;;                                           nothing is installed or linked anywhere else
+;;   -> before-build => gen.sh    what bit runs BEFORE it builds this project (and before the native
+;;                                part): a script (.sh .bash .zsh .h# .hl .hcs .py .lua .js .rb .pl),
+;;                                an executable file, or a shell command line — or a list of them:
+;;                                `[gen.sh, "cargo build -p bindings"]`. Runs in the project root.
+;;                                For a library this is also what runs when bit builds it after install.
+;;
+;; An explicit BIT_HOME in the environment always wins over `file`.
+
+pub fn dir_mode_raw(p: Project) -> string is
+    return string_lower(string_trim(get(p, "directories", "file", "")))
+end
+
+pub fn dir_mode_valid(raw: string) -> bool is
+    return raw == "" || raw == "default" || raw == "home" || raw == "root" || raw == "project"
+end
+
+;; default | home | root | project  (an unknown value counts as default; `dir_mode_errors` reports it)
+pub fn dir_mode(p: Project) -> string is
+    let raw: string = dir_mode_raw(p)
+    if raw == "" || !dir_mode_valid(raw) is return "default" end
+    return raw
+end
+
+pub fn dir_mode_errors(p: Project) -> [string] is
+    let mut out: [string] = []
+    let raw: string = dir_mode_raw(p)
+    if !dir_mode_valid(raw) is
+        let near: string = hkdiag::suggest(raw, ["default", "home", "root", "project"])
+        out = array_push(out, "[directories] -> file => " + raw + " is not valid (default, home, root or project)" +
+                              (if near != "" then " — did you mean `" + near + "`?" else ""))
+    end
+    return out
+end
+
+;; Scripts / commands to run before the build, in order.
+pub fn before_build_entries(p: Project) -> [string] is
+    let v: string = string_trim(get(p, "directories", "before-build", ""))
+    if v == "" is return [] end
+    if string_starts_with(v, "[") is return hk::hk_list(v) end
+    return [v]
+end
+
+;; Points BIT_HOME (the libraries directory) where `[directories] file` says. Called once, for the
+;; project in the current directory.
+pub fn apply_directories(p: Project) is
+    if !is_loaded(p) is return end
+    let mode: string = dir_mode(p)
+    if mode == "default" is return end
+    ;; the user's own BIT_HOME beats Bit.hk (but not our own earlier setting)
+    if env_get("BIT_HOME") != "" && env_get("BIT_DIRECTORIES") == "" is return end
+    let h: string = if env_get("HOME") != "" then env_get("HOME") else "/tmp"
+    if mode == "home" is
+        env_set("BIT_HOME", h + "/.hackeros/libs")
+    else if mode == "root" is
+        env_set("BIT_HOME", "/root/.hackeros/libs")
+    else is
+        env_set("BIT_HOME", cache_libs(p))
+        env_set("BIT_LIBS_FLAT", "1")
+    end
+    env_set("BIT_DIRECTORIES", mode)
 end
 
 ;; ── [build] / [lib] / [default-build] ────────────────────────────────────────
