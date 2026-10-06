@@ -608,11 +608,22 @@ fn own_exe() -> string is
     return ""
 end
 
+;; The child's stdout is a pipe (bit captures it and prints it itself), so nidus inside it sees "no
+;; terminal" and would pick the colourless one-line style. When bit's OWN stdout is a terminal, tell the
+;; child to keep colours on (NIDUS_COLOR=always) so the diagnostics come out coloured, as nidus draws them
+;; on a terminal. NO_COLOR / BIT_PLAIN / CI, and an explicit NIDUS_COLOR from the user, always win.
+fn child_color_env() -> string is
+    if env_get("NIDUS_COLOR") != "" is return "" end
+    if env_get("NO_COLOR") != "" || env_get("BIT_PLAIN") != "" || env_get("CI") != "" is return "" end
+    if util::run("test -t 1") != 0 is return "" end
+    return "NIDUS_COLOR=always "
+end
+
 ;; Runs `bit <sub> <args>` isolated; "" if it could not run or did not exit 0, else its output.
 fn run_isolated(sub: string, args: string) -> string is
     let exe: string = own_exe()
     if exe == "" is return "" end
-    let out: string = util::capture("( " + util::sq(exe) + " " + sub + " " + args + " ) 2>/dev/null; echo \"@@rc=$?\"")
+    let out: string = util::capture("( " + child_color_env() + util::sq(exe) + " " + sub + " " + args + " ) 2>/dev/null; echo \"@@rc=$?\"")
     let m: int = string_find(out, "@@rc=")
     if m < 0 is return "" end
     if string_trim(string_slice(out, m + 5, string_len(out))) != "0" is return "" end
