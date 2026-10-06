@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-10-5",
+  "updated_at": "2026-10-6",
   "libraries": [
     {
       "name": "mold",
@@ -317,6 +317,19 @@
       "description": "Colors library for bit.io. Written in H#.",
       "tags": [
         "colors"
+      ],
+      "author": "Bit Developers"
+    },
+    {
+      "name": "wlroots",
+      "target": "https://github.com/bit-io/wlroots",
+      "description": "Wlroots bindings for bit.io. Written in HackerScript.",
+      "tags": [
+        "wayland",
+        "xwayland",
+        "bindings",
+        "wlroots",
+        "compositor"
       ],
       "author": "Bit Developers"
     }
