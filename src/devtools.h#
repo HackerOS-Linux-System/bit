@@ -120,7 +120,7 @@ pub fn cmd_lint(p: project::Project, only: string, verbose: bool) -> int is
         ui::fail("nothing to lint — no sources found")
         return 1
     end
-    let mut errors: int = project::edition_report(p) + project::directories_report(p)
+    let mut errors: int = project::edition_report(p) + project::directories_report(p) + project::gen_report(p)
     let mut warnings: int = 0
     let mut i: int = 0
     while i < array_len(langs) is
@@ -223,10 +223,41 @@ fn diagnostics() -> [Diag] is
     ]
 end
 
-fn common_prefix(a: string, b: string) -> int is
-    let mut n: int = 0
-    while n < string_len(a) && n < string_len(b) && string_at(a, n) == string_at(b, n) is n += 1 end
-    return n
+;; Levenshtein edit distance (classic DP, two rows instead of a full matrix) — used only to
+;; suggest the closest known diagnostic code when the one asked for isn't in the table (see
+;; `cmd_repair` below). Diagnostic codes are a fixed shape (one letter + 4 digits), so this is
+;; deliberately a plain, unoptimised implementation — parity with HackerScript's own `virus
+;; repair` (virus/cmd/repair.hcs::repair_levenshtein), which this replaces a weaker
+;; common-prefix heuristic to match: a transposed middle digit ("E0021" vs "E0011") now matches
+;; the way it does in `virus repair`, not just a shared leading substring.
+fn levenshtein(a: string, b: string) -> int is
+    let la: int = string_len(a)
+    let lb: int = string_len(b)
+    let mut prev: [int] = []
+    let mut j: int = 0
+    while j <= lb is
+        prev = array_push(prev, j)
+        j += 1
+    end
+    let mut i: int = 0
+    while i < la is
+        let mut cur: [int] = [i + 1]
+        let mut bj: int = 0
+        while bj < lb is
+            let cost: int = if string_at(a, i) == string_at(b, bj) then 0 else 1
+            let del_cost: int = prev[bj + 1] + 1
+            let ins_cost: int = cur[bj] + 1
+            let sub_cost: int = prev[bj] + cost
+            let mut best: int = del_cost
+            if ins_cost < best is best = ins_cost end
+            if sub_cost < best is best = sub_cost end
+            cur = array_push(cur, best)
+            bj += 1
+        end
+        prev = cur
+        i += 1
+    end
+    return prev[lb]
 end
 
 pub fn cmd_repair(code: string) -> int is
@@ -251,18 +282,21 @@ pub fn cmd_repair(code: string) -> int is
         i += 1
     end
     ui::fail("unknown diagnostic code '" + code + "'")
+    ;; Closest known code within edit distance 2 — e.g. "E0021" → "E0011" (parity with
+    ;; `virus repair`'s `repair_closest_code`); a looser match is more likely noise than help,
+    ;; so (as in virus) nothing is suggested beyond that threshold.
     let mut best: string = ""
-    let mut score: int = 0
+    let mut best_dist: int = 3
     i = 0
     while i < array_len(all) is
-        let s: int = common_prefix(wanted, all[i].dg_code)
-        if s > score is
-            score = s
+        let dist: int = levenshtein(wanted, all[i].dg_code)
+        if dist < best_dist is
+            best_dist = dist
             best = all[i].dg_code
         end
         i += 1
     end
-    if best != "" is ui::note("did you mean " + best + "?") end
+    if best != "" is ui::note("did you mean " + best + "? (bit repair " + best + ")") end
     let mut known: [string] = []
     i = 0
     while i < array_len(all) is
