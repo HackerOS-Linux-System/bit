@@ -347,6 +347,30 @@ pub fn index_find(ix: Index, name: string) -> LibEntry is
                       ie_lang: "", ie_rev: "", ie_checksum: "", ie_dir: "" }
 end
 
+;; Like `index_find`, but when several index entries share `name` across languages (the shared
+;; index can hold an "h#" library and an unrelated "hs" library of the same name), prefers the
+;; one whose `ie_lang` matches `lang` or is empty (language-agnostic) over one for a different
+;; language — parity with HackerScript's own `virus install bit <name>` (virus/cmd/bit_repo.hcs::
+;; bit_find_package), which only ever considered entries tagged for HackerScript (or untagged).
+;; `lang` == "" skips the preference entirely and behaves exactly like `index_find` (first match,
+;; whatever its language) — used when the caller genuinely doesn't know/care which language a
+;; name resolves to (e.g. `bit info`, `bit search`).
+pub fn index_find_lang(ix: Index, name: string, lang: string) -> LibEntry is
+    if lang == "" is return index_find(ix, name) end
+    let want: string = string_lower(name)
+    let mut fallback: LibEntry = LibEntry { ie_name: "", ie_target: "", ie_desc: "", ie_tags: [], ie_author: "",
+                                            ie_lang: "", ie_rev: "", ie_checksum: "", ie_dir: "" }
+    let mut i: int = 0
+    while i < ix.ix_count is
+        if string_lower(ix.ix_items[i].ie_name) == want is
+            if ix.ix_items[i].ie_lang == lang || ix.ix_items[i].ie_lang == "" is return ix.ix_items[i] end
+            if fallback.ie_name == "" is fallback = ix.ix_items[i] end
+        end
+        i += 1
+    end
+    return fallback
+end
+
 fn entry_matches(e: LibEntry, q: string) -> bool is
     if q == "" || q == "all" is return true end
     let needle: string = string_lower(q)
