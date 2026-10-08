@@ -408,6 +408,132 @@ pub fn directories_report(p: Project) -> int is
     return array_len(e)
 end
 
+;; ── [package] -> gen (Hacker Lang only) ──────────────────────────────────────
+;;
+;;   [package]
+;;   -> lang => hl
+;;   -> gen  => 2            generation of Hacker Lang this project targets: 1..N or "rolling"
+;;
+;; The generation is also written in the entry file's own header — `using <gen 2>` or
+;; `using <rolling>` (the first real line; blank lines and comments / shebang may precede it).
+;; `gen` belongs to Hacker Lang alone: an invalid value, or `gen` set when `lang` does not name
+;; Hacker Lang, is an error (stops `bit build` / `bit lint`). A Bit.hk-vs-header mismatch is
+;; advisory only (warning / note).
+
+;; The newest numbered generation of Hacker Lang that bit accepts in `-> gen` / `--gen`.
+pub fn hackerlang_max_gen() -> int is return 2 end
+
+;; The raw `[package] -> gen` value ("" = not set). Quotes are stripped by `get`.
+pub fn gen_raw(p: Project) -> string is
+    return string_trim(get(p, "package", "gen", ""))
+end
+
+;; Is `lang` explicitly Hacker Lang (alone or in a list)?
+pub fn declares_hackerlang(p: Project) -> bool is
+    let declared: string = get(p, "package", "lang", get(p, "build", "lang", ""))
+    if declared == "" || string_lower(declared) == "auto" is return false end
+    return util::array_has(index::parse_langs(declared), "hackerlang")
+end
+
+fn all_digits(v: string) -> bool is
+    let n: int = string_len(v)
+    if n == 0 is return false end
+    let mut i: int = 0
+    while i < n is
+        let c: string = string_slice(v, i, i + 1)
+        if !(c == "0" || c == "1" || c == "2" || c == "3" || c == "4" || c == "5" || c == "6" || c == "7" || c == "8" || c == "9") is return false end
+        i += 1
+    end
+    return true
+end
+
+;; A usable `gen` value: "rolling" or a whole number in 1..hackerlang_max_gen().
+pub fn gen_valid(v: string) -> bool is
+    let low: string = string_lower(string_trim(v))
+    if low == "rolling" is return true end
+    if !all_digits(low) is return false end
+    let n: int = str_to_int(low)
+    return n >= 1 && n <= hackerlang_max_gen()
+end
+
+;; The generation a Hacker Lang source file declares: "2" for `using <gen 2>`, "rolling" for
+;; `using <rolling>`, "" when there is no such header (or the file cannot be read).
+pub fn extract_gen(path: string) -> string is
+    if !file_exists(path) is return "" end
+    let lines: [string] = string_split(file_read(path), "\n")
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let l: string = string_trim(lines[i])
+        if l == "" || string_starts_with(l, "#!") || string_starts_with(l, "///") || string_starts_with(l, "//") || string_starts_with(l, "!") || string_starts_with(l, ";;") is
+            i += 1
+        else is
+            if !string_starts_with(l, "using") is return "" end
+            let lt: int = string_find(l, "<")
+            let gt: int = string_find(l, ">")
+            if lt < 0 || gt < lt is return "" end
+            let inner: string = string_lower(string_trim(string_slice(l, lt + 1, gt)))
+            if inner == "rolling" is return "rolling" end
+            if string_starts_with(inner, "gen") is
+                return string_trim(string_slice(inner, 3, string_len(inner)))
+            end
+            return ""
+        end
+    end
+    return ""
+end
+
+;; Errors for `[package] -> gen`, one message each (empty = fine).
+pub fn gen_errors(p: Project) -> [string] is
+    let mut out: [string] = []
+    let v: string = gen_raw(p)
+    if v == "" is return out end
+    if !declares_hackerlang(p) is
+        out = array_push(out, "[package] -> gen => " + v + " is only used when `lang => hl` (Hacker Lang) — set `-> lang => hl`, or remove `gen`")
+        return out
+    end
+    if !gen_valid(v) is
+        out = array_push(out, "[package] -> gen => " + v + " is not valid for Hacker Lang (use 1.." + to_string(hackerlang_max_gen()) + ", or \"rolling\")")
+    end
+    return out
+end
+
+;; Advisory notices: declared `gen` vs the `using <gen N>` header of the Hacker Lang entry file.
+pub fn gen_warnings(p: Project) -> [string] is
+    let mut out: [string] = []
+    let v: string = gen_raw(p)
+    if v == "" || !declares_hackerlang(p) || !gen_valid(v) is return out end
+    let entry: string = entry_for(p, "hackerlang", "bin")
+    if entry == "" is return out end
+    let path: string = p.pj_root + "/" + entry
+    if !file_exists(path) is return out end
+    let header: string = extract_gen(path)
+    let want: string = string_lower(v)
+    if header == "" is
+        out = array_push(out, entry + " has no `using <gen " + want + ">` header — Bit.hk declares gen => " + v)
+    else if header != want is
+        out = array_push(out, entry + " says `using <" + (if header == "rolling" then "rolling" else "gen " + header) + ">` but Bit.hk declares gen => " + v)
+    end
+    return out
+end
+
+;; Prints the advisory notices, then the errors (only when `gen` is set); returns the number of errors.
+pub fn gen_report(p: Project) -> int is
+    let e: [string] = gen_errors(p)
+    let mut i: int = 0
+    while i < array_len(e) is
+        ui::fail("Bit.hk: " + e[i])
+        i += 1
+    end
+    if array_len(e) > 0 is return array_len(e) end
+    let w: [string] = gen_warnings(p)
+    i = 0
+    while i < array_len(w) is
+        ui::warn(w[i])
+        i += 1
+    end
+    return 0
+end
+
 ;; ── [directories] (every language) ───────────────────────────────────────────
 ;;
 ;;   [directories]
