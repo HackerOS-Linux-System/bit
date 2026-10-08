@@ -908,6 +908,9 @@ pub fn build_project(p: project::Project, o: BuildOpts) -> int is
     ;; surfacing later as a compiler error; for hl/hs projects the section is just reported as ignored.
     if project::edition_report(p) > 0 is return 1 end
     if project::directories_report(p) > 0 is return 1 end
+    ;; [package] -> gen (Hacker Lang only): invalid value, or used outside lang => hl, stops the
+    ;; build here; a declared-vs-actual-header drift is advisory only (warn/note, not a hard error)
+    if project::gen_report(p) > 0 is return 1 end
 
     let langs: [string] = target_langs(p, o)
     if util::array_has(langs, "hsharp") && check_toolchain(p) != 0 is return 1 end
