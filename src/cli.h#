@@ -38,7 +38,8 @@ pub fn print_help() is
     write("    bit <command> [options]")
     write("")
     write("  " + ui::bold("PROJECT"))
-    write("    init [name] [--lang h#|hl|hs] [--lib]   new project (or initialise the current directory)")
+    write("    init [name] [--lang h#|hl|hs] [--lib] [--gen N|rolling]   new project (or initialise the current directory)")
+    write("      --gen is Hacker Lang only ([package] -> gen in Bit.hk); writes a matching `using <gen N>` into the entry file")
     write("    build [--release] [--target h#|hl|hs] [--platform P] [--emit bin|hlib|so|a|rlib|obj]")
     write("      [--bin NAME] [--wasm] [--jar] [--library]   extra binaries (src/bin/*.h#, cmd/bin/*.hcs), wasm32, jar, rlib")
     write("    build <file.hcs|file.h#>     compile one file without a Bit.hk          (virus build <file>)")
@@ -170,8 +171,8 @@ pub fn cmd_auto(verbose: bool) -> int is
     return driver::auto(verbose)
 end
 
-pub fn cmd_init(name: string, lang: string, is_lib: bool) -> int is
-    return scaffold::init_project(name, lang, is_lib)
+pub fn cmd_init(name: string, lang: string, is_lib: bool, gen: string) -> int is
+    return scaffold::init_project(name, lang, is_lib, gen)
 end
 
 fn need_project() -> project::Project is
