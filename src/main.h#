@@ -53,6 +53,7 @@ fn main() is
     let mut features:  string = ""
     let mut ver:       string = ""     ;; virus style:  bit install crates itoa --version 1.0
     let mut name_opt:  string = ""     ;; virus style:  bit init --name myapp
+    let mut gen_opt:   string = ""     ;; Hacker Lang only:  bit init --lang hl --gen 2  (or rolling)
 
     let mut i: int = 1
     while i < argc is
@@ -138,6 +139,10 @@ fn main() is
                     i += 1
                     lang = arg_at(args, i)
                 end
+                "--gen"            => is
+                    i += 1
+                    gen_opt = arg_at(args, i)
+                end
                 "--sign"           => is
                     i += 1
                     sign = arg_at(args, i)
@@ -166,7 +171,7 @@ fn main() is
         let first: string = arg_at(pos, 0)
         match cmd is
             "init" | "new" => is
-                rc = cli::cmd_init(if name_opt != "" then name_opt else first, if lang != "" then lang else target, is_lib)
+                rc = cli::cmd_init(if name_opt != "" then name_opt else first, if lang != "" then lang else target, is_lib, gen_opt)
             end
             "build" => is
                 if first != "" && (string_ends_with(first, ".hcs") || string_ends_with(first, ".h#")) is
