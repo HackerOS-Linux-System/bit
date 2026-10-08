@@ -48,7 +48,7 @@ end
 fn section_keys(s: string) -> [string] is
     if s == "package" || s == "project" is
         return ["name", "version", "description", "authors", "author", "license", "lang", "repository",
-                "homepage", "documentation", "readme", "keywords", "categories", "publish"]
+                "homepage", "documentation", "readme", "keywords", "categories", "publish", "gen"]
     end
     if s == "layout" is
         ;; plus every `<lang>-entry` / `<lang>-lib-entry` (hsharp-entry, hl-lib-entry, …) — see `layout_entry_key`
