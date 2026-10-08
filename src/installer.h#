@@ -175,6 +175,21 @@ fn looks_like_tag(rev: string) -> string is
     return ""
 end
 
+;; The current project's language, when it declares exactly one — "" otherwise (no project here,
+;; or a mixed-language workspace member where only `--target`/`--lang` can disambiguate).
+;; `install_lib` uses this to resolve a bare name against the *right* index entry without the
+;; caller having to pass `--target` every time: a HackerScript project asking for a name that the
+;; shared index also lists for H# should get the HackerScript entry by default, the same way
+;; `virus install bit <name>` only ever looked at entries tagged for HackerScript (or untagged) —
+;; see `index::index_find_lang`.
+fn current_project_lang_hint() -> string is
+    let p: project::Project = project::load_here()
+    if !project::is_loaded(p) is return "" end
+    let langs: [string] = project::langs(p)
+    if array_len(langs) == 1 is return langs[0] end
+    return ""
+end
+
 pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
     if o.io_depth > 8 is
         ui::fail("dependency chain too deep (cycle?) at " + spec)
@@ -207,7 +222,8 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
             return 1
         end
         let ix: index::Index = index::index_load()
-        let e: index::LibEntry = index::index_find(ix, spec)
+        let lang_hint: string = if hint_lang != "" then hint_lang else current_project_lang_hint()
+        let e: index::LibEntry = index::index_find_lang(ix, spec, lang_hint)
         if index::e_name(e) == "" is
             ui::fail("library '" + spec + "' not found in the index")
             ui::note("search:  bit search " + spec + "     or install a repo directly:  bit install <git-url>")
