@@ -1,5 +1,7 @@
 import type { LibEntry } from "./types.js";
 import { langFromTags, normalizeLang } from "./langs.js";
+import { cacheAge, cacheGetStale, cacheSet } from "./store.js";
+import { clearStale, markStale } from "./offline.js";
 
 /** Same document `bit` reads (see src/index.h#). */
 export const INDEX_URL =
@@ -65,6 +67,8 @@ export interface Index {
   libraries: LibEntry[];
 }
 
+const CACHE_KEY = "index";
+
 export async function loadIndex(): Promise<Index> {
   let lastError: unknown = null;
   for (const url of SOURCES) {
@@ -78,10 +82,19 @@ export async function loadIndex(): Promise<Index> {
         .filter((e): e is LibEntry => e !== null)
         .sort((a, b) => a.name.localeCompare(b.name));
       const updatedAt = Array.isArray(doc) ? "" : str(doc["updated_at"]);
-      return { updatedAt, libraries };
+      const index = { updatedAt, libraries };
+      cacheSet(CACHE_KEY, index, null); // kept for offline use; the network copy always wins while online
+      clearStale("index");
+      return index;
     } catch (e) {
       lastError = e;
     }
+  }
+  // No connection (or both sources down): serve the copy saved in this browser.
+  const saved = cacheGetStale<Index>(CACHE_KEY);
+  if (saved && Array.isArray(saved.libraries)) {
+    markStale("index", cacheAge(CACHE_KEY));
+    return saved;
   }
   throw lastError instanceof Error ? lastError : new Error("could not load the library index");
 }
