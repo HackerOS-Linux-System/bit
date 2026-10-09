@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Settings — bit.io</title>
+  <meta name="description" content="bit.io settings: GitHub token and offline data." />
+  <meta name="theme-color" content="#ec4899" />
+  <link rel="icon" href="images/icon.png" type="image/png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <script>try{var t=localStorage.getItem("bitio:theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t);else if(matchMedia("(prefers-color-scheme: dark)").matches)document.documentElement.setAttribute("data-theme","dark")}catch(e){}</script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="nav">
+    <div class="wrap">
+      <a class="brand" href="index.html"><img src="images/icon.png" alt="" width="30" height="30" />bit.io</a>
+      <nav class="nav-links" aria-label="Main">
+        <a href="index.html">Libraries</a>
+        <a href="about.html">Docs</a>
+        <a href="settings.html" data-settings-link aria-current="page">Settings</a>
+        <a href="https://github.com/HackerOS-Linux-System/bit" rel="noopener" target="_blank">GitHub ↗</a>
+      </nav>
+      <span class="grow"></span>
+      <button class="icon-btn" data-theme-toggle aria-label="Toggle dark mode" title="Toggle dark mode">◐</button>
+    </div>
+  </header>
+  <main id="main" class="wrap page">
+    <h1>Settings</h1>
+    <p class="lead">Everything here is stored only in this browser.</p>
+
+    <section class="panel">
+      <h2>GitHub token</h2>
+      <p>When you open a library, bit.io asks GitHub's API for its file tree (languages and the source browser) and its releases. Anonymous requests are limited to <b>60 per hour</b> per IP address; with a personal access token the limit is <b>5,000 per hour</b>.</p>
+      <p class="muted">The token is used <b>only on a library's detail page</b> and only for <code>api.github.com</code>. It is never sent to raw.githubusercontent.com or to bit.io. A token with <b>no scopes</b> (or a fine-grained, read-only, public-repositories token) is enough —
+        <a href="https://github.com/settings/personal-access-tokens/new" rel="noopener" target="_blank">create one ↗</a>.</p>
+      <label class="field" for="token-input">Personal access token</label>
+      <input id="token-input" class="search" type="password" placeholder="ghp_… or github_pat_…" autocomplete="off" spellcheck="false" />
+      <label class="check"><input type="checkbox" id="token-show" /> Show token</label>
+      <div class="actions">
+        <button class="btn primary" id="token-save" type="button">Save</button>
+        <button class="btn" id="token-test" type="button">Test token</button>
+        <button class="btn" id="token-clear" type="button">Remove</button>
+      </div>
+      <p id="token-status" class="status" role="status"></p>
+      <p id="token-rate" class="status" role="status"></p>
+    </section>
+
+    <section class="panel">
+      <h2>Offline mode</h2>
+      <p>Libraries you open are saved in this browser (details, README, file tree, files you read, releases). Without a connection the site still opens and shows that saved copy, with a notice at the top.</p>
+      <p id="cache-stats" class="muted"></p>
+      <p id="sw-status" class="muted"></p>
+      <div class="actions"><button class="btn" id="cache-clear" type="button">Clear saved data</button></div>
+    </section>
+  </main>
+  <footer class="site"><div class="wrap">
+    <span>bit — the package manager for H#, Hacker Lang and HackerScript.</span>
+    <span><a href="about.html">Docs</a> · <a href="https://github.com/HackerOS-Linux-System/bit" rel="noopener" target="_blank">GitHub</a></span>
+  </div></footer>
+  <script type="module" src="js/settings.js"></script>
+</body>
+</html>
