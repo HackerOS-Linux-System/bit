@@ -6,9 +6,10 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc -p . --noEmit",
-    "build": "npm run clean && tsc -p . && cp -r public/. dist/",
+    "build": "npm run clean && tsc -p . && cp -r public/. dist/ && node scripts/generate-pages.mjs",
     "clean": "rm -rf dist",
-    "serve": "npm run build && cd dist && python3 -m http.server 8080"
+    "serve": "npm run build && cd dist && python3 -m http.server 8080",
+    "test": "tsc -p . && node --test \"tests/*.test.mjs\""
   },
   "devDependencies": {
     "typescript": "^5.6.3"
