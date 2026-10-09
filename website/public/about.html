@@ -21,6 +21,7 @@
       <nav class="nav-links" aria-label="Main">
         <a href="index.html">Libraries</a>
         <a href="about.html" aria-current="page">Docs</a>
+        <a href="settings.html" data-settings-link>Settings</a>
         <a href="https://github.com/HackerOS-Linux-System/bit" rel="noopener" target="_blank">GitHub ↗</a>
       </nav>
       <span class="grow"></span>
@@ -88,6 +89,10 @@ bit                           # does everything Bit.hk describes</pre></div>
     <h2>Statically linked, checksummed</h2>
     <p>Every library is built and linked statically; <code>link =&gt; dynamic</code> and <code>extern dynamic</code> are rejected. On install, bit hashes the library's files (<code>sha256</code> over the sorted per-file hashes, independent of install location) and stores the result in <code>bit.lock</code>. <code>bit verify</code> re-checks it, and a <code>Bit.lock</code> pin that no longer matches fails the build instead of being trusted.</p>
 
+    <h2>Library pages on bit.io</h2>
+    <p>Every library has Overview (rendered README, examples, GitHub stats, the pinned revision, compatibility, dependencies and who depends on it), <b>API</b> (public <code>pub fn</code> / <code>pub struct</code> from the <code>.h#</code> sources), <b>Source</b> (browse and search the code) and <b>Versions</b> (GitHub releases, with Bit.hk changes between them).</p>
+    <p><b>Verify checksum</b> rebuilds the directory checksum from the files at the pinned revision, in your browser, and compares it with the one in the index. Pages read from GitHub's API only when you open a library; add a personal token in <a href="settings.html">Settings</a> to raise the 60 requests/hour limit. Everything you open is saved in the browser, so it keeps working offline.</p>
+
     <h2>Commands</h2>
     <div class="snippet"><pre>bit init [name] [--lang h#|hl|hs] [--lib]
 bit build [--release] [--target h#|hl|hs] [--platform linux-aarch64] [--emit bin|hlib|so|a|obj]
@@ -111,7 +116,7 @@ bit publish      bit commands     bit x &lt;custom&gt;</pre></div>
   </main>
   <footer class="site"><div class="wrap">
     <span>bit — the package manager for H#, Hacker Lang and HackerScript.</span>
-    <span><a href="about.html">Docs</a> · <a href="https://github.com/HackerOS-Linux-System/bit" rel="noopener" target="_blank">GitHub</a></span>
+    <span><a href="about.html">Docs</a> · <a href="settings.html">Settings</a> · <a href="https://github.com/HackerOS-Linux-System/bit" rel="noopener" target="_blank">GitHub</a></span>
   </div></footer>
   <script type="module" src="js/about.js"></script>
 </body>
