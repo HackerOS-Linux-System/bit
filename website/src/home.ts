@@ -2,7 +2,8 @@ import { $, clear, copyButton, h, safeUrl } from "./dom.js";
 import { loadIndex, type Index } from "./index-data.js";
 import { LANGS, langInfo } from "./langs.js";
 import type { Lang, LibEntry } from "./types.js";
-import { initTheme } from "./theme.js";
+import { initChrome } from "./chrome.js";
+import { onBackOnline } from "./offline.js";
 
 interface State {
   q: string;
@@ -135,7 +136,7 @@ function stats(ix: Index): void {
 }
 
 async function main(): Promise<void> {
-  initTheme();
+  initChrome();
   readUrl();
   const search = $<HTMLInputElement>("search");
   search.value = state.q;
@@ -151,11 +152,15 @@ async function main(): Promise<void> {
   });
   $("hero-install").append(copyButton("bit install <name>"));
 
-  try {
+  const load = async (): Promise<void> => {
     const ix = await loadIndex();
     all = ix.libraries;
     stats(ix);
     render();
+  };
+  onBackOnline(() => void load().catch(() => undefined));
+  try {
+    await load();
   } catch (e) {
     clear($("grid"));
     $("grid").append(
