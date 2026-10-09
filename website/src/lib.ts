@@ -1,89 +1,72 @@
-import { $, clear, copyButton, h, safeUrl } from "./dom.js";
+import { $, clear, h } from "./dom.js";
 import { loadIndex, parseGithub } from "./index-data.js";
-import { langInfo, normalizeLang } from "./langs.js";
-import { hkList, parseHk } from "./hk.js";
-import type { HkDoc, LibEntry } from "./types.js";
-import { initTheme } from "./theme.js";
+import type { LibEntry } from "./types.js";
+import { initChrome } from "./chrome.js";
+import { onBackOnline } from "./offline.js";
+import { loadReleases, type Repo } from "./repodata.js";
+import { mountLangBar } from "./langbar.js";
+import { mountSource, type SourceBrowser } from "./source.js";
+import { mountVersions } from "./versions.js";
+import { mountApi } from "./apidoc.js";
+import { mountOverview } from "./overview.js";
 
-const MANIFESTS = ["Bit.hk", "bit.hk", "Bytes.hk", "Virus.hk"];
+type Tab = "overview" | "api" | "source" | "versions";
+const TABS: Array<{ id: Tab; label: string }> = [
+  { id: "overview", label: "Overview" },
+  { id: "api", label: "API" },
+  { id: "source", label: "Source" },
+  { id: "versions", label: "Versions" },
+];
 
-async function fetchText(url: string): Promise<string | null> {
-  try {
-    const r = await fetch(url);
-    return r.ok ? await r.text() : null;
-  } catch {
-    return null;
-  }
+function validRef(v: string | null): string | null {
+  return v && /^[\w.+#@/-]{1,100}$/.test(v) && !v.includes("..") ? v : null;
 }
 
-async function fetchManifest(owner: string, repo: string, ref: string): Promise<{ file: string; doc: HkDoc } | null> {
-  for (const f of MANIFESTS) {
-    const t = await fetchText(`https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${f}`);
-    if (t) return { file: f, doc: parseHk(t) };
-  }
-  return null;
-}
-
-function row(k: string, v: string | HTMLElement): HTMLElement {
-  return h("div", { class: "kv" }, h("dt", {}, k), h("dd", {}, v));
-}
-
-function renderMeta(e: LibEntry, m: { file: string; doc: HkDoc } | null): HTMLElement {
-  const pkg = m?.doc["package"] ?? m?.doc["project"] ?? {};
-  const info = langInfo(e.lang !== "any" ? e.lang : normalizeLang(pkg["lang"]));
-  const dl = h("dl", { class: "meta" });
-  dl.append(row("Language", info.label));
-  if (pkg["version"]) dl.append(row("Version", pkg["version"]));
-  if (pkg["license"]) dl.append(row("License", pkg["license"]));
-  if (e.author) dl.append(row("Author", e.author));
-  if (e.rev) dl.append(row("Pinned rev", e.rev));
-  if (e.checksum) dl.append(row("Pinned checksum", e.checksum));
-  const out = m?.doc["lib"]?.["output"];
-  dl.append(row("Library output", `${out || "hlib"} — statically linked`));
-  if (e.target) dl.append(row("Repository", h("a", { href: safeUrl(e.target), rel: "noopener", target: "_blank" }, e.target)));
-  return dl;
-}
-
-function renderDeps(doc: HkDoc | undefined): HTMLElement | null {
-  const deps = doc?.["dependencies"];
-  if (!deps) return null;
-  const names = Object.keys(deps).filter((k) => !k.includes("."));
-  if (names.length === 0) return null;
-  return h(
-    "section",
-    { class: "block" },
-    h("h2", {}, "Dependencies"),
-    h(
-      "ul",
-      { class: "deps" },
-      ...names.map((n) =>
-        h("li", {}, h("a", { href: `lib.html?name=${encodeURIComponent(n)}` }, n), h("span", { class: "muted" }, `  ${deps[n] ?? ""}`)),
-      ),
-    ),
-  );
-}
-
-function renderCommands(doc: HkDoc | undefined): HTMLElement | null {
-  const cmds = doc?.["commands"];
-  if (!cmds) return null;
-  const names = Object.keys(cmds).filter((k) => !k.includes("."));
-  if (names.length === 0) return null;
-  return h(
-    "section",
-    { class: "block" },
-    h("h2", {}, "Custom commands"),
-    h(
-      "ul",
-      { class: "deps" },
-      ...names.map((n) => h("li", {}, h("code", {}, `bit ${n}`), h("span", { class: "muted" }, `  ${cmds[`${n}.description`] ?? ""}`))),
-    ),
-  );
+/** Version picker: shows the version being viewed; the release list is only fetched when it is opened. */
+function versionPicker(entry: LibEntry, repo: Repo, refParam: string | null): HTMLElement {
+  const current = refParam ?? (entry.rev || "");
+  const select = h("select", { class: "ver-select", "aria-label": "Version" }, h("option", { value: current }, current || "default branch"));
+  let loaded = false;
+  const populate = async (): Promise<void> => {
+    if (loaded) return;
+    loaded = true;
+    try {
+      const res = await loadReleases(repo);
+      const tags = (res.value ?? []).map((r) => r.tag);
+      if (tags.length === 0) return;
+      select.replaceChildren(
+        h("option", { value: "" }, "default branch"),
+        ...tags.map((t) => {
+          const o = h("option", { value: t }, t);
+          if (t === current) o.selected = true;
+          return o;
+        }),
+      );
+      if (!current) (select.options[0] as HTMLOptionElement).selected = true;
+      else if (!tags.includes(current)) {
+        select.prepend(h("option", { value: current }, current));
+        select.value = current;
+      }
+    } catch {
+      loaded = false; // retry on the next open
+    }
+  };
+  select.addEventListener("focus", () => void populate());
+  select.addEventListener("pointerdown", () => void populate());
+  select.addEventListener("change", () => {
+    const u = new URL(location.href);
+    if (select.value) u.searchParams.set("ref", select.value);
+    else u.searchParams.delete("ref");
+    location.href = u.href;
+  });
+  return h("label", { class: "ver-picker" }, h("span", { class: "muted small" }, "Version "), select);
 }
 
 async function main(): Promise<void> {
-  initTheme();
+  initChrome();
   const root = $("detail");
-  const name = new URLSearchParams(location.search).get("name") ?? "";
+  const params = new URLSearchParams(location.search);
+  const name = params.get("name") ?? "";
   if (!name) {
     root.append(h("p", { class: "empty" }, "No library selected. "), h("a", { href: "index.html" }, "Browse the index"));
     return;
@@ -91,11 +74,21 @@ async function main(): Promise<void> {
   document.title = `${name} — bit.io`;
 
   let entry: LibEntry | undefined;
+  let libs: LibEntry[] = [];
   try {
-    entry = (await loadIndex()).libraries.find((l) => l.name.toLowerCase() === name.toLowerCase());
+    libs = (await loadIndex()).libraries;
+    entry = libs.find((l) => l.name.toLowerCase() === name.toLowerCase());
   } catch (e) {
     clear(root);
-    root.append(h("p", { class: "empty" }, `Could not load the index (${e instanceof Error ? e.message : "error"}).`));
+    root.append(
+      h(
+        "p",
+        { class: "empty" },
+        navigator.onLine
+          ? `Could not load the index (${e instanceof Error ? e.message : "error"}).`
+          : "You're offline and the library index hasn't been saved in this browser yet. Open bit.io once while online.",
+      ),
+    );
     return;
   }
   if (!entry) {
@@ -103,49 +96,83 @@ async function main(): Promise<void> {
     root.append(h("p", { class: "empty" }, `"${name}" is not in the index.`), h("a", { href: "index.html" }, "Browse the index"));
     return;
   }
+  document.querySelector('meta[name="description"]')?.setAttribute("content", `${entry.name} — ${entry.description || "a library on bit.io"}`);
 
   const gh = parseGithub(entry.target);
-  const manifestPromise = gh ? fetchManifest(gh.owner, gh.repo, entry.rev || "HEAD") : Promise.resolve(null);
-  const readmePromise = gh
-    ? fetchText(`https://raw.githubusercontent.com/${gh.owner}/${gh.repo}/${entry.rev || "HEAD"}/README.md`)
-    : Promise.resolve(null);
+  const refParam = validRef(params.get("ref"));
+  const repo: Repo | null = gh ? { owner: gh.owner, repo: gh.repo, ref: refParam ?? (entry.rev || "HEAD") } : null;
 
   clear(root);
-  const install = `bit install ${entry.name}`;
-  const add = `bit add ${entry.name}`;
   root.append(
     h("h1", {}, entry.name),
     h("p", { class: "lead" }, entry.description || ""),
     h("div", { class: "tags" }, ...entry.tags.map((t) => h("a", { class: "tag", href: `index.html?tag=${encodeURIComponent(t)}` }, t))),
-    h(
-      "section",
-      { class: "block" },
-      h("h2", {}, "Install"),
-      h("div", { class: "cmd" }, h("code", {}, install), copyButton(install)),
-      h("div", { class: "cmd" }, h("code", {}, add), copyButton(add), h("span", { class: "muted" }, " adds it to [dependencies] in Bit.hk")),
-    ),
   );
-
-  const meta = h("div", { id: "meta" }, renderMeta(entry, null));
-  root.append(h("section", { class: "block" }, h("h2", {}, "Details"), meta));
-
-  const manifest = await manifestPromise;
-  if (manifest) {
-    clear(meta);
-    meta.append(renderMeta(entry, manifest));
-    const deps = renderDeps(manifest.doc);
-    const cmds = renderCommands(manifest.doc);
-    if (deps) root.append(deps);
-    if (cmds) root.append(cmds);
-    const list = hkList(manifest.doc["package"]?.["authors"]);
-    if (list.length > 0) meta.append(row("Authors", list.join(", ")));
-    root.append(h("p", { class: "muted" }, `Read from ${manifest.file} in the repository.`));
+  if (refParam) {
+    root.append(
+      h(
+        "p",
+        { class: "ref-banner" },
+        `Viewing version ${refParam}. `,
+        h("a", { href: `lib.html?name=${encodeURIComponent(entry.name)}${location.hash}` }, "Back to the default version"),
+      ),
+    );
   }
 
-  const readme = await readmePromise;
-  if (readme) {
-    root.append(h("section", { class: "block" }, h("h2", {}, "README"), h("pre", { class: "readme" }, readme.slice(0, 20000))));
+  /* tabs */
+  const tablist = h("div", { class: "tabs", role: "tablist", "aria-label": "Library sections" });
+  const panels = new Map<Tab, HTMLElement>();
+  const tabLinks = new Map<Tab, HTMLAnchorElement>();
+  for (const t of TABS) {
+    const a = h("a", { class: "tab", role: "tab", href: `#${t.id}`, id: `tab-${t.id}`, "aria-controls": `panel-${t.id}` }, t.label);
+    tabLinks.set(t.id, a);
+    tablist.append(a);
+    panels.set(t.id, h("section", { class: "tab-panel", role: "tabpanel", id: `panel-${t.id}`, "aria-labelledby": `tab-${t.id}`, hidden: "" }));
   }
+  if (repo) tablist.append(h("span", { class: "grow" }), versionPicker(entry, repo, refParam));
+  root.append(tablist, ...panels.values());
+
+  const overview = mountOverview(panels.get("overview") as HTMLElement, { entry, repo, libs });
+  onBackOnline(() => overview.reload());
+
+  const sourcePanel = panels.get("source") as HTMLElement;
+  const versionsPanel = panels.get("versions") as HTMLElement;
+  const apiPanel = panels.get("api") as HTMLElement;
+  let source: SourceBrowser | null = null;
+  let versions: { load: () => void } | null = null;
+  let api: { load: () => void } | null = null;
+  if (repo) {
+    versions = mountVersions(versionsPanel, entry, repo);
+    api = mountApi(apiPanel, repo);
+    mountLangBar(repo);
+  } else {
+    for (const p of [sourcePanel, versionsPanel, apiPanel]) p.append(h("p", { class: "muted" }, "Only available for libraries hosted on GitHub."));
+  }
+
+  /* router: #overview | #api | #source[/path[:L12-20]] | #versions */
+  const route = (): void => {
+    const hash = decodeURIComponent(location.hash.slice(1));
+    if (hash.startsWith("user-content-")) return; // an anchor inside a README: stay on the current tab
+    const id = (hash.split("/")[0] ?? "") as Tab;
+    const tab: Tab = TABS.some((t) => t.id === id) ? id : "overview";
+    for (const t of TABS) {
+      const on = t.id === tab;
+      (panels.get(t.id) as HTMLElement).hidden = !on;
+      const a = tabLinks.get(t.id) as HTMLAnchorElement;
+      a.classList.toggle("is-active", on);
+      a.setAttribute("aria-selected", String(on));
+      if (on) a.setAttribute("aria-current", "page");
+      else a.removeAttribute("aria-current");
+    }
+    if (tab === "source" && repo) {
+      source ??= mountSource(sourcePanel, repo);
+      source.show(hash.length > "source/".length ? hash.slice("source/".length) : null);
+    }
+    if (tab === "versions") versions?.load();
+    if (tab === "api") api?.load();
+  };
+  window.addEventListener("hashchange", route);
+  route();
 }
 
 void main();
