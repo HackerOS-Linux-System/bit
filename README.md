@@ -1,7 +1,7 @@
 # bit
 
 Package manager for **H#**, **Hacker Lang** and **HackerScript** (successor of `bytes`).
-Written 100% in H#, statically linked. Library index: [`index/repository.json`](index/repository.json) · website: **bit.io** (`website/`, TypeScript).
+Written 100% in H#, statically linked. Library index: [`index/repository.json`](index/repository.json) · website: **bit.io** (`website/`, TypeScript — README, API docs, source browser, releases, offline mode; `npm test` runs the unit tests, `tests/e2e.py` the browser smoke test).
 
 ```bash
 bit init myapp --lang h#      # h# | hl | hs   (--lib for a library)
