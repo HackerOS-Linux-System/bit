@@ -1,1 +1,133 @@
+name: Build phone app (Android)
 
+# The native bit.io phone app - Kotlin + Jetpack Compose, no WebView.
+#   app/phones/android   built here (ubuntu-latest) -> .apk + .aab
+#   app/phones/ios       built in build-phone-app-macos.yml (macos-latest) -> .ipa
+# The work is done by scripts/build-phone-app.lua.
+#
+# Optional repository secrets (without them the release is signed with the debug key):
+#   BIT_KEYSTORE_BASE64, BIT_KEYSTORE_PASSWORD, BIT_KEY_ALIAS, BIT_KEY_PASSWORD
+#
+# Pushing a tag `app-vX.Y.Z` also attaches the files to a GitHub release.
+
+on:
+  push:
+    branches: [main]
+    tags: ["app-v*"]
+    paths:
+      - "app/phones/**"
+      - "index/repository.json"
+      - "images/**"
+      - "Bit.hk"
+      - "scripts/build-phone-app.lua"
+      - "scripts/common.lua"
+      - ".github/workflows/build-phone-app.yml"
+  pull_request:
+    paths:
+      - "app/phones/**"
+      - "index/repository.json"
+      - "images/**"
+      - "scripts/build-phone-app.lua"
+      - "scripts/common.lua"
+      - ".github/workflows/build-phone-app.yml"
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: "Debug build (APK only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phone-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Layout checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install lua, jq and ImageMagick
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lua5.4 jq imagemagick
+      - name: Syntax
+        run: luac5.4 -p scripts/build-phone-app.lua
+      - name: Layout, no-WebView rule, seed data, icons
+        run: lua5.4 scripts/build-phone-app.lua check
+
+  android:
+    name: Build Android (APK + AAB)
+    runs-on: ubuntu-latest
+    needs: check
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
+
+      - name: Install lua and jq
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lua5.4 jq
+
+      - name: Version from the tag
+        if: startsWith(github.ref, 'refs/tags/app-v')
+        run: echo "BIT_VERSION_NAME=${GITHUB_REF_NAME#app-v}" >> "$GITHUB_ENV"
+
+      - name: Build
+        env:
+          BIT_KEYSTORE_BASE64: ${{ secrets.BIT_KEYSTORE_BASE64 }}
+          BIT_KEYSTORE_PASSWORD: ${{ secrets.BIT_KEYSTORE_PASSWORD }}
+          BIT_KEY_ALIAS: ${{ secrets.BIT_KEY_ALIAS }}
+          BIT_KEY_PASSWORD: ${{ secrets.BIT_KEY_PASSWORD }}
+          DEBUG_BUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.debug && '1' || '' }}
+        run: |
+          set -euo pipefail
+          flags=""
+          if [ -n "$DEBUG_BUILD" ]; then flags="--debug"; fi
+          lua5.4 scripts/build-phone-app.lua android $flags
+
+      - name: Sanity-check the artifacts
+        run: |
+          set -e
+          ls -l dist/phone
+          for f in dist/phone/*.apk; do
+            test -s "$f"
+            unzip -l "$f" | grep -q 'AndroidManifest.xml'
+            unzip -l "$f" | grep -q 'classes.dex'
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bit-io-android
+          path: dist/phone/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Attach to the GitHub release
+    if: startsWith(github.ref, 'refs/tags/app-v')
+    needs: android
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bit-io-android
+          path: dist/phone
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/phone/*
+          generate_release_notes: true
