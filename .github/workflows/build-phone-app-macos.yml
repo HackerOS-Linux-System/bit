@@ -21,7 +21,6 @@ on:
     tags: ["app-v*"]
     paths:
       - "app/phones/ios/**"
-      - "app/phones/android/src/main/assets/repository.json"
       - "index/repository.json"
       - "images/**"
       - "Bit.hk"
@@ -57,10 +56,10 @@ jobs:
         with:
           xcode-version: latest-stable
 
-      - name: Install lua, jq and XcodeGen
+      - name: Install lua, jq, ImageMagick and XcodeGen
         run: |
           brew update --quiet || true
-          brew install lua jq xcodegen
+          brew install lua jq imagemagick xcodegen
 
       - name: Tool versions
         run: |
@@ -76,6 +75,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/app-v')
         run: echo "BIT_VERSION_NAME=${GITHUB_REF_NAME#app-v}" >> "$GITHUB_ENV"
 
+      # images/icon.png -> app icon and the index snapshot are copied into the app by the script
       - name: Build the .ipa
         env:
           IOS_CERT_P12_BASE64: ${{ secrets.IOS_CERT_P12_BASE64 }}
