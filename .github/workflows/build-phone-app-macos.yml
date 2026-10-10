@@ -1,1 +1,128 @@
+name: Build phone app (iOS, macOS runner)
 
+# The native bit.io iOS app - Swift + SwiftUI, no WebView - built into a real .ipa
+# on a macos-latest runner. The Xcode project is generated from
+# app/phones/ios/project.yml with XcodeGen; the work is done by
+# scripts/build-phone-app.lua ios.
+#
+# Without signing secrets the .ipa is UNSIGNED (it still contains the full app; re-sign it
+# with AltStore / Sideloadly / `codesign` to install). For a signed .ipa add these
+# repository secrets:
+#   IOS_CERT_P12_BASE64, IOS_CERT_PASSWORD      certificate (.p12, base64)
+#   IOS_PROVISION_PROFILE_BASE64                .mobileprovision for org.hackeros.bitio (base64)
+#   IOS_TEAM_ID                                 Apple developer team id
+# and optionally the repository variable IOS_EXPORT_METHOD (ad-hoc | development | app-store | enterprise).
+#
+# Pushing a tag `app-vX.Y.Z` also attaches the .ipa to a GitHub release.
+
+on:
+  push:
+    branches: [main]
+    tags: ["app-v*"]
+    paths:
+      - "app/phones/ios/**"
+      - "app/phones/android/src/main/assets/repository.json"
+      - "index/repository.json"
+      - "images/**"
+      - "Bit.hk"
+      - "scripts/build-phone-app.lua"
+      - "scripts/common.lua"
+      - ".github/workflows/build-phone-app-macos.yml"
+  pull_request:
+    paths:
+      - "app/phones/ios/**"
+      - "index/repository.json"
+      - "images/**"
+      - "scripts/build-phone-app.lua"
+      - "scripts/common.lua"
+      - ".github/workflows/build-phone-app-macos.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phone-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios:
+    name: Build iOS (.ipa)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install lua, jq and XcodeGen
+        run: |
+          brew update --quiet || true
+          brew install lua jq xcodegen
+
+      - name: Tool versions
+        run: |
+          xcodebuild -version
+          swift --version
+          xcodegen --version
+          lua -v
+
+      - name: Layout checks
+        run: lua scripts/build-phone-app.lua check
+
+      - name: Version from the tag
+        if: startsWith(github.ref, 'refs/tags/app-v')
+        run: echo "BIT_VERSION_NAME=${GITHUB_REF_NAME#app-v}" >> "$GITHUB_ENV"
+
+      - name: Build the .ipa
+        env:
+          IOS_CERT_P12_BASE64: ${{ secrets.IOS_CERT_P12_BASE64 }}
+          IOS_CERT_PASSWORD: ${{ secrets.IOS_CERT_PASSWORD }}
+          IOS_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          IOS_EXPORT_METHOD: ${{ vars.IOS_EXPORT_METHOD }}
+        run: lua scripts/build-phone-app.lua ios
+
+      - name: Sanity-check the .ipa
+        run: |
+          set -e
+          ls -l dist/phone
+          for f in dist/phone/*.ipa; do
+            test -s "$f"
+            unzip -l "$f" | grep -q 'Payload/BitIO.app/Info.plist'
+            unzip -l "$f" | grep -q 'Payload/BitIO.app/BitIO$'
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bit-io-ios
+          path: dist/phone/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload the build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bit-io-ios-logs
+          path: app/phones/ios/build/*.log
+          if-no-files-found: ignore
+
+  release:
+    name: Attach to the GitHub release
+    if: startsWith(github.ref, 'refs/tags/app-v')
+    needs: ios
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bit-io-ios
+          path: dist/phone
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/phone/*
+          generate_release_notes: true
