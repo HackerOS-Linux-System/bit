@@ -50,11 +50,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install lua, jq and ImageMagick
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq lua5.4 jq imagemagick
+      - name: Install lua and jq
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lua5.4 jq
       - name: Syntax
         run: luac5.4 -p scripts/build-phone-app.lua
-      - name: Layout, no-WebView rule, seed data, icons
+      - name: Layout and no-WebView rule
         run: lua5.4 scripts/build-phone-app.lua check
 
   android:
@@ -85,6 +85,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/app-v')
         run: echo "BIT_VERSION_NAME=${GITHUB_REF_NAME#app-v}" >> "$GITHUB_ENV"
 
+      # icons (images/icon.png) and the index snapshot are copied into the app by the script
       - name: Build
         env:
           BIT_KEYSTORE_BASE64: ${{ secrets.BIT_KEYSTORE_BASE64 }}
