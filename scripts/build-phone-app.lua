@@ -9,8 +9,8 @@
 --   app/phones/ios       Swift + SwiftUI (XcodeGen) -> .ipa
 --
 --   lua scripts/build-phone-app.lua check            layout + seed-data sanity checks
---   lua scripts/build-phone-app.lua sync [--icons]   copy index/repository.json into both apps
---                                                    (+ regenerate icons from images/icon.png)
+--   lua scripts/build-phone-app.lua sync             copy images/icon.png and index/repository.json into both
+--                                                    apps (done automatically by android / ios)
 --   lua scripts/build-phone-app.lua version          print the version that would be built
 --   lua scripts/build-phone-app.lua android          sync + Gradle release build (APK + AAB)
 --   lua scripts/build-phone-app.lua ios              sync + xcodegen + xcodebuild (IPA, macOS only)
@@ -19,7 +19,7 @@
 -- Options:
 --   --out DIR        where the artifacts go            (default: dist/phone)
 --   --debug          debug build instead of release (android only)
---   --no-sync        skip copying the index snapshot
+--   --no-sync        skip copying icons and the index snapshot
 --
 -- Environment:
 --   BIT_VERSION_NAME / BIT_VERSION_CODE   override the computed version
@@ -63,7 +63,6 @@ local opts = {
   out = os.getenv("PHONE_OUT_DIR") or "dist/phone",
   debug = false,
   sync = true,
-  icons = false,
 }
 
 do
@@ -73,7 +72,7 @@ do
     if a == "--out" then i = i + 1; opts.out = arg[i] or opts.out
     elseif a == "--debug" then opts.debug = true
     elseif a == "--no-sync" then opts.sync = false
-    elseif a == "--icons" then opts.icons = true
+    elseif a == "--icons" then -- accepted for backwards compatibility: icons are always copied now
     elseif a == "-h" or a == "--help" then opts.command = "help"
     elseif not opts.command and not a:match("^%-") then opts.command = a
     else
@@ -205,19 +204,26 @@ local function version()
   return { name = name, code = math.floor(code), ios_name = ios_name }
 end
 
--- ── sync: seed data + icons ──────────────────────────────────────────────────
+-- ── sync: index snapshot + icons (generated at build time, never committed) ─────
+--
+-- Single sources of truth:
+--   index/repository.json   -> offline snapshot shipped inside both apps
+--   images/icon.png         -> launcher icon / in-app logo of both apps
+-- The apps do not keep their own copies in git: this step copies them in. The copies are
+-- listed in app/phones/*/.gitignore.
 
-local function sync_seed()
-  C.group("Sync the library index snapshot into both apps")
+local function seed_dest(platform)
+  return platform == "android" and P.android_seed or P.ios_seed
+end
+
+local function sync_seed(platform)
   if not C.file_exists(P.index) then fail("missing " .. P.index) end
-  -- the snapshot must be valid JSON (trailing commas are tolerated by the apps, but keep it strict)
+  -- the apps tolerate trailing commas, but warn so the index gets fixed
   local ok = C.run("jq -e '.libraries | type == \"array\" and length > 0' " .. sq(P.index) .. " >/dev/null 2>&1")
   if not ok then C.warning("index/repository.json is not strict JSON - the apps still parse it, but fix the file") end
-  for _, dest in ipairs({ P.android_seed, P.ios_seed }) do
-    must("mkdir -p " .. sq(dest:match("^(.*)/[^/]*$")))
-    must("cp " .. sq(P.index) .. " " .. sq(dest))
-  end
-  C.endgroup()
+  local dest = seed_dest(platform)
+  must("mkdir -p " .. sq(dest:match("^(.*)/[^/]*$")))
+  must("cp " .. sq(P.index) .. " " .. sq(dest))
 end
 
 local function image_tool()
@@ -226,36 +232,81 @@ local function image_tool()
   return nil
 end
 
--- Regenerates the launcher icons from images/icon.png (committed copies are used otherwise).
-local function sync_icons()
-  C.group("Regenerate icons from images/icon.png")
-  local tool = image_tool()
-  if not tool then
-    C.warning("ImageMagick not found - keeping the committed icons")
-    C.endgroup()
-    return
-  end
+-- Android: plain copies of images/icon.png (no resizing, no tools needed).
+local function sync_icons_android()
+  if not C.file_exists(P.icon) then fail("missing " .. P.icon) end
   local res = P.android .. "/src/main/res"
-  local sizes = { mdpi = 48, hdpi = 72, xhdpi = 96, xxhdpi = 144, xxxhdpi = 192 }
-  for density, px in pairs(sizes) do
-    local dir = res .. "/mipmap-" .. density
-    must("mkdir -p " .. sq(dir))
-    must(string.format("%s %s -resize %dx%d %s", tool, sq(P.icon), px, px, sq(dir .. "/ic_launcher.png")))
+  for _, rel in ipairs({ "mipmap-xxxhdpi/ic_launcher.png", "drawable-nodpi/bit_icon.png" }) do
+    local dest = res .. "/" .. rel
+    must("mkdir -p " .. sq(dest:match("^(.*)/[^/]*$")))
+    must("cp " .. sq(P.icon) .. " " .. sq(dest))
   end
-  must("mkdir -p " .. sq(res .. "/drawable-nodpi"))
-  must(string.format("%s %s %s", tool, sq(P.icon), sq(res .. "/drawable-nodpi/bit_icon.png")))
-
-  local assets = P.ios .. "/BitIO/Assets.xcassets"
-  -- iOS app icons must be opaque: flatten on white
-  must(string.format("%s %s -resize 1024x1024 -background white -alpha remove -alpha off %s",
-    tool, sq(P.icon), sq(assets .. "/AppIcon.appiconset/AppIcon-1024.png")))
-  must(string.format("%s %s %s", tool, sq(P.icon), sq(assets .. "/AppLogo.imageset/logo.png")))
-  C.endgroup()
 end
 
-local function sync_all()
-  if opts.sync then sync_seed() end
-  if opts.icons then sync_icons() end
+local APPICON_JSON = [[
+{
+  "images": [
+    {
+      "filename": "AppIcon-1024.png",
+      "idiom": "universal",
+      "platform": "ios",
+      "size": "1024x1024"
+    }
+  ],
+  "info": { "author": "xcode", "version": 1 }
+}
+]]
+
+local APPLOGO_JSON = [[
+{
+  "images": [
+    { "filename": "logo.png", "idiom": "universal", "scale": "1x" },
+    { "idiom": "universal", "scale": "2x" },
+    { "idiom": "universal", "scale": "3x" }
+  ],
+  "info": { "author": "xcode", "version": 1 }
+}
+]]
+
+-- iOS: the in-app logo is a plain copy; the 1024x1024 app icon must be opaque, so it is
+-- scaled up and flattened on white (ImageMagick, or sips on a Mac without it).
+local function sync_icons_ios()
+  if not C.file_exists(P.icon) then fail("missing " .. P.icon) end
+  local assets = P.ios .. "/BitIO/Assets.xcassets"
+  local appicon = assets .. "/AppIcon.appiconset"
+  local applogo = assets .. "/AppLogo.imageset"
+  must("mkdir -p " .. sq(appicon) .. " " .. sq(applogo))
+
+  must("cp " .. sq(P.icon) .. " " .. sq(applogo .. "/logo.png"))
+  write_file(applogo .. "/Contents.json", APPLOGO_JSON)
+  write_file(appicon .. "/Contents.json", APPICON_JSON)
+
+  local dest = appicon .. "/AppIcon-1024.png"
+  local tool = image_tool()
+  if tool then
+    must(string.format("%s %s -resize 1024x1024 -background white -alpha remove -alpha off %s",
+      tool, sq(P.icon), sq(dest)))
+  elseif have("sips") then
+    C.warning("ImageMagick not found - scaling the icon with sips (the app icon keeps its alpha channel)")
+    must(string.format("sips -z 1024 1024 %s --out %s >/dev/null", sq(P.icon), sq(dest)))
+  else
+    fail("need ImageMagick (magick / convert) or sips to build the 1024x1024 iOS app icon")
+  end
+end
+
+-- platform: "android" | "ios" | "all"
+local function sync_assets(platform)
+  if not opts.sync then return end
+  C.group("Copy icons (images/) and the index snapshot into the " .. platform .. " app")
+  if platform == "android" or platform == "all" then
+    sync_seed("android")
+    sync_icons_android()
+  end
+  if platform == "ios" or platform == "all" then
+    sync_seed("ios")
+    sync_icons_ios()
+  end
+  C.endgroup()
 end
 
 -- ── check ────────────────────────────────────────────────────────────────────
@@ -268,16 +319,13 @@ local REQUIRED = {
   "app/phones/android/src/main/kotlin/org/hackeros/bitio/MainActivity.kt",
   "app/phones/android/src/main/kotlin/org/hackeros/bitio/BitApplication.kt",
   "app/phones/android/src/main/kotlin/org/hackeros/bitio/ui/BitApp.kt",
-  "app/phones/android/src/main/res/mipmap-xxxhdpi/ic_launcher.png",
-  "app/phones/android/src/main/assets/repository.json",
+  "app/phones/android/src/main/res/values/themes.xml",
   -- ios
   "app/phones/ios/project.yml",
   "app/phones/ios/BitIO/BitIOApp.swift",
   "app/phones/ios/BitIO/Views/RootView.swift",
-  "app/phones/ios/BitIO/Assets.xcassets/AppIcon.appiconset/Contents.json",
-  "app/phones/ios/BitIO/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
-  "app/phones/ios/BitIO/Resources/repository.json",
-  -- shared inputs
+  "app/phones/ios/BitIO/Assets.xcassets/Contents.json",
+  -- shared inputs (copied into both apps at build time - the apps keep no icons / index of their own)
   "index/repository.json",
   "images/icon.png",
 }
@@ -309,27 +357,19 @@ local function cmd_check()
   end
   if found == 0 then io.write("  ok       no WebView anywhere\n") end
 
-  -- Seed snapshots should match the index (otherwise run `build-phone-app.lua sync`).
-  for name, seed in pairs({ android = P.android_seed, ios = P.ios_seed }) do
-    if read_file(seed) ~= read_file(P.index) then
-      C.warning(name .. " seed repository.json differs from index/repository.json (run: lua scripts/build-phone-app.lua sync)")
-    else
-      io.write("  ok       " .. name .. " seed matches index/repository.json\n")
+  -- The apps must not carry their own icons / index snapshot: they come from images/ and index/.
+  local dupes = C.lines("git -C " .. sq(ROOT) .. " ls-files -- 'app/phones/android/src/main/res/mipmap-*' " ..
+    "'app/phones/android/src/main/res/drawable-nodpi' 'app/phones/android/src/main/assets' " ..
+    "'app/phones/ios/BitIO/Resources' 'app/phones/ios/BitIO/Assets.xcassets/AppIcon.appiconset' " ..
+    "'app/phones/ios/BitIO/Assets.xcassets/AppLogo.imageset'")
+  local tracked = 0
+  for _, f in ipairs(dupes) do
+    if f ~= "" then
+      C.warning("generated file is tracked in git: " .. f .. " (git rm --cached it; scripts/build-phone-app.lua copies it at build time)")
+      tracked = tracked + 1
     end
   end
-
-  -- iOS app icon must have no alpha channel.
-  local tool = image_tool()
-  if tool and have("identify") then
-    local alpha = C.capture("identify -format '%[channels]' " ..
-      sq(P.ios .. "/BitIO/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"))
-    if alpha:lower():match("a$") then
-      C.error("AppIcon-1024.png has an alpha channel - App Store / IPA validation rejects it")
-      problems = problems + 1
-    else
-      io.write("  ok       AppIcon-1024.png is opaque (" .. alpha .. ")\n")
-    end
-  end
+  if tracked == 0 then io.write("  ok       no duplicated icons / index snapshot in the apps\n") end
 
   local v = version()
   io.write(string.format("  version  %s (code %d, iOS %s)\n", v.name, v.code, v.ios_name))
@@ -368,7 +408,7 @@ end
 local function cmd_android()
   local v = version()
   local out = out_dir()
-  sync_all()
+  sync_assets("android")
 
   C.group("Android " .. v.name .. " (build " .. v.code .. ")")
   local prefix = ""
@@ -477,7 +517,7 @@ local function cmd_ios()
   end
   local v = version()
   local out = out_dir()
-  sync_all()
+  sync_assets("ios")
 
   C.group("Generate the Xcode project (XcodeGen)")
   if not have("xcodegen") then must("brew install xcodegen", "installing XcodeGen") end
@@ -565,7 +605,7 @@ local function usage()
 
 commands:
   check               layout + seed-data sanity checks
-  sync [--icons]      copy index/repository.json into both apps (and regenerate icons)
+  sync                copy images/icon.png + index/repository.json into both apps
   version             print the version that would be built
   android             Gradle release build (APK + AAB)
   ios                 XcodeGen + xcodebuild (IPA, macOS only)
@@ -574,13 +614,12 @@ commands:
 options:
   --out DIR           output directory (default: dist/phone)
   --debug             android: debug build
-  --no-sync           skip copying the index snapshot
-  --icons             regenerate launcher icons from images/icon.png]])
+  --no-sync           skip copying icons and the index snapshot]])
 end
 
 local commands = {
   check = cmd_check,
-  sync = function() opts.sync = true; sync_all() end,
+  sync = function() opts.sync = true; sync_assets("all") end,
   version = cmd_version,
   android = cmd_android,
   ios = cmd_ios,
