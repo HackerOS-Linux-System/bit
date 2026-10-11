@@ -22,12 +22,12 @@ class Prefs(context: Context) {
     var githubToken: String by mutableStateOf(sp.getString(KEY_TOKEN, "") ?: "")
         private set
 
-    fun setTheme(mode: ThemeMode) {
+    fun changeTheme(mode: ThemeMode) {
         theme = mode
         sp.edit().putString(KEY_THEME, mode.name).apply()
     }
 
-    fun setToken(token: String) {
+    fun saveToken(token: String) {
         val t = token.trim()
         githubToken = t
         sp.edit().apply { if (t.isEmpty()) remove(KEY_TOKEN) else putString(KEY_TOKEN, t) }.apply()
