@@ -549,6 +549,24 @@ fn build_hs_cargo(p: project::Project, o: BuildOpts, entry: string, dir: string,
     let rc1: int = run_step(p, "HackerScript  transpile " + name, gen, o.bo_verbose)
     if rc1 != 0 is return rc1 end
 
+    ;; hackerc <= 0.4 with `--bin-name` only APPENDS a `[[bin]]` to an existing Cargo.toml and leaves the crate
+    ;; without a manifest on a fresh build (cargo: "manifest path ... does not exist"). Fall back to a plain
+    ;; transpile (src/main.rs, binary named after the crate) — the artifact is renamed below.
+    let mut bin_file: string = name
+    if !library && !file_exists(crate_dir + "/Cargo.toml") is
+        ui::warn("hackerc did not write " + crate_dir + "/Cargo.toml for --bin-name — retrying without it (use hackerc >= 0.5)")
+        util::run("rm -rf " + util::sq(crate_dir + "/src/bin"))
+        let gen2: string = tool_for("hackerscript") + " build " + util::sq(entry) + " -o " + util::sq(crate_dir) +
+            " --crate-name " + crate + flags_of(p) + version_map_flag(p)
+        let rc1b: int = run_step(p, "HackerScript  transpile " + name + " (fallback)", gen2, o.bo_verbose)
+        if rc1b != 0 is return rc1b end
+        if !file_exists(crate_dir + "/Cargo.toml") is
+            ui::fail("hackerc produced no Cargo.toml in " + crate_dir + " — update hackerc (`using => 0.5`)")
+            return 1
+        end
+        bin_file = crate
+    end
+
     if !util::tool_exists("cargo") is
         ui::fail("cargo is needed to compile HackerScript output (hackerc → Rust)")
         return 1
@@ -575,7 +593,7 @@ fn build_hs_cargo(p: project::Project, o: BuildOpts, entry: string, dir: string,
 
     let built: string = target_dir + "/" + use_triple + "/" + profile
     if m.hm_kind == "bin" is
-        return util::run("cp -f " + util::sq(built + "/" + name) + " " + util::sq(dir + "/" + name))
+        return util::run("cp -f " + util::sq(built + "/" + bin_file) + " " + util::sq(dir + "/" + name))
     end
     if m.hm_kind == "lib" is
         return util::run("cp -f " + util::sq(built + "/lib" + crate + ".a") + " " + util::sq(dir + "/lib" + name + ".a"))
