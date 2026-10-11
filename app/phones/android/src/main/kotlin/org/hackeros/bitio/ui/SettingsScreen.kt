@@ -92,7 +92,7 @@ fun SettingsScreen(prefs: Prefs, repo: BitRepository) {
             SectionCard("Appearance") {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     ThemeMode.entries.forEach { m ->
-                        FilterChip(selected = prefs.theme == m, onClick = { prefs.setTheme(m) }, label = { Text(m.label) })
+                        FilterChip(selected = prefs.theme == m, onClick = { prefs.changeTheme(m) }, label = { Text(m.label) })
                     }
                 }
             }
@@ -124,7 +124,7 @@ fun SettingsScreen(prefs: Prefs, repo: BitRepository) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = {
                         val v = token.trim()
-                        prefs.setToken(v)
+                        prefs.saveToken(v)
                         if (v.isEmpty()) {
                             status = "Token removed - GitHub's anonymous limit applies." to null
                         } else {
@@ -135,7 +135,7 @@ fun SettingsScreen(prefs: Prefs, repo: BitRepository) {
                     OutlinedButton(enabled = !testing, onClick = { test() }) { Text("Test") }
                     OutlinedButton(onClick = {
                         token = ""
-                        prefs.setToken("")
+                        prefs.saveToken("")
                         status = "Token removed." to null
                     }) { Text("Remove") }
                 }
