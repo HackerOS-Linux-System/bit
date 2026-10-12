@@ -35,7 +35,7 @@ end
 fn sections_all() -> [string] is
     return ["package", "project", "layout", "build", "default-build", "lib", "edition", "directories",
             "workspace", "hooks", "native-sources", "dependencies", "dev-dependencies",
-            "build-dependencies", "system-dependencies", "commands", "features"]
+            "build-dependencies", "system-dependencies", "commands", "features", "prebuilt", "pack"]
 end
 
 ;; Sections whose keys are chosen by the user (dependency names, command names, feature names).
@@ -69,6 +69,10 @@ fn section_keys(s: string) -> [string] is
         return ["pre-build", "post-build", "pre-install", "post-install", "pre-test", "post-test", "pre-publish", "post-publish"]
     end
     if s == "native-sources" is return ["c", "cpp", "flags", "include"] end
+    if s == "prebuilt" is return ["enable", "mode", "asset", "platform", "verify", "mount"] end
+    if s == "pack" is
+        return ["contents", "compression", "level", "block-size", "output", "files", "asset"]
+    end
     return []
 end
 
@@ -273,6 +277,21 @@ fn check_value(sec: string, key: string, raw: string, off: int, len: int) -> [Fi
     end
     if sec == "default-build" && key == "profile" is
         return one_of(sec, key, raw, ["debug", "release"], off, len)
+    end
+    if sec == "prebuilt" && key == "mode" is
+        return one_of(sec, key, raw, ["auto", "only"], off, len)
+    end
+    if sec == "prebuilt" && key == "enable" is
+        return one_of(sec, key, raw, ["true", "false", "yes", "no", "on", "off"], off, len)
+    end
+    if sec == "prebuilt" && key == "verify" is
+        return one_of(sec, key, raw, ["auto", "require", "off"], off, len)
+    end
+    if sec == "prebuilt" && key == "mount" is
+        return one_of(sec, key, raw, ["auto", "fuse", "kernel", "extract"], off, len)
+    end
+    if sec == "pack" && key == "compression" is
+        return one_of(sec, key, raw, ["zstd", "xz", "gzip", "lz4", "lzo"], off, len)
     end
     if sec == "lib" && key == "output" is
         return one_of(sec, key, raw, ["hlib", "so", "a", "obj", "rlib", "lib", "static", "archive", "shared",
