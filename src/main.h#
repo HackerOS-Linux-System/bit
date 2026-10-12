@@ -49,6 +49,7 @@ fn main() is
     let mut pos:       [string] = []
     let mut passthru:  string = ""
     let mut dev:       bool   = false
+    let mut no_sources: bool  = false
     let mut special:   bool   = false
     let mut features:  string = ""
     let mut ver:       string = ""     ;; virus style:  bit install crates itoa --version 1.0
@@ -91,6 +92,14 @@ fn main() is
                 "--locked"         => is env_set("BIT_LOCKED", "1") end
                 "--dev"            => is dev = true end
                 "--special"        => is special = true end
+                "--prebuilt"       => is env_set("BIT_PREBUILT", "auto") end        ;; .bit packages from GitHub releases (fall back to source)
+                "--prebuilt-only"  => is env_set("BIT_PREBUILT", "only") end        ;; … and never build from source
+                "--no-prebuilt" | "--from-source" => is env_set("BIT_PREBUILT", "off") end
+                "--no-sources"     => is no_sources = true end                      ;; bit pack: leave the sources out of the .bit
+                "--mount"          => is
+                    i += 1
+                    env_set("BIT_MOUNT", arg_at(args, i))                           ;; auto | fuse | kernel | extract
+                end
                 "--wasm"           => is env_set("BIT_SEL_WASM", "1") end
                 "--jar"            => is env_set("BIT_SEL_JAR", "1") end
                 "--library"        => is env_set("BIT_SEL_RLIB", "1") end
@@ -203,6 +212,8 @@ fn main() is
             end
             "commands" => is rc = cli::cmd_commands() end
             "publish" => is rc = cli::cmd_publish() end
+            "pack" => is rc = cli::cmd_pack(debug, verbose, output, platform, no_build, no_sources, use_lock) end
+            "pkg" | "package" => is rc = cli::cmd_pkg(first, arg_at(pos, 1), arg_at(pos, 2), everything) end
             "install" | "i" => is
                 if array_len(pos) >= 2 && cli::is_virus_source(first) is
                     rc = cli::cmd_install_source(first, arg_at(pos, 1), ver, output, target, no_build, release, verbose, dev)
