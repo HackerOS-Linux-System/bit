@@ -1,0 +1,873 @@
+mod util
+mod ui
+mod net
+mod task
+mod semver
+mod hk
+mod lock
+mod checksum
+mod project
+mod build
+
+;; ── .bit — bit's own package format ──────────────────────────────────────────
+;;
+;; A `.bit` file is a SquashFS image holding a library that is ALREADY COMPILED:
+;;
+;;   Bit.hk                       the library's manifest
+;;   <name>.hlib   ->  .bit/out/<name>.hlib        the compiled library (+ lib<name>.a / .so / <name>.o)
+;;   src/ …                       the sources (optional, `[pack] contents`) — keeps `use "bit -> name"` working
+;;   README.md LICENSE docs/      (optional)
+;;   .bit/package.hk              what is inside, which commit / platform / compiler it was built with
+;;   .bit/SHA256SUMS              checksum of every file
+;;
+;; Why not a tarball (.crate): a tar has to be unpacked and — in Cargo — every crate is then compiled on
+;; the user's machine. A `.bit` is opened in place (squashfuse / loop mount) — nothing is unpacked, nothing is
+;; compiled — and the layout is exactly what the H# compiler already looks for in an installed library
+;; (`<lib>/<name>.hlib`, `<lib>/.bit/out/<name>.hlib`), so `use "hlib -> name"` works with no compiler change.
+;;
+;; Where it comes from: the GitHub (or Codeberg) RELEASE of the library's repository, an asset named
+;; `<name>-<version>-<platform>.bit` (+ `<same>.sha256`). `bit pack` makes it, `[prebuilt]` / `--prebuilt` uses it.
+
+pub fn format_version() -> string is return "1" end
+
+;; ── Platform / names ─────────────────────────────────────────────────────────
+
+;; `linux-x86_64`, `linux-aarch64`, … (the same spelling as `--platform`)
+pub fn host_platform() -> string is
+    let o: string = env_get("BIT_PLATFORM")
+    if o != "" is return o end
+    let os: string = string_lower(util::capture("uname -s"))
+    let mut arch: string = string_lower(util::capture("uname -m"))
+    if arch == "arm64" is arch = "aarch64" end
+    if arch == "amd64" is arch = "x86_64" end
+    return os + "-" + arch
+end
+
+pub fn strip_v(tag: string) -> string is
+    if string_len(tag) > 1 && (string_starts_with(tag, "v") || string_starts_with(tag, "V")) &&
+       semver::parse(string_slice(tag, 1, string_len(tag))) >= 0 is
+        return string_slice(tag, 1, string_len(tag))
+    end
+    return tag
+end
+
+;; `{name}-{version}-{platform}.bit` unless `pattern` says otherwise.
+pub fn asset_name(pattern: string, name: string, version: string, platform: string) -> string is
+    let pat: string = util::or_default(pattern, "{name}-{version}-{platform}.bit")
+    let a: string = string_replace(pat, "{name}", name)
+    let b: string = string_replace(a, "{version}", version)
+    return string_replace(b, "{platform}", platform)
+end
+
+;; ── Settings: Bit.hk [prebuilt] / [pack], flags, environment ─────────────────
+;;
+;;   [prebuilt]                            use .bit packages from GitHub releases for [dependencies]
+;;   -> enable   => true                   (default true when the section exists)
+;;   -> mode     => auto                   auto = fall back to building from source · only = never build from source
+;;   -> asset    => {name}-{version}-{platform}.bit
+;;   -> platform => linux-x86_64           (default: this machine)
+;;   -> verify   => auto                   auto = check <asset>.sha256 when there is one · require · off
+;;   -> mount    => auto                   auto | fuse | kernel | extract
+;;
+;;   [pack]                                what `bit pack` puts in the .bit
+;;   -> contents    => [hlib, sources, docs]       hlib a so obj sources docs
+;;   -> compression => zstd                zstd | xz | gzip | lz4 | lzo
+;;   -> level       => 15                  (zstd 1-22)
+;;   -> block-size  => 131072
+;;   -> output      => dist                directory for the finished file
+;;   -> files       => [extra/data.bin]    more files from the project root
+;;   -> asset       => {name}-{version}-{platform}.bit
+;;
+;; Environment (flags and `bit settings` set these): BIT_PREBUILT = off | auto | only, BIT_MOUNT = auto | fuse | kernel | extract.
+
+;; off | auto | only | "" (not a mode)
+pub fn norm_mode(raw: string) -> string is
+    let v: string = string_lower(string_trim(raw))
+    if v == "" is return "" end
+    if v == "off" || v == "false" || v == "no" || v == "0" || v == "never" || v == "source" is return "off" end
+    if v == "auto" || v == "true" || v == "yes" || v == "1" || v == "on" || v == "prefer" is return "auto" end
+    if v == "only" || v == "always" || v == "require" || v == "strict" || v == "required" is return "only" end
+    return ""
+end
+
+pub fn mode_valid(raw: string) -> bool is
+    return string_trim(raw) == "" || norm_mode(raw) != ""
+end
+
+;; The mode that applies to project `p`:  environment (flag / `bit settings`) > Bit.hk [prebuilt] > off.
+pub fn mode(p: project::Project) -> string is
+    let e: string = norm_mode(env_get("BIT_PREBUILT"))
+    if e != "" is return e end
+    if !project::is_loaded(p) || !project::has_section(p, "prebuilt") is return "off" end
+    let en: string = string_lower(project::get(p, "prebuilt", "enable", "true"))
+    if en == "false" || en == "no" || en == "0" || en == "off" is return "off" end
+    let m: string = norm_mode(project::get(p, "prebuilt", "mode", "auto"))
+    if m == "" || m == "off" is return "auto" end
+    return m
+end
+
+pub fn mode_here() -> string is
+    return mode(project::load_here())
+end
+
+pub fn conf(key: string, fallback: string) -> string is
+    let p: project::Project = project::load_here()
+    if !project::is_loaded(p) is return fallback end
+    return project::get(p, "prebuilt", key, fallback)
+end
+
+pub fn mount_mode() -> string is
+    let e: string = string_lower(env_get("BIT_MOUNT"))
+    if e != "" is return e end
+    return string_lower(conf("mount", "auto"))
+end
+
+pub fn verify_mode() -> string is
+    let v: string = string_lower(conf("verify", "auto"))
+    if v == "require" || v == "off" is return v end
+    return "auto"
+end
+
+;; ── Where an installed .bit lives ────────────────────────────────────────────
+;;   <libs>/<name>/<short>/        the mount point — the directory the H# compiler looks into
+;;   <libs>/<name>/<short>.bit     the SquashFS image (a file: the compiler skips it)
+;;   [directories] file => project:   <libs>/<name>/ and <libs>/<name>.bit
+
+pub fn mount_dir(name: string, short: string) -> string is
+    if util::libs_flat() is return util::libs_dir() + "/" + name end
+    return util::libs_dir() + "/" + name + "/" + short
+end
+
+pub fn image_path(name: string, short: string) -> string is
+    if util::libs_flat() is return util::libs_dir() + "/" + name + ".bit" end
+    return util::libs_dir() + "/" + name + "/" + short + ".bit"
+end
+
+;; Is `dir` an opened .bit (mounted or unpacked)?
+pub fn is_packaged(dir: string) -> bool is
+    return file_exists(dir + "/.bit/package.hk")
+end
+
+;; ── Opening / closing (mount, never unpack — unless nothing else works) ──────
+
+fn fuse_tool() -> string is
+    return util::first_tool(["squashfuse", "squashfuse_ll"])
+end
+
+fn is_root() -> bool is
+    return util::capture("id -u") == "0"
+end
+
+pub fn is_mounted(dir: string) -> bool is
+    return util::run("mountpoint -q " + util::sq(dir) + " 2>/dev/null") == 0
+end
+
+;; Hint shown when no way of opening an image is available.
+pub fn tools_hint() -> string is
+    return "install squashfuse (no root needed) or squashfs-tools:  apt install squashfuse squashfs-tools   (pacman -S squashfuse squashfs-tools · dnf install squashfuse squashfs-tools)"
+end
+
+;; Opens `image` at `dir`. Returns how it was done — "mounted" (already open) | "fuse" | "kernel" | "extract" — or ""
+;; when it could not be opened.
+pub fn open(image: string, dir: string, verbose: bool) -> string is
+    if is_packaged(dir) is return "mounted" end
+    if !file_exists(image) is return "" end
+    util::mkdir_p(dir)
+    let m: string = mount_mode()
+    let out: string = if verbose then "" else " >/dev/null 2>&1"
+    if m == "auto" || m == "fuse" is
+        let t: string = fuse_tool()
+        if t != "" is
+            util::run(t + " " + util::sq(image) + " " + util::sq(dir) + out)
+            if is_packaged(dir) is return "fuse" end
+        end
+    end
+    if (m == "auto" || m == "kernel") && is_root() is
+        util::run("mount -t squashfs -o loop,ro " + util::sq(image) + " " + util::sq(dir) + out)
+        if is_packaged(dir) is return "kernel" end
+    end
+    if m == "auto" || m == "extract" is
+        if util::tool_exists("unsquashfs") is
+            util::run("unsquashfs -no-progress -f -d " + util::sq(dir) + " " + util::sq(image) + " >/dev/null 2>&1")
+            if is_packaged(dir) is return "extract" end
+        end
+    end
+    return ""
+end
+
+;; Unmounts `dir` if it is a mount point (an unpacked copy is left for the caller to delete).
+pub fn close(dir: string) is
+    if !dir_exists(dir) is return end
+    if !is_mounted(dir) is return end
+    util::run("fusermount3 -u " + util::sq(dir) + " 2>/dev/null || fusermount -u " + util::sq(dir) +
+              " 2>/dev/null || umount " + util::sq(dir) + " 2>/dev/null || fusermount3 -uz " + util::sq(dir) +
+              " 2>/dev/null || umount -l " + util::sq(dir) + " 2>/dev/null")
+end
+
+;; Unmounts every version directory of `<libs>/<name>/` (before the library is removed).
+pub fn close_all(lib_root: string) is
+    if !dir_exists(lib_root) is return end
+    let listing: string = util::capture("find " + util::sq(lib_root) + " -mindepth 1 -maxdepth 1 -type d 2>/dev/null")
+    if listing == "" is return end
+    let dirs: [string] = string_split(listing, "\n")
+    let mut i: int = 0
+    while i < array_len(dirs) is
+        if dirs[i] != "" is close(dirs[i]) end
+        i += 1
+    end
+end
+
+;; Makes sure the .bit installed as `name` (commit `short`) is open. false = could not be opened.
+pub fn ensure_open(name: string, short: string, verbose: bool) -> bool is
+    let dir: string = mount_dir(name, short)
+    if is_packaged(dir) is return true end
+    let how: string = open(image_path(name, short), dir, verbose)
+    if how == "" is
+        ui::bad(name + "  " + ui::red("cannot open " + image_path(name, short)))
+        ui::note(tools_hint())
+        return false
+    end
+    if how == "extract" is
+        ui::warn(name + ": no squashfuse / mount available — the package was unpacked instead of mounted")
+    end
+    return true
+end
+
+;; ── Reading a .bit without opening it ────────────────────────────────────────
+
+;; Text of one file inside an image ("" when it cannot be read).
+pub fn read_inside(image: string, path: string) -> string is
+    if util::tool_exists("unsquashfs") is
+        let t: string = shell("unsquashfs -no-progress -cat " + util::sq(image) + " " + util::sq(path) + " 2>/dev/null")
+        if t != "" is return t end
+    end
+    let tmp: string = util::tmp_dir() + "/peek-" + to_string(proc_id())
+    util::rm_rf(tmp)
+    let how: string = open(image, tmp, false)
+    if how == "" is
+        util::rm_rf(tmp)
+        return ""
+    end
+    let text: string = if file_exists(tmp + "/" + path) then file_read(tmp + "/" + path) else ""
+    close(tmp)
+    util::rm_rf(tmp)
+    return text
+end
+
+pub fn meta_of(image: string) -> hk::Hk is
+    let t: string = read_inside(image, ".bit/package.hk")
+    if t == "" is return hk::hk_empty() end
+    return hk::hk_parse_at(image + ":.bit/package.hk", t)
+end
+
+;; ── Downloading from the repository's releases ───────────────────────────────
+
+;; `https://github.com/org/repo[.git]` -> that, normalised; "" for hosts without a releases page we know.
+pub fn release_base(url: string) -> string is
+    let mut u: string = string_trim(url)
+    if string_ends_with(u, "/") is u = string_slice(u, 0, string_len(u) - 1) end
+    if string_ends_with(u, ".git") is u = string_slice(u, 0, string_len(u) - 4) end
+    if string_starts_with(u, "git@github.com:") is u = "https://github.com/" + string_slice(u, 15, string_len(u)) end
+    if string_starts_with(u, "https://github.com/") || string_starts_with(u, "https://codeberg.org/") is return u end
+    return ""
+end
+
+fn curl_base() -> string is
+    let limit: string = if net::timeout_s() > 0 then " --max-time " + to_string(net::timeout_s() * 3) else ""
+    return "curl -fsSL --connect-timeout 15" + limit + " "
+end
+
+;; Is there a file at `url`? (a one-byte range request: cheap, and release assets answer it)
+fn exists_remote(url: string) -> bool is
+    return util::run("curl -fsSL --connect-timeout 15 --max-time 40 -r 0-0 -o /dev/null " + util::sq(url) + " >/dev/null 2>&1") == 0
+end
+
+;; The tag of the newest release ("" = none). `/releases/latest` redirects to `/releases/tag/<tag>`.
+pub fn latest_tag(base: string) -> string is
+    let eff: string = util::capture("curl -fsSLI --connect-timeout 15 --max-time 40 -o /dev/null -w '%{url_effective}' " +
+                                    util::sq(base + "/releases/latest") + " 2>/dev/null")
+    if string_contains(eff, "/releases/tag/") is
+        return string_slice(eff, string_find(eff, "/releases/tag/") + 14, string_len(eff))
+    end
+    ;; no redirect (proxy, mirror): the newest version tag — the asset lookup tells whether it is a release
+    return semver::newest_tag(net::remote_tags(base))
+end
+
+fn is_tag_like(rev: string) -> bool is
+    if rev == "" is return false end
+    return semver::parse(strip_v(rev)) >= 0
+end
+
+fn push_unique(items: [string], v: string) -> [string] is
+    if v == "" || util::array_has(items, v) is return items end
+    return array_push(items, v)
+end
+
+;; Result of trying to install a library from a release.
+pub struct Got is
+    pub g_state:   int      ;; 0 installed · 1 failed (do not fall back) · 2 no release asset (may fall back)
+    pub g_msg:     string
+    pub g_commit:  string   ;; commit the package was built from (or the image's sha256 when it says none)
+    pub g_tag:     string
+    pub g_sum:     string   ;; sha256 (hex) of the image
+    pub g_lang:    string
+    pub g_how:     string   ;; fuse | kernel | extract
+end
+
+fn got_none(state: int, msg: string) -> Got is
+    return Got { g_state: state, g_msg: msg, g_commit: "", g_tag: "", g_sum: "", g_lang: "", g_how: "" }
+end
+
+;; hex digest from a `.sha256` file's text ("<hex>  <file>" or just "<hex>")
+fn digest_of(text: string) -> string is
+    let lines: [string] = string_split(string_trim(text), "\n")
+    if array_len(lines) == 0 is return "" end
+    let ws: [string] = util::words(lines[0])
+    if array_len(ws) == 0 is return "" end
+    let w: string = string_lower(ws[0])
+    if string_len(w) == 64 is return w end
+    return ""
+end
+
+;; Downloads and installs <name> from the release of the repository at `url`.
+;;   rev: "" = the newest release · a tag (`v1.2.0`) · anything else is not a release (-> state 2)
+pub fn install(name: string, url: string, rev: string, verbose: bool) -> Got is
+    let base: string = release_base(url)
+    if base == "" is return got_none(2, "the repository is not on GitHub / Codeberg — there are no release assets to fetch") end
+    let mut tag: string = ""
+    if rev == "" is
+        tag = latest_tag(base)
+        if tag == "" is return got_none(2, "the repository has no releases") end
+    else if is_tag_like(rev) is
+        tag = rev
+    else is
+        return got_none(2, "'" + rev + "' is a branch / commit, not a release tag")
+    end
+    let version: string = strip_v(tag)
+    let plat: string = util::or_default(conf("platform", ""), host_platform())
+    let pattern: string = conf("asset", "")
+
+    ;; candidate file names: the index name, its lower-case form, the repository's name
+    let repo: string = util::basename(base)
+    let mut names: [string] = []
+    names = push_unique(names, name)
+    names = push_unique(names, string_lower(name))
+    names = push_unique(names, string_lower(repo))
+    let mut versions: [string] = []
+    versions = push_unique(versions, version)
+    versions = push_unique(versions, tag)
+
+    let mut found_url: string = ""
+    let mut found_asset: string = ""
+    let mut ni: int = 0
+    while found_url == "" && ni < array_len(names) is
+        let mut vi: int = 0
+        while found_url == "" && vi < array_len(versions) is
+            let asset: string = asset_name(pattern, names[ni], versions[vi], plat)
+            let u: string = base + "/releases/download/" + tag + "/" + asset
+            if exists_remote(u) is
+                found_url = u
+                found_asset = asset
+            end
+            vi += 1
+        end
+        ni += 1
+    end
+    if found_url == "" is
+        return got_none(2, "release " + tag + " has no asset " + asset_name(pattern, name, version, plat))
+    end
+
+    util::mkdir_p(util::tmp_dir())
+    let tmp: string = util::tmp_dir() + "/" + found_asset + "." + to_string(proc_id())
+    util::rm_rf(tmp)
+    let cmd: string = curl_base() + util::sq(found_url) + " -o " + util::sq(tmp)
+    if task::run("downloading " + found_asset, cmd, verbose, false) != 0 is
+        util::run("rm -f " + util::sq(tmp))
+        return got_none(1, "download failed: " + found_url)
+    end
+
+    ;; integrity: <asset>.sha256 next to it
+    let sum: string = checksum::file_sha256(tmp)
+    let vm: string = verify_mode()
+    if vm != "off" is
+        let side: string = util::capture(curl_base() + util::sq(found_url + ".sha256") + " 2>/dev/null")
+        let want: string = if side == "" then "" else digest_of(side)
+        if want != "" && want != sum is
+            util::run("rm -f " + util::sq(tmp))
+            return got_none(1, "checksum mismatch for " + found_asset + " — release says " + want + ", got " + sum)
+        end
+        if want == "" && vm == "require" is
+            util::run("rm -f " + util::sq(tmp))
+            return got_none(1, found_asset + ".sha256 is missing from the release ([prebuilt] verify => require)")
+        end
+        if want == "" is ui::note(found_asset + ".sha256 not found in the release — not verified") end
+    end
+
+    ;; what is inside
+    let meta: hk::Hk = meta_of(tmp)
+    if !hk::hk_has_section(meta, "package") is
+        util::run("rm -f " + util::sq(tmp))
+        return got_none(1, found_asset + " is not a valid .bit package (no .bit/package.hk) — " + tools_hint())
+    end
+    let fv: string = hk::hk_get(meta, "bit", "format", "1")
+    if fv != format_version() is
+        util::run("rm -f " + util::sq(tmp))
+        return got_none(1, found_asset + " uses .bit format " + fv + "; this bit reads format " + format_version() + " — update bit")
+    end
+    let pkg_plat: string = hk::hk_get(meta, "bit", "platform", plat)
+    if pkg_plat != plat is
+        util::run("rm -f " + util::sq(tmp))
+        return got_none(1, found_asset + " is for " + pkg_plat + ", not " + plat)
+    end
+    let commit: string = util::or_default(hk::hk_get(meta, "package", "commit", ""), sum)
+    let short: string = util::short_hash(commit)
+
+    ;; place the image, open it
+    let img: string = image_path(name, short)
+    let dir: string = mount_dir(name, short)
+    close(dir)
+    util::rm_rf(dir)
+    util::mkdir_p(util::dirname(img))
+    if util::run("mv -f " + util::sq(tmp) + " " + util::sq(img)) != 0 is
+        util::run("rm -f " + util::sq(tmp))
+        return got_none(1, "cannot store the package at " + img)
+    end
+    let how: string = open(img, dir, verbose)
+    if how == "" is
+        return got_none(1, "cannot open " + img + " — " + tools_hint())
+    end
+    if how == "extract" is
+        ui::warn(name + ": no squashfuse / mount available — the package was unpacked instead of mounted")
+    end
+    return Got { g_state: 0, g_msg: "", g_commit: commit, g_tag: tag, g_sum: sum,
+                 g_lang: hk::hk_get(meta, "package", "lang", ""), g_how: how }
+end
+
+;; ── bit pack ─────────────────────────────────────────────────────────────────
+
+fn contents_of(p: project::Project) -> [string] is
+    let raw: string = project::get(p, "pack", "contents", "")
+    if raw == "" is return ["hlib", "sources", "docs"] end
+    return hk::hk_list(raw)
+end
+
+fn content_valid(c: string) -> bool is
+    return c == "hlib" || c == "a" || c == "so" || c == "obj" || c == "sources" || c == "docs"
+end
+
+fn artifact_file(name: string, kind: string) -> string is
+    if kind == "so" is return "lib" + name + ".so" end
+    if kind == "a" is return "lib" + name + ".a" end
+    if kind == "obj" is return name + ".o" end
+    return name + ".hlib"
+end
+
+fn sha_tool() -> string is
+    if util::tool_exists("sha256sum") is return "sha256sum" end
+    return "shasum -a 256"
+end
+
+fn compression_ok(c: string) -> bool is
+    return c == "zstd" || c == "xz" || c == "gzip" || c == "lz4" || c == "lzo"
+end
+
+;; Copies `rel` (a file or directory of the project) into the staging tree, keeping its path.
+fn stage_copy(root: string, stage: string, rel: string) is
+    if rel == "" || string_starts_with(rel, "/") || string_contains(rel, "..") is return end
+    if !file_exists(root + "/" + rel) && !dir_exists(root + "/" + rel) is return end
+    util::run("cd " + util::sq(root) + " && cp -a --parents " + util::sq(rel) + " " + util::sq(stage))
+end
+
+;; The files `docs` stands for.
+fn stage_docs(root: string, stage: string) is
+    let listing: string = util::capture("cd " + util::sq(root) + " && ls -1 2>/dev/null | grep -i -E '^(readme|license|licence|copying|notice|changelog)' ")
+    if listing != "" is
+        let names: [string] = string_split(listing, "\n")
+        let mut i: int = 0
+        while i < array_len(names) is
+            if names[i] != "" is stage_copy(root, stage, names[i]) end
+            i += 1
+        end
+    end
+    stage_copy(root, stage, "docs")
+end
+
+fn bit_version_text() -> string is
+    return "bit-pack/" + format_version()
+end
+
+;; Builds the library and packs it into  <output>/<name>-<version>-<platform>.bit  (+ .sha256).
+;; The caller has installed the dependencies already. Returns 0 on success.
+pub fn pack(p: project::Project, release: bool, verbose: bool, out_opt: string, platform_opt: string,
+            no_build: bool, no_sources: bool) -> int is
+    let name: string = project::name_of(p)
+    let version: string = project::version_of(p)
+    let root: string = project::root_of(p)
+    if !util::valid_name(name) is
+        ui::fail("package name '" + name + "' is not valid")
+        return 1
+    end
+    if array_len(project::members(p)) > 0 is
+        ui::fail("this is a workspace — run `bit pack` inside the library you want to pack")
+        return 1
+    end
+    let langs: [string] = project::langs(p)
+    if array_len(langs) == 0 is
+        ui::fail("no language detected (set [package] -> lang)")
+        return 1
+    end
+    let lang: string = langs[0]
+    if project::entry_for(p, lang, "lib") == "" is
+        ui::fail("no library entry point (src/lib.h#, lib/mod.hcs or [layout] -> lib-entry) — only libraries can be packed")
+        return 1
+    end
+    if project::link_mode(p) != "static" is
+        ui::fail("[build] -> link must be static")
+        return 1
+    end
+    if build::static_offenders(p) != "" is
+        ui::fail("the library uses `extern dynamic` — .bit packages are linked statically")
+        return 1
+    end
+    if !util::tool_exists("mksquashfs") is
+        ui::fail("mksquashfs not found — " + tools_hint())
+        return 1
+    end
+
+    ;; what goes in
+    let mut contents: [string] = contents_of(p)
+    let mut ci: int = 0
+    while ci < array_len(contents) is
+        if !content_valid(contents[ci]) is
+            ui::fail("[pack] -> contents: '" + contents[ci] + "' is not valid (hlib, a, so, obj, sources, docs)")
+            return 1
+        end
+        ci += 1
+    end
+    if !util::array_has(contents, "hlib") && !util::array_has(contents, "a") && !util::array_has(contents, "so") && !util::array_has(contents, "obj") is
+        ui::fail("[pack] -> contents needs at least one compiled form: hlib, a, so or obj")
+        return 1
+    end
+    let comp: string = string_lower(project::get(p, "pack", "compression", "zstd"))
+    if !compression_ok(comp) is
+        ui::fail("[pack] -> compression => " + comp + " is not valid (zstd, xz, gzip, lz4, lzo)")
+        return 1
+    end
+    let level: string = project::get(p, "pack", "level", "15")
+    let block: string = project::get(p, "pack", "block-size", "131072")
+    let plat: string = util::or_default(platform_opt, util::or_default(project::get(p, "build", "platform", ""), host_platform()))
+    let out_dir_rel: string = util::or_default(out_opt, project::get(p, "pack", "output", "dist"))
+    let out_dir: string = if string_starts_with(out_dir_rel, "/") then out_dir_rel else root + "/" + out_dir_rel
+    let asset: string = asset_name(project::get(p, "pack", "asset", ""), name, version, plat)
+
+    ;; 1. compile
+    let kinds: [string] = ["hlib", "a", "so", "obj"]
+    let mut built_dir: string = ""
+    if !no_build is
+        let mut ki: int = 0
+        while ki < array_len(kinds) is
+            if util::array_has(contents, kinds[ki]) is
+                let bo: build::BuildOpts = build::opts_new(release, verbose, "", platform_opt, kinds[ki])
+                ui::line(ui::cyan("▸") + " " + ui::bold("compiling " + artifact_file(name, kinds[ki])))
+                if build::build_project(p, bo) != 0 is
+                    ui::fail("build failed — nothing was packed")
+                    return 1
+                end
+                built_dir = build::out_dir(p, bo)
+            end
+            ki += 1
+        end
+    else is
+        built_dir = project::cache_build(p) + "/" + (if release then "release" else "debug")
+    end
+
+    ;; 2. staging tree
+    util::mkdir_p(util::tmp_dir())
+    let stage: string = util::tmp_dir() + "/pack-" + name + "-" + to_string(proc_id())
+    util::rm_rf(stage)
+    util::mkdir_p(stage + "/.bit/out")
+    let mut ki2: int = 0
+    while ki2 < array_len(kinds) is
+        if util::array_has(contents, kinds[ki2]) is
+            let f: string = artifact_file(name, kinds[ki2])
+            if !file_exists(built_dir + "/" + f) is
+                ui::fail("expected " + built_dir + "/" + f + " — it was not built")
+                util::rm_rf(stage)
+                return 1
+            end
+            util::run("cp -f " + util::sq(built_dir + "/" + f) + " " + util::sq(stage + "/.bit/out/" + f))
+            util::run("ln -sfn " + util::sq(".bit/out/" + f) + " " + util::sq(stage + "/" + f))
+        end
+        ki2 += 1
+    end
+    if project::manifest_of(p) != "" is
+        util::run("cp -f " + util::sq(project::manifest_of(p)) + " " + util::sq(stage + "/Bit.hk"))
+    end
+    if util::array_has(contents, "sources") && !no_sources is
+        stage_copy(root, stage, project::src_dir(p))
+        if lang == "hackerscript" is
+            stage_copy(root, stage, project::lib_dir(p))
+        end
+        stage_copy(root, stage, project::entry_for(p, lang, "lib"))
+    end
+    if util::array_has(contents, "docs") is stage_docs(root, stage) end
+    let extra: [string] = hk::hk_list(project::get(p, "pack", "files", ""))
+    let mut ei: int = 0
+    while ei < array_len(extra) is
+        stage_copy(root, stage, extra[ei])
+        ei += 1
+    end
+
+    ;; 3. what is inside
+    let commit: string = util::capture("git -C " + util::sq(root) + " rev-parse HEAD 2>/dev/null")
+    let compiler: string = if lang == "hsharp" && build::tool_for("hsharp") != "" then util::capture(build::tool_for("hsharp") + " --version 2>/dev/null | head -n 1") else ""
+    let mut meta: string = "! written by `bit pack` — read by `bit install` / `bit pkg info`\n"
+    meta = meta + "[package]\n"
+    meta = meta + "-> name => " + name + "\n"
+    meta = meta + "-> version => " + version + "\n"
+    meta = meta + "-> lang => " + lang + "\n"
+    if commit != "" is meta = meta + "-> commit => " + commit + "\n" end
+    let desc: string = string_replace(project::get(p, "package", "description", ""), "\n", " ")
+    if desc != "" is meta = meta + "-> description => \"" + string_replace(desc, "\"", "'") + "\"\n" end
+    if project::get(p, "package", "license", "") != "" is meta = meta + "-> license => " + project::get(p, "package", "license", "") + "\n" end
+    meta = meta + "\n[bit]\n"
+    meta = meta + "-> format => " + format_version() + "\n"
+    meta = meta + "-> platform => " + plat + "\n"
+    meta = meta + "-> created => " + util::now_iso() + "\n"
+    meta = meta + "-> contents => [" + util::join(contents, ", ") + "]\n"
+    meta = meta + "-> compression => " + comp + "\n"
+    meta = meta + "-> profile => " + (if release then "release" else "debug") + "\n"
+    if compiler != "" is meta = meta + "-> compiler => \"" + string_replace(compiler, "\"", "'") + "\"\n" end
+    meta = meta + "-> packer => " + bit_version_text() + "\n"
+    file_write(stage + "/.bit/package.hk", meta)
+    util::run("cd " + util::sq(stage) + " && find . -type f ! -path './.bit/SHA256SUMS' -print0 | LC_ALL=C sort -z | xargs -0 " +
+              sha_tool() + " > .bit/SHA256SUMS 2>/dev/null")
+
+    ;; 4. squashfs
+    util::mkdir_p(out_dir)
+    let image: string = out_dir + "/" + asset
+    util::run("rm -f " + util::sq(image))
+    let lvl: string = if comp == "zstd" then " -Xcompression-level " + level else ""
+    let base_cmd: string = "mksquashfs " + util::sq(stage) + " " + util::sq(image) + " -noappend -all-root -no-xattrs -quiet -no-progress -b " + block
+    let mut rc: int = util::run(base_cmd + " -comp " + comp + lvl + (if verbose then "" else " >/dev/null 2>&1"))
+    if rc != 0 && comp == "zstd" is
+        ui::warn("this mksquashfs has no zstd — packing with xz")
+        rc = util::run(base_cmd + " -comp xz" + (if verbose then "" else " >/dev/null 2>&1"))
+    end
+    util::rm_rf(stage)
+    if rc != 0 || !file_exists(image) is
+        ui::fail("mksquashfs failed" + (if verbose then "" else " (run again with --verbose)"))
+        return 1
+    end
+    let sum: string = checksum::file_sha256(image)
+    file_write(image + ".sha256", sum + "  " + asset + "\n")
+    let size: string = util::capture("du -h " + util::sq(image) + " | cut -f1")
+
+    ui::blank()
+    ui::ok(ui::bold(asset) + "  " + ui::dim(size + "  " + plat + "  " + util::join(contents, "+")))
+    ui::line(string_pad_right("file", 10) + image)
+    ui::line(string_pad_right("sha256", 10) + sum + "  " + ui::dim("(" + asset + ".sha256)"))
+    ui::blank()
+    ui::note("publish: attach both files to the GitHub release of tag v" + version + "   (gh release upload v" + version + " " + image + " " + image + ".sha256)")
+    ui::note("use:     bit install --prebuilt " + name + "        or  [prebuilt] in the Bit.hk of a project")
+    return 0
+end
+
+;; ── bit pkg … ────────────────────────────────────────────────────────────────
+
+fn short_of(e: lock::Locked) -> string is
+    return util::short_hash(lock::locked_commit(e))
+end
+
+;; (image, mount dir) for "name" (an installed library) — ["", ""] when it is not an installed .bit.
+fn installed_paths(name: string) -> [string] is
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    let e: lock::Locked = lock::lock_get(gl, name)
+    if lock::locked_name(e) == "" || lock::locked_output(e) != "bit" is return ["", ""] end
+    return [image_path(name, short_of(e)), mount_dir(name, short_of(e))]
+end
+
+fn field(label: string, value: string) is
+    if value != "" is ui::line(string_pad_right(label, 13) + value) end
+end
+
+fn pkg_info(arg: string) -> int is
+    if arg == "" is
+        ui::fail("usage: bit pkg info <file.bit | installed-name>")
+        return 2
+    end
+    let paths: [string] = if file_exists(arg) then [arg, ""] else installed_paths(arg)
+    if paths[0] == "" is
+        ui::fail("'" + arg + "' is neither a .bit file nor an installed .bit package")
+        return 1
+    end
+    let m: hk::Hk = meta_of(paths[0])
+    if !hk::hk_has_section(m, "package") is
+        ui::fail(paths[0] + " is not a .bit package (no .bit/package.hk) — " + tools_hint())
+        return 1
+    end
+    ui::heading(hk::hk_get(m, "package", "name", arg) + " " + ui::dim(hk::hk_get(m, "package", "version", "")))
+    field("description", hk::hk_get(m, "package", "description", ""))
+    field("language", hk::hk_get(m, "package", "lang", ""))
+    field("license", hk::hk_get(m, "package", "license", ""))
+    field("commit", hk::hk_get(m, "package", "commit", ""))
+    field("platform", hk::hk_get(m, "bit", "platform", ""))
+    field("contents", hk::hk_get(m, "bit", "contents", ""))
+    field("compression", hk::hk_get(m, "bit", "compression", ""))
+    field("profile", hk::hk_get(m, "bit", "profile", ""))
+    field("compiler", hk::hk_get(m, "bit", "compiler", ""))
+    field("created", hk::hk_get(m, "bit", "created", ""))
+    field("format", ".bit " + hk::hk_get(m, "bit", "format", ""))
+    field("image", paths[0])
+    field("size", util::capture("du -h " + util::sq(paths[0]) + " | cut -f1"))
+    field("sha256", checksum::file_sha256(paths[0]))
+    if paths[1] != "" is
+        field("state", if is_mounted(paths[1]) then "mounted at " + paths[1] else if is_packaged(paths[1]) then "unpacked at " + paths[1] else "not mounted (bit pkg mount " + arg + ")")
+    end
+    ui::blank()
+    return 0
+end
+
+fn pkg_ls(arg: string) -> int is
+    let paths: [string] = if file_exists(arg) then [arg, ""] else installed_paths(arg)
+    if arg == "" || paths[0] == "" is
+        ui::fail("usage: bit pkg ls <file.bit | installed-name>")
+        return 2
+    end
+    if !util::tool_exists("unsquashfs") is
+        ui::fail("unsquashfs not found — " + tools_hint())
+        return 1
+    end
+    return util::run("unsquashfs -no-progress -ll " + util::sq(paths[0]) + " 2>/dev/null | tail -n +4")
+end
+
+;; Image checksum against its .sha256, then every file inside against .bit/SHA256SUMS.
+fn pkg_verify(arg: string) -> int is
+    let paths: [string] = if file_exists(arg) then [arg, ""] else installed_paths(arg)
+    if arg == "" || paths[0] == "" is
+        ui::fail("usage: bit pkg verify <file.bit | installed-name>")
+        return 2
+    end
+    let img: string = paths[0]
+    let sum: string = checksum::file_sha256(img)
+    let mut bad: int = 0
+    if file_exists(img + ".sha256") is
+        let want: string = digest_of(file_read(img + ".sha256"))
+        if want == sum is ui::ok("image sha256 matches " + util::basename(img) + ".sha256")
+        else is
+            ui::bad("image sha256 differs from " + util::basename(img) + ".sha256")
+            bad += 1
+        end
+    else is
+        ui::note("no " + util::basename(img) + ".sha256 next to the image — image checksum not compared (" + util::short_hash(sum) + ")")
+    end
+    let tmp: string = util::tmp_dir() + "/verify-" + to_string(proc_id())
+    let dir: string = if paths[1] != "" && is_packaged(paths[1]) then paths[1] else tmp
+    if dir == tmp is
+        util::rm_rf(tmp)
+        if open(img, tmp, false) == "" is
+            ui::fail("cannot open " + img + " — " + tools_hint())
+            return 1
+        end
+    end
+    let rc: int = util::run("cd " + util::sq(dir) + " && " + sha_tool() + " -c --quiet .bit/SHA256SUMS >/dev/null 2>&1")
+    if rc == 0 is ui::ok("every file matches .bit/SHA256SUMS")
+    else is
+        ui::bad("files inside differ from .bit/SHA256SUMS")
+        bad += 1
+    end
+    if dir == tmp is
+        close(tmp)
+        util::rm_rf(tmp)
+    end
+    ui::blank()
+    if bad > 0 is return 1 end
+    return 0
+end
+
+;; bit pkg mount [name|--all]   — (re)opens installed packages, e.g. after a reboot
+fn pkg_mount(arg: string, all: bool) -> int is
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    let mut failed: int = 0
+    let mut done: int = 0
+    let mut i: int = 0
+    while i < lock::lock_len(gl) is
+        let e: lock::Locked = lock::lock_at(gl, i)
+        if lock::locked_output(e) == "bit" && (all || arg == "" || arg == lock::locked_name(e)) is
+            if ensure_open(lock::locked_name(e), short_of(e), false) is
+                ui::ok(lock::locked_name(e) + "  " + ui::dim(mount_dir(lock::locked_name(e), short_of(e))))
+                done += 1
+            else is
+                failed += 1
+            end
+        end
+        i += 1
+    end
+    if done + failed == 0 is ui::note("no installed .bit packages" + (if arg != "" then " named " + arg else "")) end
+    if failed > 0 is return 1 end
+    return 0
+end
+
+fn pkg_umount(arg: string, all: bool) -> int is
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    let mut i: int = 0
+    while i < lock::lock_len(gl) is
+        let e: lock::Locked = lock::lock_at(gl, i)
+        if lock::locked_output(e) == "bit" && (all || arg == "" || arg == lock::locked_name(e)) is
+            let d: string = mount_dir(lock::locked_name(e), short_of(e))
+            close(d)
+            ui::ok(lock::locked_name(e) + "  " + ui::dim(if is_mounted(d) then "still busy" else "closed"))
+        end
+        i += 1
+    end
+    return 0
+end
+
+;; bit pkg extract <file.bit> [dir]  — the escape hatch: plain files, no mount.
+fn pkg_extract(arg: string, dest: string) -> int is
+    if arg == "" || !file_exists(arg) is
+        ui::fail("usage: bit pkg extract <file.bit> [dir]")
+        return 2
+    end
+    if !util::tool_exists("unsquashfs") is
+        ui::fail("unsquashfs not found — " + tools_hint())
+        return 1
+    end
+    let d: string = util::or_default(dest, util::basename(arg) + ".d")
+    let rc: int = util::run("unsquashfs -no-progress -f -d " + util::sq(d) + " " + util::sq(arg) + " >/dev/null")
+    if rc == 0 is ui::ok("unpacked to " + d) end
+    return rc
+end
+
+fn pkg_list() -> int is
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    ui::heading("Installed .bit packages")
+    let mut n: int = 0
+    let mut i: int = 0
+    while i < lock::lock_len(gl) is
+        let e: lock::Locked = lock::lock_at(gl, i)
+        if lock::locked_output(e) == "bit" is
+            let d: string = mount_dir(lock::locked_name(e), short_of(e))
+            let st: string = if is_mounted(d) then ui::green("mounted ") else if is_packaged(d) then ui::yellow("unpacked") else ui::red("closed  ")
+            ui::line(string_pad_right(lock::locked_name(e), 20) + st + " " + ui::dim(string_pad_right(util::or_default(lock::locked_tag(e), lock::locked_version(e)), 12) + image_path(lock::locked_name(e), short_of(e))))
+            n += 1
+        end
+        i += 1
+    end
+    if n == 0 is ui::note("none — install one with:  bit install --prebuilt <name>") end
+    ui::blank()
+    return 0
+end
+
+pub fn cmd_pkg(action: string, arg: string, arg2: string, all: bool) -> int is
+    if action == "info" is return pkg_info(arg) end
+    if action == "ls" || action == "files" is return pkg_ls(arg) end
+    if action == "verify" is return pkg_verify(arg) end
+    if action == "mount" || action == "open" is return pkg_mount(arg, all) end
+    if action == "umount" || action == "unmount" || action == "close" is return pkg_umount(arg, all) end
+    if action == "extract" is return pkg_extract(arg, arg2) end
+    if action == "list" || action == "" is return pkg_list() end
+    ui::fail("unknown `bit pkg` action '" + action + "'")
+    ui::note("bit pkg [list] | info <f> | ls <f> | verify <f> | mount [name|--all] | umount [name|--all] | extract <f> [dir]")
+    return 2
+end
