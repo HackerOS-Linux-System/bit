@@ -11,6 +11,7 @@ mod lock
 mod project
 mod build
 mod registry
+mod bitpkg
 
 pub fn lib_root(name: string) -> string is return util::libs_dir() + "/" + name end
 
@@ -47,6 +48,7 @@ pub struct InstallOpts is
     pub io_name:     string   ;; install under this name ("" = the index name / the repository's name)
     pub io_dir:      string   ;; take the library from this directory of the repository ("" = the root)
     pub io_source:   string   ;; recorded in the lock: index | git
+    pub io_bit:      string   ;; per-dependency `prebuilt`: "" = follow [prebuilt] | "false" = from source | "true" = .bit
 end
 
 pub fn iopts(force: bool, do_build: bool, output: string, target: string, platform: string,
@@ -56,7 +58,7 @@ pub fn iopts(force: bool, do_build: bool, output: string, target: string, platfo
         io_lang: index::normalize_lang(target),
         io_platform: if platform != "" then platform else if index::normalize_lang(target) == "" then target else "",
         io_release: release, io_verbose: verbose, io_depth: 0,
-        io_name: "", io_dir: "", io_source: ""
+        io_name: "", io_dir: "", io_source: "", io_bit: ""
     }
 end
 
@@ -64,14 +66,21 @@ end
 pub fn with_origin(o: InstallOpts, name: string, dir: string, source: string) -> InstallOpts is
     return InstallOpts { io_force: o.io_force, io_build: o.io_build, io_output: o.io_output, io_lang: o.io_lang,
                          io_platform: o.io_platform, io_release: o.io_release, io_verbose: o.io_verbose,
-                         io_depth: o.io_depth, io_name: name, io_dir: dir, io_source: source }
+                         io_depth: o.io_depth, io_name: name, io_dir: dir, io_source: source, io_bit: o.io_bit }
+end
+
+;; Same options with the dependency's own `prebuilt` choice ("" | "true" | "false").
+pub fn with_bit(o: InstallOpts, choice: string) -> InstallOpts is
+    return InstallOpts { io_force: o.io_force, io_build: o.io_build, io_output: o.io_output, io_lang: o.io_lang,
+                         io_platform: o.io_platform, io_release: o.io_release, io_verbose: o.io_verbose,
+                         io_depth: o.io_depth, io_name: o.io_name, io_dir: o.io_dir, io_source: o.io_source, io_bit: choice }
 end
 
 fn deeper(o: InstallOpts) -> InstallOpts is
     return InstallOpts { io_force: false, io_build: o.io_build, io_output: "", io_lang: "",
                          io_platform: o.io_platform, io_release: o.io_release,
                          io_verbose: o.io_verbose, io_depth: o.io_depth + 1,
-                         io_name: "", io_dir: "", io_source: "" }
+                         io_name: "", io_dir: "", io_source: "", io_bit: "" }
 end
 
 ;; ── Fetching ─────────────────────────────────────────────────────────────────
@@ -150,6 +159,14 @@ fn build_installed(name: string, dir: string, lang: string, output: string, o: I
     return ""
 end
 
+;; .bit packages: the mode that applies to this install — "off" | "auto" | "only"
+fn effective_bit(o: InstallOpts) -> string is
+    let m: string = bitpkg::mode_here()
+    if o.io_bit == "false" is return "off" end
+    if o.io_bit == "true" && m == "off" is return "auto" end
+    return m
+end
+
 ;; ── Install ──────────────────────────────────────────────────────────────────
 
 
@@ -188,6 +205,27 @@ fn current_project_lang_hint() -> string is
     let langs: [string] = project::langs(p)
     if array_len(langs) == 1 is return langs[0] end
     return ""
+end
+
+;; A .bit package was downloaded and opened: link, lock, install its dependencies.
+fn finish_prebuilt(name: string, url: string, source: string, hint_lang: string, got: bitpkg::Got, o: InstallOpts) -> int is
+    let short: string = util::short_hash(got.g_commit)
+    let dest: string = lib_dir(name, short)
+    if !util::libs_flat() is
+        util::run("ln -sfn " + util::sq(short) + " " + util::sq(current_dir(name)))
+    end
+    let h: hk::Hk = lib_manifest(dest)
+    let lang: string = if got.g_lang != "" then got.g_lang else detect_lang(dest, h, hint_lang)
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    lock::lock_write(lock::global_lock_path(), lock::lock_set(gl, lock::Locked {
+        lk_name: name, lk_version: short, lk_commit: got.g_commit, lk_url: url,
+        lk_checksum: checksum::tag(got.g_sum), lk_lang: lang, lk_output: "bit", lk_at: util::now_iso(),
+        lk_range: "", lk_tag: got.g_tag, lk_source: source, lk_dir: ""
+    }))
+    ui::ok(ui::bold(name) + " " + ui::dim("@ " + util::or_default(got.g_tag, short) + "  " + project::lang_label(lang) +
+           "  .bit (" + got.g_how + ")  sha256:" + util::short_hash(got.g_sum)))
+    if install_lib_deps(name, h, dest, o) != 0 is return 1 end
+    return 0
 end
 
 pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
@@ -258,6 +296,24 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
         return 1
     end
 
+    ;; 1b. a prebuilt .bit package from the repository's GitHub release (opt-in: [prebuilt] / --prebuilt)
+    let bmode: string = effective_bit(o)
+    if bmode != "off" && dir == "" is
+        let got: bitpkg::Got = bitpkg::install(name, url, rev, o.io_verbose)
+        if got.g_state == 0 is
+            return finish_prebuilt(name, url, source, hint_lang, got, o)
+        end
+        if got.g_state == 1 is
+            ui::fail(name + ": " + got.g_msg)
+            return 1
+        end
+        if bmode == "only" is
+            ui::fail(name + ": " + got.g_msg + "  ([prebuilt] mode => only: not building from source)")
+            return 1
+        end
+        ui::note(name + ": " + got.g_msg + " — building from source")
+    end
+
     ui::line(ui::dim("fetching") + " " + ui::bold(name) + "  " + ui::dim(url + (if dir != "" then "  [" + dir + "]" else "")))
     util::mkdir_p(util::tmp_dir())
     let tmp: string = util::tmp_dir() + "/" + name + "-" + to_string(proc_id())
@@ -293,7 +349,11 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
         return 1
     end
     util::mkdir_p(lib_root(name))
-    if dir_exists(dest) is util::rm_rf(dest) end
+    if dir_exists(dest) is
+        bitpkg::close(dest)
+        util::rm_rf(dest)
+    end
+    util::run("rm -f " + util::sq(bitpkg::image_path(name, util::short_hash(commit))))
     if util::run("mv " + util::sq(held) + " " + util::sq(dest)) != 0 is
         ui::fail("cannot move the library into " + dest)
         util::rm_rf(tmp)
@@ -365,6 +425,10 @@ fn install_one_lib_dep(owner: string, d: project::Dep, dest: string, o: InstallO
         return 0
     end
     if project::is_registry_kind(kind) || project::is_builtin_kind(kind) is
+        if bitpkg::is_packaged(dest) is
+            ui::note(owner + ": '" + project::dep_name(d) + "' is already compiled into the .bit package — skipped")
+            return 0
+        end
         let v: string = install_registry(dest + "/.bit/libs", d, "", false, false, o.io_verbose)
         if v == "" is return 1 end
         return 0
@@ -378,7 +442,7 @@ fn install_one_lib_dep(owner: string, d: project::Dep, dest: string, o: InstallO
             return 1
         end
     end
-    let dopts: InstallOpts = with_origin(deeper(o), project::dep_name(d), project::dep_dir(d), if kind == "git" then "git" else "index")
+    let dopts: InstallOpts = with_bit(with_origin(deeper(o), project::dep_name(d), project::dep_dir(d), if kind == "git" then "git" else "index"), project::dep_prebuilt(d))
     if install_lib(dspec, drev, dopts) != 0 is return 1 end
     return 0
 end
@@ -460,6 +524,7 @@ pub fn remove_lib(name: string) -> int is
         ui::fail(name + " is not installed")
         return 1
     end
+    bitpkg::close_all(dir)
     if dir_exists(dir) && !util::rm_rf(dir) is
         ui::fail("could not remove " + dir)
         return 1
@@ -490,7 +555,23 @@ pub fn verify_all(only: string) -> int is
         if show_bar is pbar.clear() end
         if only == "" || only == name is
             let dir: string = lib_dir(name, util::short_hash(lock::locked_commit(e)))
-            if !dir_exists(dir) is
+            if lock::locked_output(e) == "bit" is
+                ;; a .bit package: the image is what is checksummed; make sure it is open too
+                let img: string = bitpkg::image_path(name, util::short_hash(lock::locked_commit(e)))
+                if !file_exists(img) is
+                    ui::bad(name + "  " + ui::red("missing") + " " + ui::dim(img))
+                    problems += 1
+                else if checksum::matches(lock::locked_checksum(e), checksum::file_sha256(img)) is
+                    if bitpkg::ensure_open(name, util::short_hash(lock::locked_commit(e)), false) is
+                        ui::ok(name + "  " + ui::dim("@ " + lock::locked_version(e) + "  .bit checksum ok"))
+                    else is
+                        problems += 1
+                    end
+                else is
+                    ui::bad(name + "  " + ui::red("CHECKSUM MISMATCH") + " " + ui::dim("(" + img + " modified or corrupted)"))
+                    problems += 1
+                end
+            else if !dir_exists(dir) is
                 ui::bad(name + "  " + ui::red("missing") + " " + ui::dim(dir))
                 problems += 1
             else is
@@ -533,13 +614,18 @@ pub fn clean_old() -> int is
             let lines: [string] = string_split(olds, "\n")
             let mut k: int = 0
             while k < array_len(lines) is
-                if lines[k] != "" && util::rm_rf(lines[k]) is
-                    ui::line(ui::dim("removed " + lines[k]))
-                    removed += 1
+                if lines[k] != "" is
+                    bitpkg::close(lines[k])
+                    if util::rm_rf(lines[k]) is
+                        ui::line(ui::dim("removed " + lines[k]))
+                        removed += 1
+                    end
                 end
                 k += 1
             end
         end
+        ;; images of the versions just removed
+        util::run("find " + util::sq(lib_root(name)) + " -mindepth 1 -maxdepth 1 -type f -name '*.bit' ! -name " + util::sq(keep + ".bit") + " -delete 2>/dev/null")
         i += 1
     end
     util::run("rm -rf " + util::sq(util::tmp_dir()) + "/* 2>/dev/null")
