@@ -84,7 +84,7 @@ Toolchain overrides: `BIT_HSHARP`, `BIT_HL`, `BIT_HACKERC`.
 ## Repository
 
 ```
-src/        bit (H#): main, cli, build, installer, workflow, project, index, lock, checksum, hk, ui, util, scaffold, commands, semver, net, task, native
+src/        bit (H#): main, cli, build, installer, bitpkg, workflow, project, index, lock, checksum, hk, ui, util, scaffold, commands, semver, net, task, native
 scripts/    CI: build-new-package.lua, test-package.lua, validate-index.lua (+ common.lua, bootstrap-ci.sh)
 website/    bit.io — TypeScript, built with tsc → dist/
 index/      repository.json
@@ -141,6 +141,73 @@ Before `bit build` compiles anything, it builds the native part of the project a
 dependency (transitively; dependencies once, the project every time), and exports all
 `native-lib-path` directories on `LIBRARY_PATH`. With `--platform` and a `cargo` command,
 `--target <triple>` is added automatically.
+
+## `.bit` packages — prebuilt libraries (SquashFS)
+
+Cargo ships a `.crate` (a tarball of *sources*): it has to be unpacked and **every dependency is compiled on your
+machine**. bit has its own format instead: a **`.bit`** is a **SquashFS image holding the library already compiled**.
+It is **never unpacked** — bit mounts it read-only (squashfuse, no root needed; or a loop mount as root) — and nothing
+is compiled, so a fresh `bit install` is a download plus a mount.
+
+```
+mylib-1.2.0-linux-x86_64.bit          (+ mylib-1.2.0-linux-x86_64.bit.sha256)
+├── mylib.hlib  →  .bit/out/mylib.hlib      compiled library (+ libmylib.a / .so / mylib.o if asked for)
+├── Bit.hk, src/…                           sources (optional) — `use "bit -> mylib"` keeps working
+├── README.md  LICENSE  docs/               (optional)
+└── .bit/package.hk  .bit/SHA256SUMS        commit, platform, compiler, checksum of every file
+```
+
+The layout is exactly what the H# compiler already searches in an installed library (`<lib>/<name>.hlib`,
+`<lib>/.bit/out/`), so `use "hlib -> mylib"` finds it with no compiler change.
+
+**Where it comes from.** bit assumes the package is an asset of the library's **GitHub (or Codeberg) release**:
+`<repo>/releases/download/<tag>/<name>-<version>-<platform>.bit`. `bit pack` produces it, you attach it to the release.
+
+```sh
+# author
+bit pack                          # builds the library, writes dist/<name>-<version>-<platform>.bit + .sha256
+bit pack --platform linux-aarch64 --out dist
+gh release upload v1.2.0 dist/*   # a ready workflow: scripts/templates/release-bit.yml
+
+# user
+bit install --prebuilt mylib      # release asset if there is one, otherwise build from source
+bit install --prebuilt-only mylib # never build from source
+bit pkg                           # installed .bit packages and whether they are mounted
+bit pkg mount --all               # mounts are gone after a reboot; bit re-opens them by itself on install/build
+bit pkg info|ls|verify FILE.bit   # inspect without unpacking          bit pkg extract FILE.bit [dir]  (escape hatch)
+```
+
+Turn it on for a project in **Bit.hk**, or per command (`--prebuilt`, `--prebuilt-only`, `--no-prebuilt`), or for the
+user (`bit settings set prebuilt auto`, `BIT_PREBUILT=off|auto|only`). Precedence: flag / environment / `bit settings`
+> `[prebuilt]` > off.
+
+```
+[prebuilt]                          ! consumer side — applies to [dependencies]
+-> enable   => true
+-> mode     => auto                 ! auto = fall back to source · only = never build from source
+-> asset    => {name}-{version}-{platform}.bit
+-> platform => linux-x86_64         ! default: this machine
+-> verify   => auto                 ! auto = check <asset>.sha256 when present · require · off
+-> mount    => auto                 ! auto | fuse | kernel | extract (extract = unpack, last resort)
+
+[pack]                              ! author side — what `bit pack` puts in the .bit
+-> contents    => [hlib, sources, docs]   ! hlib a so obj sources docs
+-> compression => zstd              ! zstd | xz | gzip | lz4 | lzo
+-> level       => 15
+-> block-size  => 131072
+-> output      => dist
+-> files       => [data/extra.bin]
+
+[dependencies]
+-> tui => ^1.2
+-> mine
+--> git => https://github.com/you/mine
+--> prebuilt => false               ! this one is always built from source
+```
+
+`bit pack` needs `mksquashfs` (squashfs-tools); using a package needs `squashfuse` **or** squashfs-tools (`unsquashfs`) —
+or run bit as root for a kernel loop mount. A package is recorded in `bit.lock` with `output = bit` and the sha256 of
+the image; `bit verify` re-checks it. Only libraries that are not in a sub-directory of their repository can be packed.
 
 ## Network
 
