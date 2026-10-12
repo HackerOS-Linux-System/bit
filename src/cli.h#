@@ -22,8 +22,9 @@ mod settings
 mod external
 mod flags
 mod pipeline
+mod bitpkg
 
-pub fn version() -> string is return "1.1.0" end
+pub fn version() -> string is return "1.2.0" end
 
 pub fn print_version() is
     write("bit " + version() + " — package manager for H#, Hacker Lang and HackerScript")
@@ -55,6 +56,10 @@ pub fn print_help() is
     write("    x <name> [args]              run a custom command from [commands] (also: bit <name>)")
     write("    commands                     list custom commands")
     write("    publish                      validate Bit.hk and print the index entry to submit")
+    write("    pack [--out DIR] [--platform P] [--debug] [--no-build] [--no-sources]")
+    write("                                 pack the library into  <name>-<version>-<platform>.bit  (SquashFS, compiled hlib inside)")
+    write("                                 + .sha256 — attach both to the GitHub release of the tag. Tuned by [pack] in Bit.hk")
+    write("    pkg [list|info|ls|verify|mount|umount|extract] [file.bit|name] [--all]     work with .bit packages")
     write("")
     write("  " + ui::bold("WORKSPACES"))
     write("    new-ws <name> [--special]    new workspace (special: members in different languages)")
@@ -63,6 +68,8 @@ pub fn print_help() is
     write("")
     write("  " + ui::bold("LIBRARIES") + "  " + ui::dim("installed to ~/.hackeros/libs/, checksummed, linked statically"))
     write("    install [name|git-url ...]   install libraries (no name: [dependencies] + [dev-dependencies])")
+    write("      --prebuilt | --prebuilt-only | --no-prebuilt    take <name>-<version>-<platform>.bit from the library's GitHub release")
+    write("        (nothing is compiled, nothing is unpacked: the SquashFS is mounted)   = [prebuilt] in Bit.hk, BIT_PREBUILT   --mount auto|fuse|kernel|extract")
     write("    install <source> <name> [--version V]   virus style, = add: pypi crates npm jsr vira bytes bit std core")
     write("      [--output hlib|so|a|obj] [--target h#|hl|hs] [--no-build] [--release] [--force]")
     write("    add <name|url|kind:name> [version|rev] [--dev]     install + add to Bit.hk")
@@ -788,6 +795,25 @@ end
 
 pub fn cmd_new_ws(name: string, special: bool) -> int is
     return scaffold::new_workspace(name, special)
+end
+
+;; ── pack / pkg (.bit packages) ───────────────────────────────────────────────
+
+pub fn cmd_pack(debug: bool, verbose: bool, out: string, platform: string, no_build: bool, no_sources: bool, use_lock: bool) -> int is
+    let p: project::Project = need_project()
+    if !project::is_loaded(p) is return no_project_error() end
+    ui::blank()
+    if !no_build && workflow::ensure_deps(p, verbose, !debug, use_lock, false) != 0 is
+        ui::fail("some dependencies could not be installed")
+        return 1
+    end
+    let rc: int = bitpkg::pack(p, !debug, verbose, out, platform, no_build, no_sources)
+    ui::blank()
+    return rc
+end
+
+pub fn cmd_pkg(action: string, arg: string, arg2: string, all: bool) -> int is
+    return bitpkg::cmd_pkg(action, arg, arg2, all)
 end
 
 ;; ── publish ──────────────────────────────────────────────────────────────────
