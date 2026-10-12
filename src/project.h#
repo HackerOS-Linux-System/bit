@@ -640,6 +640,7 @@ end
 ;;   --> dir => crates/mine                        a directory inside the repository
 ;;   --> version => ^0.3                           or rev / tag / branch / commit
 ;;   --> output => a     --> lang => hs     --> optional => true
+;;   --> prebuilt => false                         build this one from source even with [prebuilt] on (true = .bit only)
 
 pub struct Dep is
     pub dp_name:     string
@@ -652,6 +653,7 @@ pub struct Dep is
     pub dp_dir:      string    ;; sub-directory of the repository that holds the library ("" = the root)
     pub dp_package:  string    ;; registry package name when it differs from the key ("" = the key)
     pub dp_optional: bool      ;; only built when a feature turns it on
+    pub dp_prebuilt: string    ;; "" = follow [prebuilt] · "false" = always build this one from source · "true"
 end
 
 pub fn dep_name(d: Dep)     -> string is return d.dp_name end
@@ -663,6 +665,7 @@ pub fn dep_lang(d: Dep)     -> string is return d.dp_lang end
 pub fn dep_range(d: Dep)    -> string is return d.dp_range end
 pub fn dep_dir(d: Dep)      -> string is return d.dp_dir end
 pub fn dep_optional(d: Dep) -> bool   is return d.dp_optional end
+pub fn dep_prebuilt(d: Dep) -> string is return d.dp_prebuilt end
 pub fn dep_package(d: Dep)  -> string is
     if d.dp_package != "" is return d.dp_package end
     return d.dp_name
@@ -862,7 +865,8 @@ pub fn parse_dep(name: string, value: string, h: hk::Hk, section: string) -> Dep
         dp_lang: index::normalize_lang(sub_of(h, section, name, ["lang"])),
         dp_dir: dir,
         dp_package: sub_of(h, section, name, ["package", "pkg"]),
-        dp_optional: string_lower(sub_of(h, section, name, ["optional"])) == "true"
+        dp_optional: string_lower(sub_of(h, section, name, ["optional"])) == "true",
+        dp_prebuilt: string_lower(sub_of(h, section, name, ["prebuilt", "bit"]))
     }
 end
 
