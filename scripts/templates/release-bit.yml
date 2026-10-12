@@ -1,0 +1,27 @@
+name: release-bit
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  pack:
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest,     platform: linux-x86_64 }
+          - { os: ubuntu-24.04-arm,  platform: linux-aarch64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: tools
+        run: sudo apt-get update && sudo apt-get install -y squashfs-tools squashfuse
+      - name: H# and bit
+        # install the h# compiler and bit here (see scripts/bootstrap-ci.sh in the bit repository)
+        run: echo "install h# and bit"
+      - name: pack
+        run: bit pack --platform ${{ matrix.platform }} --out dist
+      - name: upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" dist/*.bit dist/*.bit.sha256 --clobber
