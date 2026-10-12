@@ -284,7 +284,7 @@ end
 
 ;; The tag of the newest release ("" = none). `/releases/latest` redirects to `/releases/tag/<tag>`.
 pub fn latest_tag(base: string) -> string is
-    let eff: string = util::capture("curl -fsSLI --connect-timeout 15 --max-time 40 -o /dev/null -w '%{url_effective}' " +
+    let eff: string = util::capture("curl -fsSLI --connect-timeout 15 --max-time 40 -o /dev/null -w '%{{url_effective}}' " +
                                     util::sq(base + "/releases/latest") + " 2>/dev/null")
     if string_contains(eff, "/releases/tag/") is
         return string_slice(eff, string_find(eff, "/releases/tag/") + 14, string_len(eff))
