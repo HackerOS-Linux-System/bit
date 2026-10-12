@@ -1,6 +1,6 @@
 [package]
 -> name        => bit
--> version     => 0.1.0
+-> version     => 0.2.0
 -> description => Package manager for HackerOS programing languages.
 -> authors     => ["HackerOS Team <hackeros068@gmail.com>"]
 -> license     => Apache-2.0
