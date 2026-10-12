@@ -552,7 +552,7 @@ fn build_hs_cargo(p: project::Project, o: BuildOpts, entry: string, dir: string,
     ;; hackerc <= 0.4 with `--bin-name` only APPENDS a `[[bin]]` to an existing Cargo.toml and leaves the crate
     ;; without a manifest on a fresh build (cargo: "manifest path ... does not exist"). Fall back to a plain
     ;; transpile (src/main.rs, binary named after the crate) — the artifact is renamed below.
-    let mut bin_file: string = name
+    let mut bin_file: string = "" + name   ;; a copy: `name` is still used below (no move)
     if !library && !file_exists(crate_dir + "/Cargo.toml") is
         ui::warn("hackerc did not write " + crate_dir + "/Cargo.toml for --bin-name — retrying without it (use hackerc >= 0.5)")
         util::run("rm -rf " + util::sq(crate_dir + "/src/bin"))
