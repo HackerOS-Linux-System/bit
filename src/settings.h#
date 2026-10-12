@@ -26,7 +26,9 @@ fn catalog() -> [string] is
         "color|NO_COLOR|coloured output|auto | never",
         "index-url|BIT_INDEX_URL|where the library index comes from|a URL or a file path",
         "extra-indexes|BIT_EXTRA_INDEXES|additional indexes, comma separated|URLs or file paths",
-        "vira-list-url|BIT_VIRA_LIST_URL|where `vira` dependencies are looked up|a URL"
+        "vira-list-url|BIT_VIRA_LIST_URL|where `vira` dependencies are looked up|a URL",
+        "prebuilt|BIT_PREBUILT|use .bit packages from GitHub releases instead of building libraries|off | auto | only",
+        "mount|BIT_MOUNT|how .bit packages are opened (SquashFS)|auto | fuse | kernel | extract"
     ]
 end
 
@@ -132,7 +134,12 @@ pub fn apply() is
         let env: string = cat_field(c[i], 1)
         let v: string = hk::hk_get(h, "settings", key, "")
         if v != "" && env_get(env) == "" is
-            if key == "offline" || key == "plain" is
+            if key == "prebuilt" is
+                ;; `true` / `false` are accepted too
+                let m: string = if string_lower(v) == "true" || string_lower(v) == "yes" || v == "1" || string_lower(v) == "on" then "auto"
+                                else if string_lower(v) == "false" || string_lower(v) == "no" || v == "0" then "off" else string_lower(v)
+                env_set(env, m)
+            else if key == "offline" || key == "plain" is
                 if string_lower(v) == "true" || v == "1" || string_lower(v) == "yes" is env_set(env, "1") end
             else if key == "color" is
                 if string_lower(v) == "never" || string_lower(v) == "off" is env_set(env, "1") end
