@@ -76,7 +76,7 @@ say "building libhk_parser.a (cargo)"
 LIBDIR="$PKG_CACHE/hk-parser/target/release"
 test -f "$LIBDIR/libhk_parser.a" || { echo "::error::libhk_parser.a was not produced"; exit 1; }
 # the C ABI bit's binding expects must really be in the archive
-for sym in hk_parse hk_get_string hk_keys hk_last_error; do
+for sym in hk_parse hk_get_string hk_map_key_count hk_last_error; do
   nm -g "$LIBDIR/libhk_parser.a" 2>/dev/null | grep -q " T $sym\$" \
     || { echo "::error::libhk_parser.a does not export $sym — hk-parser is missing src/ffi.rs"; exit 1; }
 done
