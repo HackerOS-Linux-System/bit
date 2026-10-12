@@ -10,6 +10,7 @@ mod project
 mod build
 mod installer
 mod registry
+mod bitpkg
 
 fn project_lock_path(p: project::Project) -> string is
     return project::root_of(p) + "/Bit.lock"
@@ -172,7 +173,7 @@ fn ensure_one(p: project::Project, d: project::Dep, pk: Pick, pl: lock::Lock, us
     let locked: lock::Locked = lock::lock_get(pl, dname)
     let spec: string = spec_of(d)
     let base: installer::InstallOpts = installer::iopts(force, true, project::dep_output(d), project::dep_lang(d), "", release, verbose)
-    let opts: installer::InstallOpts = installer::with_origin(base, if kind == "git" then dname else "", project::dep_dir(d), kind)
+    let opts: installer::InstallOpts = installer::with_bit(installer::with_origin(base, if kind == "git" then dname else "", project::dep_dir(d), kind), project::dep_prebuilt(d))
     if installer::install_lib(spec, pk.pk_rev, opts) != 0 is return failed() end
 
     let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
@@ -182,6 +183,10 @@ fn ensure_one(p: project::Project, d: project::Dep, pk: Pick, pl: lock::Lock, us
         return failed()
     end
     if !integrity_ok(dname, locked, lock::locked_checksum(now), use_lock) is return failed() end
+    ;; a .bit package is mounted, not unpacked: after a reboot it has to be opened again
+    if lock::locked_output(now) == "bit" && !bitpkg::ensure_open(dname, util::short_hash(lock::locked_commit(now)), verbose) is
+        return failed()
+    end
 
     ;; `[directories] file => project`: the library is already inside cache/libs/ — nothing to link
     if !util::libs_flat() is link_into_cache(p, dname, installer::current_dir(dname)) end
@@ -219,11 +224,13 @@ fn ensure_list(p: project::Project, deps: [project::Dep], label: string, verbose
     end
 
     ;; 2. clone everything that is missing, several at a time
+    ;; (not with [prebuilt]: those come as .bit files from releases, a source clone would be wasted)
+    let clone_first: bool = bitpkg::mode(p) == "off"
     let mut items: [string] = []
     i = 0
     while i < array_len(deps) is
         let d: project::Dep = deps[i]
-        if project::is_git_kind(project::dep_kind(d)) && picks[i].pk_err == "" && (force || !installer::is_installed(project::dep_name(d))) is
+        if clone_first && project::dep_prebuilt(d) != "true" && project::is_git_kind(project::dep_kind(d)) && picks[i].pk_err == "" && (force || !installer::is_installed(project::dep_name(d))) is
             let url: string = installer::spec_url(spec_of(d))
             if url != "" is items = array_push(items, url + "\t" + picks[i].pk_rev) end
         end
