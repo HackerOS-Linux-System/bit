@@ -230,7 +230,7 @@ fn ensure_list(p: project::Project, deps: [project::Dep], label: string, verbose
     i = 0
     while i < array_len(deps) is
         let d: project::Dep = deps[i]
-        if clone_first && project::dep_prebuilt(d) != "true" && project::is_git_kind(project::dep_kind(d)) && picks[i].pk_err == "" && (force || !installer::is_installed(project::dep_name(d))) is
+        if clone_first && project::dep_prebuilt(d) != "true" && project::is_git_kind(project::dep_kind(d)) && picks[i].pk_err == "" && (force || !installer::is_installed(project::dep_name(d))) && installer::spec_prefetchable(spec_of(d), project::dep_dir(d)) is
             let url: string = installer::spec_url(spec_of(d))
             if url != "" is items = array_push(items, url + "\t" + picks[i].pk_rev) end
         end
