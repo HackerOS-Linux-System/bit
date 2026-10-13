@@ -1,6 +1,7 @@
 mod util
 mod ui
 mod net
+mod locator
 ;; NOTE: no `use "std -> json"` here. Importing the std wrapper mangles its fns to
 ;; json_get_str / json_set_str / json_stringify_pretty …, which collide with the LLVM
 ;; builtins of the same names (self-recursion / wrong arity -> invalid IR). `json::get_str`,
@@ -15,7 +16,8 @@ pub struct LibEntry is
     pub ie_lang:     string
     pub ie_rev:      string
     pub ie_checksum: string
-    pub ie_dir:      string     ;; directory inside the repository ("" = the root)
+    pub ie_dir:      string     ;; directory OR single file inside the repository ("" = the root)
+    pub ie_kind:     string     ;; where the files come from: git (default) | http (a file download) | local (a path on disk)
 end
 
 pub fn e_name(e: LibEntry)     -> string   is return e.ie_name end
@@ -27,6 +29,10 @@ pub fn e_lang(e: LibEntry)     -> string   is return e.ie_lang end
 pub fn e_rev(e: LibEntry)      -> string   is return e.ie_rev end
 pub fn e_checksum(e: LibEntry) -> string   is return e.ie_checksum end
 pub fn e_dir(e: LibEntry)      -> string   is return e.ie_dir end
+pub fn e_kind(e: LibEntry)     -> string   is
+    if e.ie_kind == "" is return "git" end
+    return e.ie_kind
+end
 
 pub struct Index is
     pub ix_items: [LibEntry]
@@ -265,19 +271,31 @@ fn entry_target(o: string) -> string is
     return ""
 end
 
-;; The library's directory inside the repository: `"dir"` / `"subdir"` / `"path"`, or `url#dir`.
-fn entry_dir(o: string, target: string) -> string is
-    let d: string = first_of(o, "dir", "subdir", "directory")
-    if d != "" is return d end
-    let hash: int = string_find(target, "#")
-    if hash >= 0 is return string_slice(target, hash + 1, string_len(target)) end
+;; What the `"type"` / `"kind"` key of an entry says: "git" | "file" (= a download) | "local" | "".
+fn entry_type(o: string) -> string is
+    let t: string = string_lower(string_trim(first_of(o, "type", "kind", "kind")))
+    if t == "file" || t == "http" || t == "url" || t == "download" is return "http" end
+    if t == "local" || t == "path" is return "local" end
+    if t == "git" || t == "repo" || t == "repository" || t == "dir" || t == "directory" is return "git" end
     return ""
 end
 
-fn strip_fragment(target: string) -> string is
-    let hash: int = string_find(target, "#")
-    if hash < 0 is return target end
-    return string_slice(target, 0, hash)
+;; The source of an entry, from its `target` plus the optional keys
+;;     "dir" / "subdir" / "directory"   a directory of the repository
+;;     "file" / "path" / "filename"     a single file of the repository
+;;     "rev"                            tag / branch / commit
+;;     "type" / "kind"                  "git" | "file" | "local"   (only needed when the url does not say it)
+;; (see locator.h# for every spelling a `target` itself may have: `…/tree/<ref>/<dir>`, `…/blob/<ref>/<file>`,
+;; `url#dir`, raw file urls, local paths). The explicit keys win over what the url says.
+fn entry_locator(o: string, target: string) -> locator::Locator is
+    let mut lc: locator::Locator = locator::parse(target)
+    if entry_type(o) == "http" && lc.lc_kind == "git" is lc = locator::as_http(lc) end
+    let d: string = first_of(o, "dir", "subdir", "directory")
+    let f: string = first_of(o, "file", "path", "filename")
+    let dir: string = if d != "" then d else if f != "" then f else lc.lc_dir
+    let rev: string = if json::get_str(o, "rev") != "" then json::get_str(o, "rev") else lc.lc_rev
+    let keep_dir: string = if lc.lc_kind == "git" then dir else ""
+    return locator::Locator { lc_kind: lc.lc_kind, lc_url: lc.lc_url, lc_rev: rev, lc_dir: keep_dir, lc_name: lc.lc_name }
 end
 
 fn parse_entries(text: string) -> [LibEntry] is
@@ -289,16 +307,17 @@ fn parse_entries(text: string) -> [LibEntry] is
         let name: string = json::get_str(o, "name")
         let tags: [string] = tags_of(o)
         if name != "" is
-            let target: string = entry_target(o)
+            let lc: locator::Locator = entry_locator(o, entry_target(o))
             out = array_push(out, LibEntry {
                 ie_name:     name,
-                ie_target:   strip_fragment(target),
-                ie_dir:      entry_dir(o, target),
+                ie_target:   lc.lc_url,
+                ie_dir:      lc.lc_dir,
+                ie_kind:     lc.lc_kind,
                 ie_desc:     json::get_str(o, "description"),
                 ie_tags:     tags,
                 ie_author:   json::get_str(o, "author"),
                 ie_lang:     guess_lang(tags, json::get_str(o, "lang")),
-                ie_rev:      json::get_str(o, "rev"),
+                ie_rev:      lc.lc_rev,
                 ie_checksum: json::get_str(o, "checksum")
             })
         end
@@ -344,7 +363,7 @@ pub fn index_find(ix: Index, name: string) -> LibEntry is
         i += 1
     end
     return LibEntry { ie_name: "", ie_target: "", ie_desc: "", ie_tags: [], ie_author: "",
-                      ie_lang: "", ie_rev: "", ie_checksum: "", ie_dir: "" }
+                      ie_lang: "", ie_rev: "", ie_checksum: "", ie_dir: "", ie_kind: "" }
 end
 
 ;; Like `index_find`, but when several index entries share `name` across languages (the shared
@@ -359,7 +378,7 @@ pub fn index_find_lang(ix: Index, name: string, lang: string) -> LibEntry is
     if lang == "" is return index_find(ix, name) end
     let want: string = string_lower(name)
     let mut fallback: LibEntry = LibEntry { ie_name: "", ie_target: "", ie_desc: "", ie_tags: [], ie_author: "",
-                                            ie_lang: "", ie_rev: "", ie_checksum: "", ie_dir: "" }
+                                            ie_lang: "", ie_rev: "", ie_checksum: "", ie_dir: "", ie_kind: "" }
     let mut i: int = 0
     while i < ix.ix_count is
         if string_lower(ix.ix_items[i].ie_name) == want is
