@@ -88,10 +88,9 @@ local function build_one(e)
   local state = opts.work .. "/state/" .. e.name
   C.run("mkdir -p " .. C.sq(state))
 
-  if not C.clone(e.target, e.rev, dir) then
-    return "fail", "cannot clone " .. e.target .. (e.rev ~= "" and (" @ " .. e.rev) or "")
-  end
-  local commit = C.commit_of(dir)
+  -- the whole repository, one directory of it, one file of it, or a downloaded file (see common.lua)
+  local fetched, commit, why = C.fetch(e, dir)
+  if not fetched then return "fail", why end
   local sum = C.dir_checksum(dir)
 
   if e.checksum ~= "" and e.checksum:gsub("^sha256:", "") ~= sum then
