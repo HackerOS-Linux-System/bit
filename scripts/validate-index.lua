@@ -115,8 +115,9 @@ for _, e in ipairs(head) do
       local msg = "`rev` = '" .. e.rev .. "' is not a pin: use a version tag (v1.2.3) or a full 40-character commit id, not a branch"
       if enforced or opts.strict then fail(e.name, msg) else warn(e.name, msg) end
     elseif is_tag(e.rev) and not opts.offline and (enforced or opts.strict) then
-      if not tag_exists(e.target, e.rev) then
-        fail(e.name, "tag '" .. e.rev .. "' does not exist in " .. e.target)
+      local repo_url = C.resolve_target(e).url      -- `.../tree/<ref>/<dir>` entries: the repository itself
+      if not tag_exists(repo_url, e.rev) then
+        fail(e.name, "tag '" .. e.rev .. "' does not exist in " .. repo_url)
       end
     end
   end
