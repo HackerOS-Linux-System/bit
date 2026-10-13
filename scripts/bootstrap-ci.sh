@@ -8,6 +8,8 @@
 #   2. the two libraries bit is built on, from bit.io:
 #         hk-parser     (.hk manifests; Rust staticlib with a C ABI → libhk_parser.a)
 #         progress-bar  (pure H#)
+#         colors        (pure H#; the colours of `bit help`)
+#         nidus         (errors)
 #      They are placed where the H# compiler resolves `use "bytes -> <name>"`:
 #         ~/.hackeros/H#/build/cache/packages/<name>
 #
@@ -16,6 +18,7 @@
 #   HK_PARSER_REPO    default https://github.com/bit-io/hk-parser
 #   PROGRESS_BAR_REPO default https://github.com/bit-io/progress-bar
 #   NIDUS_REPO        default https://github.com/bit-io/nidus
+#   COLORS_REPO       default https://github.com/bit-io/colors
 #   HK_PARSER_REF / PROGRESS_BAR_REF   branch, tag or commit (default: the default branch)
 #   SKIP_HSHARP=1     skip step 1 (H# already installed)
 set -euo pipefail
@@ -24,6 +27,7 @@ HSHARP_RAW="${HSHARP_RAW:-https://raw.githubusercontent.com/HackerOS-Linux-Syste
 HK_PARSER_REPO="${HK_PARSER_REPO:-https://github.com/bit-io/hk-parser}"
 PROGRESS_BAR_REPO="${PROGRESS_BAR_REPO:-https://github.com/bit-io/progress-bar}"
 NIDUS_REPO="${NIDUS_REPO:-https://github.com/bit-io/nidus}"
+COLORS_REPO="${COLORS_REPO:-https://github.com/bit-io/colors}"
 PKG_CACHE="$HOME/.hackeros/H#/build/cache/packages"
 
 say() { printf '\n==> %s\n' "$*"; }
@@ -63,10 +67,11 @@ fetch() { # name url ref
   echo "$name @ $(git -C "$dest" rev-parse --short HEAD)"
 }
 
-say "fetching hk-parser, progress-bar and nidus"
+say "fetching hk-parser, progress-bar, nidus and colors"
 fetch hk-parser    "$HK_PARSER_REPO"    "${HK_PARSER_REF:-}"
 fetch progress-bar "$PROGRESS_BAR_REPO" "${PROGRESS_BAR_REF:-}"
 fetch nidus        "$NIDUS_REPO"        "${NIDUS_REF:-}"
+fetch colors       "$COLORS_REPO"       "${COLORS_REF:-}"
 
 # bit itself is compiled by `h#` (not by bit), so the native part of hk-parser has to
 # be built here once. Projects built *with* bit do not need this: bit runs the
