@@ -1,0 +1,364 @@
+mod util
+mod ui
+mod net
+mod checksum
+
+;; ── Where the files of a library come from ───────────────────────────────────
+;;
+;; An index entry (`index/repository.json`), `bit install <spec>` and a `git =>` dependency all name
+;; their source with one string. Besides a plain git repository it may be:
+;;
+;;   https://github.com/org/repo                        a git repository                       kind git
+;;   https://github.com/org/repo/tree/v1.2/crates/x     ONE DIRECTORY of a repository          kind git  (+ rev, dir)
+;;   https://github.com/org/repo/blob/main/src/x.h#     ONE FILE of a repository               kind git  (+ dir = the file)
+;;   https://github.com/org/repo#crates/x               the same, spelled with a fragment      kind git  (+ dir)
+;;   https://raw.githubusercontent.com/org/repo/main/x.hl   a file, downloaded as it is        kind http
+;;   https://example.org/dl/lib.h#                      any https url that ends in a source file   kind http
+;;   /path/to/dir   ./dir   ../dir   ~/dir   file:///dir     a directory on disk (copied)      kind local
+;;   /path/to/file.h#                                   a file on disk (copied)                kind local
+;;   /path/to/clone   (has a .git)                      a repository on disk                   kind git
+;;
+;; The tree / blob / src / raw urls of GitHub, GitLab (`/-/tree/…`), Codeberg & Gitea
+;; (`/src/branch/…`), Bitbucket (`/src/<ref>/…`) are understood. The first path segment after
+;; `tree/` is the ref (branch, tag or commit). A branch with a `/` in its name cannot be told apart
+;; from the directory — use the `rev` and `dir` keys of the index entry for that.
+;;
+;; A branch called main / master / HEAD in such a url is dropped (no rev = the repository's default
+;; branch): `bit install x` must not look "outdated" against a branch that moves.
+;;
+;; A `#` that ends a file name (`lib.h#`, H# sources) is part of the name, not a fragment;
+;; `%23` is accepted too (and is what bit puts into a download url).
+
+pub struct Locator is
+    pub lc_kind: string   ;; git | http | local   ("" = could not be understood)
+    pub lc_url:  string   ;; git: the clone url   http: the file url   local: the path on disk
+    pub lc_rev:  string   ;; the branch / tag / commit the url names ("" = none)
+    pub lc_dir:  string   ;; git: a directory OR a single file inside the repository ("" = the root)
+    pub lc_name: string   ;; what a library installed from this is called when nobody says otherwise
+end
+
+fn empty_locator() -> Locator is
+    return Locator { lc_kind: "", lc_url: "", lc_rev: "", lc_dir: "", lc_name: "" }
+end
+
+;; ── small string helpers ─────────────────────────────────────────────────────
+
+fn decode(s: string) -> string is
+    return string_replace(string_replace(s, "%23", "#"), "%20", " ")
+end
+
+;; What curl is given: `#` would start a fragment and never reach the server.
+pub fn encode_url(s: string) -> string is
+    return string_replace(string_replace(s, "#", "%23"), " ", "%20")
+end
+
+fn strip_query(s: string) -> string is
+    let q: int = string_find(s, "?")
+    if q < 0 is return s end
+    return string_slice(s, 0, q)
+end
+
+fn strip_scheme(url: string) -> string is
+    if string_starts_with(url, "https://") is return string_slice(url, 8, string_len(url)) end
+    if string_starts_with(url, "http://") is return string_slice(url, 7, string_len(url)) end
+    return url
+end
+
+fn host_of(rest: string) -> string is
+    let slash: int = string_find(rest, "/")
+    if slash < 0 is return rest end
+    return string_slice(rest, 0, slash)
+end
+
+fn segments(path: string) -> [string] is
+    let parts: [string] = string_split(path, "/")
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(parts) is
+        if parts[i] != "" is out = array_push(out, parts[i]) end
+        i += 1
+    end
+    return out
+end
+
+;; segs[from .. stop) joined with `/`
+fn join_range(segs: [string], from: int, stop: int) -> string is
+    let mut out: string = ""
+    let mut i: int = from
+    while i < stop is
+        if out != "" is out = out + "/" end
+        out = out + segs[i]
+        i += 1
+    end
+    return out
+end
+
+fn last_dot(s: string) -> int is
+    let mut i: int = string_len(s) - 1
+    while i >= 0 is
+        if string_at(s, i) == "." is return i end
+        i -= 1
+    end
+    return -1
+end
+
+;; Does the last path segment look like a source file (so that a plain https url is a download,
+;; not a git repository)? `.git` is deliberately not in the list; neither is `.bit` (a prebuilt
+;; package — those come from releases, see bitpkg).
+pub fn is_file_name(name: string) -> bool is
+    let low: string = string_lower(name)
+    let exts: [string] = [".h#", ".hl", ".hcs", ".hlib", ".hk", ".h", ".c", ".rs", ".lua", ".sh", ".md", ".txt", ".json", ".toml"]
+    let mut i: int = 0
+    while i < array_len(exts) is
+        if string_ends_with(low, exts[i]) is return true end
+        i += 1
+    end
+    return false
+end
+
+;; "/a/b/lib.h#" -> "lib"   "https://x/y/repo.git" -> "repo"   "crates/mine" -> "mine"
+fn name_of(path: string) -> string is
+    let mut b: string = util::basename(path)
+    if string_ends_with(b, ".git") is b = string_slice(b, 0, string_len(b) - 4) end
+    if is_file_name(b) is
+        let dot: int = last_dot(b)
+        if dot > 0 is b = string_slice(b, 0, dot) end
+    end
+    return b
+end
+
+fn repo_name_of(url: string) -> string is
+    let b: string = util::basename(url)
+    if string_ends_with(b, ".git") is return string_slice(b, 0, string_len(b) - 4) end
+    return b
+end
+
+fn branch_value(branch: string) -> string is
+    if branch == "main" || branch == "master" || branch == "HEAD" is return "" end
+    return branch
+end
+
+;; The language of a single source file, as a `lang =>` value ("" = not a source file).
+pub fn lang_of_file(fname: string) -> string is
+    let low: string = string_lower(fname)
+    if string_ends_with(low, ".h#") is return "h#" end
+    if string_ends_with(low, ".hl") is return "hl" end
+    if string_ends_with(low, ".hcs") is return "hs" end
+    return ""
+end
+
+;; ── forge urls: …/tree/<ref>/<dir>   …/blob/<ref>/<file> ─────────────────────
+
+fn forge_found(segs: [string], repo_end: int, branch_at: int, path_from: int) -> Locator is
+    let n: int = array_len(segs)
+    let repo_url: string = "https://" + join_range(segs, 0, repo_end)
+    let path: string = decode(join_range(segs, path_from, n))
+    let nm: string = if path != "" then name_of(path) else repo_name_of(repo_url)
+    return Locator { lc_kind: "git", lc_url: repo_url, lc_rev: branch_value(decode(segs[branch_at])),
+                     lc_dir: path, lc_name: nm }
+end
+
+;; kind "" when `base` is not a tree / blob / raw url of a forge.
+fn parse_forge(base: string) -> Locator is
+    let rest: string = strip_query(strip_scheme(base))
+    let segs: [string] = segments(rest)
+    let n: int = array_len(segs)
+    if n < 5 is return empty_locator() end
+    let host: string = string_lower(segs[0])
+
+    ;; GitLab (groups may nest, so the repository ends at the `-`):  group/sub/repo/-/tree|blob|raw/<ref>/<path>
+    let mut i: int = 2
+    while i < n - 2 is
+        if segs[i] == "-" && (segs[i + 1] == "tree" || segs[i + 1] == "blob" || segs[i + 1] == "raw") is
+            return forge_found(segs, i, i + 2, i + 3)
+        end
+        i += 1
+    end
+
+    ;; host/org/repo/<marker>/…
+    let mut j: int = 3
+    while j < n - 1 is
+        let s: string = segs[j]
+        ;; Codeberg / Gitea / Forgejo:  src|raw/branch|tag|commit/<ref>/<path>
+        if (s == "src" || s == "raw") && j + 2 < n && (segs[j + 1] == "branch" || segs[j + 1] == "tag" || segs[j + 1] == "commit") is
+            return forge_found(segs, j, j + 2, j + 3)
+        end
+        ;; GitHub (and Gitea):  tree|blob|raw/<ref>/<path>
+        if s == "tree" || s == "blob" || s == "raw" is
+            return forge_found(segs, j, j + 1, j + 2)
+        end
+        ;; Bitbucket:  src/<ref>/<path>
+        if s == "src" && string_contains(host, "bitbucket") is
+            return forge_found(segs, j, j + 1, j + 2)
+        end
+        j += 1
+    end
+    return empty_locator()
+end
+
+;; ── local paths ──────────────────────────────────────────────────────────────
+
+pub fn is_local_spec(s: string) -> bool is
+    return string_starts_with(s, "/") || string_starts_with(s, "./") || string_starts_with(s, "../") ||
+           string_starts_with(s, "~/") || s == "." || s == ".." || string_starts_with(s, "file://")
+end
+
+fn expand_home(p: string) -> string is
+    if string_starts_with(p, "~/") is
+        let h: string = env_get("HOME")
+        if h != "" is return h + string_slice(p, 1, string_len(p)) end
+    end
+    return p
+end
+
+fn parse_local(base: string, frag: string) -> Locator is
+    let is_file_url: bool = string_starts_with(base, "file://")
+    let raw_path: string = if is_file_url then string_slice(base, 7, string_len(base)) else base
+    let path: string = expand_home(raw_path)
+
+    ;; a git repository on disk (a clone, or a bare one) stays a git source — as `file://` always was
+    let has_git: bool = dir_exists(path + "/.git")
+    let is_bare: bool = file_exists(path + "/HEAD") && dir_exists(path + "/objects")
+    if has_git || is_bare is
+        return Locator { lc_kind: "git", lc_url: (if is_file_url then base else path), lc_rev: "",
+                         lc_dir: frag, lc_name: repo_name_of(path) }
+    end
+
+    let whole: string = if frag != "" then path + "/" + frag else path
+    return Locator { lc_kind: "local", lc_url: whole, lc_rev: "", lc_dir: "", lc_name: name_of(whole) }
+end
+
+;; ── parse ────────────────────────────────────────────────────────────────────
+
+pub fn parse(target_in: string) -> Locator is
+    let t: string = decode(string_trim(target_in))
+    if t == "" is return empty_locator() end
+
+    ;; `#dir` — except the `#` that ends an H# file name (`lib.h#`)
+    let mut base: string = t
+    let mut frag: string = ""
+    let hash: int = string_find(t, "#")
+    if hash >= 0 is
+        base = string_slice(t, 0, hash)
+        frag = string_slice(t, hash + 1, string_len(t))
+        if frag == "" && string_ends_with(base, ".h") is base = base + "#" end
+    end
+
+    if is_local_spec(base) is return parse_local(base, frag) end
+
+    let rest: string = strip_query(strip_scheme(base))
+    let host: string = string_lower(host_of(rest))
+    let last: string = util::basename(rest)
+
+    ;; a file served as it is
+    if host == "raw.githubusercontent.com" || host == "gist.githubusercontent.com" is
+        return Locator { lc_kind: "http", lc_url: base, lc_rev: "", lc_dir: "", lc_name: name_of(last) }
+    end
+
+    let f: Locator = parse_forge(base)
+    if f.lc_kind != "" is
+        if f.lc_dir == "" && frag != "" is
+            return Locator { lc_kind: f.lc_kind, lc_url: f.lc_url, lc_rev: f.lc_rev, lc_dir: frag, lc_name: repo_name_of(f.lc_url) }
+        end
+        return f
+    end
+
+    let web: bool = string_starts_with(base, "https://") || string_starts_with(base, "http://")
+    if web && is_file_name(last) is
+        return Locator { lc_kind: "http", lc_url: base, lc_rev: "", lc_dir: "", lc_name: name_of(last) }
+    end
+
+    ;; a plain repository (https, ssh, git@, git://)
+    return Locator { lc_kind: "git", lc_url: base, lc_rev: "", lc_dir: frag, lc_name: repo_name_of(base) }
+end
+
+;; The same locator, forced to be a download (an index entry says `"type": "file"` for an url the
+;; extension heuristic cannot recognise).
+pub fn as_http(l: Locator) -> Locator is
+    return Locator { lc_kind: "http", lc_url: l.lc_url, lc_rev: "", lc_dir: "", lc_name: name_of(util::basename(strip_query(l.lc_url))) }
+end
+
+;; ── staging a non-git source ─────────────────────────────────────────────────
+
+;; Brings an `http` / `local` source into `tmp`. Returns the path of what was staged — a directory
+;; (a copied directory) or a single file (a downloaded / copied file) — or "" on failure.
+pub fn stage_plain(l: Locator, tmp: string) -> string is
+    util::mkdir_p(tmp)
+
+    if l.lc_kind == "http" is
+        if net::offline() is
+            ui::fail("offline mode: cannot download " + l.lc_url)
+            return ""
+        end
+        let fname: string = decode(util::basename(strip_query(l.lc_url)))
+        if fname == "" is
+            ui::fail("the url names no file: " + l.lc_url)
+            return ""
+        end
+        let dest: string = tmp + "/" + fname
+        let limit: int = net::timeout_s()
+        let cmd: string = "curl -fsSL --connect-timeout 15" + (if limit > 0 then " --max-time " + to_string(limit) else "") +
+                          " " + util::sq(encode_url(l.lc_url)) + " -o " + util::sq(dest)
+        if net::run_retry(cmd) != 0 is
+            ui::fail("download failed: " + l.lc_url)
+            return ""
+        end
+        if util::run("test -s " + util::sq(dest)) != 0 is
+            ui::fail("downloaded an empty file: " + l.lc_url)
+            return ""
+        end
+        return dest
+    end
+
+    if l.lc_kind == "local" is
+        let src: string = l.lc_url
+        if dir_exists(src) is
+            if util::run("cp -a " + util::sq(src) + "/. " + util::sq(tmp) + "/") != 0 is
+                ui::fail("cannot copy " + src)
+                return ""
+            end
+            util::rm_rf(tmp + "/.git")
+            return tmp
+        end
+        if file_exists(src) is
+            let dest: string = tmp + "/" + util::basename(src)
+            if util::run("cp -f " + util::sq(src) + " " + util::sq(dest)) != 0 is
+                ui::fail("cannot copy " + src)
+                return ""
+            end
+            return dest
+        end
+        ui::fail("path not found: " + src)
+        return ""
+    end
+
+    ui::fail("unknown source kind '" + l.lc_kind + "' for " + l.lc_url)
+    return ""
+end
+
+;; ── a single file as a library ───────────────────────────────────────────────
+
+;; A lone file becomes a tiny library: a directory that holds the file and — for H#, Hacker Lang
+;; and HackerScript sources — a generated Bit.hk that names the file as the library's entry point
+;; (so `use "bit -> name"` finds it). Any other kind of file is just kept in the directory.
+pub fn wrap_file(fpath: string, name: string, out: string) -> bool is
+    let fname: string = util::basename(fpath)
+    util::rm_rf(out)
+    util::mkdir_p(out)
+    if util::run("cp -f " + util::sq(fpath) + " " + util::sq(out + "/" + fname)) != 0 is return false end
+    let lang: string = lang_of_file(fname)
+    if lang != "" is
+        let manifest: string = "[package]\n-> name => " + name + "\n-> version => 0.0.0\n-> lang => " + lang +
+                               "\n\n[layout]\n-> lib-entry => " + fname + "\n"
+        file_write(out + "/Bit.hk", manifest)
+    end
+    return true
+end
+
+;; A stand-in for a commit id of a source that has none (a download, a local copy): the content
+;; hash, 40 hex characters. The same bytes always give the same id.
+pub fn plain_id(dir: string) -> string is
+    let sum: string = checksum::dir_checksum(dir)
+    if string_len(sum) < 40 is return sum end
+    return string_slice(sum, 0, 40)
+end
