@@ -23,82 +23,17 @@ mod external
 mod flags
 mod pipeline
 mod bitpkg
+mod locator
+mod help
 
 pub fn version() -> string is return "1.2.0" end
 
 pub fn print_version() is
-    write("bit " + version() + " — package manager for H#, Hacker Lang and HackerScript")
+    help::print_version(version())
 end
 
 pub fn print_help() is
-    write("")
-    write("  " + ui::bold("bit") + " " + version() + "  " + ui::dim("package manager for every HackerOS language (H#, Hacker Lang, HackerScript)"))
-    write("")
-    write("  " + ui::bold("USAGE"))
-    write("    bit                          do everything Bit.hk says: dependencies → [default-build] → run")
-    write("    bit <command> [options]")
-    write("")
-    write("  " + ui::bold("PROJECT"))
-    write("    init [name] [--lang h#|hl|hs] [--lib] [--gen N|rolling]   new project (or initialise the current directory)")
-    write("      --gen is Hacker Lang only ([package] -> gen in Bit.hk); writes a matching `using <gen N>` into the entry file")
-    write("    build [--release] [--target h#|hl|hs] [--platform P] [--emit bin|hlib|so|a|rlib|obj]")
-    write("      [--bin NAME] [--wasm] [--jar] [--library]   extra binaries (src/bin/*.h#, cmd/bin/*.hcs), wasm32, jar, rlib")
-    write("    build <file.hcs|file.h#>     compile one file without a Bit.hk          (virus build <file>)")
-    write("      [--features a,b] [--all-features] [--no-default-features] [--no-system-check]")
-    write("                                 without flags: uses [default-build] from Bit.hk")
-    write("    run [--bin NAME] [-- args]   build and run          check   syntax + type check")
-    write("    test [filter]                run #[test] functions (needs [dev-dependencies] too)")
-    write("    fmt [file] [--check]         format sources         lint [file]   show warnings only")
-    write("    doc [dir]                    HTML documentation from `;;` comments")
-    write("    lsp [h#|hs]                  language server on stdio        repair <code>   explain E0001 / W0002 …")
-    write("    clean [--all]                remove cache/ (--all: also old installed versions)")
-    write("    cache                        show / create the project cache/ directories")
-    write("    x <name> [args]              run a custom command from [commands] (also: bit <name>)")
-    write("    commands                     list custom commands")
-    write("    publish                      validate Bit.hk and print the index entry to submit")
-    write("    pack [--out DIR] [--platform P] [--debug] [--no-build] [--no-sources]")
-    write("                                 pack the library into  <name>-<version>-<platform>.bit  (SquashFS, compiled hlib inside)")
-    write("                                 + .sha256 — attach both to the GitHub release of the tag. Tuned by [pack] in Bit.hk")
-    write("    pkg [list|info|ls|verify|mount|umount|extract] [file.bit|name] [--all]     work with .bit packages")
-    write("")
-    write("  " + ui::bold("WORKSPACES"))
-    write("    new-ws <name> [--special]    new workspace (special: members in different languages)")
-    write("    ws [info|list|build|test|clean] [member]     build at the root = every member, dependencies first")
-    write("    -p <member>                  pick one member of a workspace (for build / run / test / check)")
-    write("")
-    write("  " + ui::bold("LIBRARIES") + "  " + ui::dim("installed to ~/.hackeros/libs/, checksummed, linked statically"))
-    write("    install [name|git-url ...]   install libraries (no name: [dependencies] + [dev-dependencies])")
-    write("      --prebuilt | --prebuilt-only | --no-prebuilt    take <name>-<version>-<platform>.bit from the library's GitHub release")
-    write("        (nothing is compiled, nothing is unpacked: the SquashFS is mounted)   = [prebuilt] in Bit.hk, BIT_PREBUILT   --mount auto|fuse|kernel|extract")
-    write("    install <source> <name> [--version V]   virus style, = add: pypi crates npm jsr vira bytes bit std core")
-    write("      [--output hlib|so|a|obj] [--target h#|hl|hs] [--no-build] [--release] [--force]")
-    write("    add <name|url|kind:name> [version|rev] [--dev]     install + add to Bit.hk")
-    write("      silver            newest        silver 0.1   that exact version      silver ^0.1   a range")
-    write("      github:org/repo#dir   a directory of a repository      pypi:requests 2.31   crates:serde ^1   npm:x   jsr:@s/x   vira:zlib")
-    write("    remove <name> [--global]     remove from the project (or uninstall)      (also: remove <source> <name>)")
-    write("    upgrade [name] [--dry-run]   re-resolve version ranges, fetch the newest matches, refresh Bit.lock")
-    write("    outdated                     locked → newest-in-range → newest version of every dependency")
-    write("    features                     list the project's [features]")
-    write("    system [check|install|list]  [system-dependencies]: look for native libraries, install the missing ones")
-    write("    python add <pkg> [ver] | install | list     Python packages in cache/env/python")
-    write("    list                         installed libraries")
-    write("    search [text|all] [--lang h#|hl|hs]")
-    write("    info <name>                  index entry + install state")
-    write("    update                       refresh the library index")
-    write("    verify [name]                re-check installed checksums against bit.lock")
-    write("    settings [get|set|unset|reset|path] [key] [value]     user settings (jobs, offline, plain, index-url, …)")
-    write("    doctor                       toolchains, tools, index, checksums")
-    write("    langs                        which language toolchains are installed")
-    write("")
-    write("  " + ui::bold("OPTIONS"))
-    write("    -r, --release   -v, --verbose   -f, --force   --no-lock   --sign <key>   -V, --version   -h, --help")
-    write("    --locked        install exactly what Bit.lock says (fails if it is out of date) — for CI")
-    write("    --offline       never use the network (installed libraries + cached index only)     BIT_OFFLINE=1")
-    write("    --jobs <n>      parallel clones (default 4)      BIT_JOBS   BIT_TIMEOUT=<s>   BIT_RETRIES=<n>")
-    write("    --no-system-check   build without checking [system-dependencies]      BIT_NO_SYSTEM_CHECK=1")
-    write("")
-    write("  " + ui::dim("Index: " + index::index_url()))
-    write("")
+    help::print(version())
 end
 
 ;; ── virus compatibility ──────────────────────────────────────────────────────
@@ -413,7 +348,10 @@ fn add_spec(arg_in: string, rev_in: string) -> [string] is
     end
     if kind == "git" || util::is_url(body) is
         let url: string = if string_contains(body, "#") then string_slice(body, 0, string_find(body, "#")) else body
-        return [installer::repo_name_from_url(url), "git " + body + (if rev != "" then " " + rev else "")]
+        ;; a repository, a directory (`…/tree/<ref>/<dir>`, `url#dir`), a file (`…/blob/<ref>/<file>`, a raw url)
+        let lc: locator::Locator = locator::parse(body)
+        let dep_key: string = if lc.lc_name != "" then lc.lc_name else installer::repo_name_from_url(url)
+        return [dep_key, "git " + body + (if rev != "" then " " + rev else "")]
     end
     if string_starts_with(body, ".") || string_starts_with(body, "/") || string_starts_with(body, "~") is
         return [util::basename(body), "path " + body]
@@ -503,7 +441,9 @@ pub fn cmd_upgrade(name: string, verbose: bool, release: bool, dry_run: bool) ->
         if name == "" || name == n is
             let in_index: bool = index::e_name(index::index_find(ix, n)) != ""
             let spec: string = if in_index then n else lock::locked_url(e)
-            let o: installer::InstallOpts = installer::iopts(true, true, "", "", "", release, verbose)
+            let o0: installer::InstallOpts = installer::iopts(true, true, "", "", "", release, verbose)
+            ;; a library that is not in the index again: same name, and the directory / file it was taken from
+            let o: installer::InstallOpts = if in_index then o0 else installer::with_origin(o0, n, lock::locked_dir(e), lock::locked_source(e))
             if installer::install_lib(spec, "", o) != 0 is failed += 1 end
         end
         i += 1
@@ -597,7 +537,11 @@ pub fn cmd_info(name: string) -> int is
     if index::e_name(e) != "" is
         ui::line(string_pad_right("description", 14) + index::e_desc(e))
         ui::line(string_pad_right("language", 14) + (if index::e_lang(e) == "" then "any / detected on install" else project::lang_label(index::e_lang(e))))
-        ui::line(string_pad_right("repository", 14) + index::e_target(e))
+        let where_label: string = if index::e_kind(e) == "git" then "repository" else "source"
+        ui::line(string_pad_right(where_label, 14) + index::e_target(e))
+        if index::e_dir(e) != "" is ui::line(string_pad_right("directory", 14) + index::e_dir(e) + ui::dim("   (directory or file of the repository)")) end
+        if index::e_kind(e) == "http" is ui::line(string_pad_right("fetched as", 14) + "a single file download") end
+        if index::e_kind(e) == "local" is ui::line(string_pad_right("fetched as", 14) + "a copy of a path on disk") end
         ui::line(string_pad_right("author", 14) + index::e_author(e))
         ui::line(string_pad_right("tags", 14) + util::join(index::e_tags(e), ", "))
         if index::e_rev(e) != "" is ui::line(string_pad_right("rev", 14) + index::e_rev(e)) end
