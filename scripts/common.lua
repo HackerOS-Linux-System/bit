@@ -57,10 +57,10 @@ end
 
 -- ── the library index (parsed with jq — Lua has no JSON in its stdlib) ───────
 
--- Returns { {name=, target=, lang=, rev=, checksum=, raw=<compact json>}, ... }
+-- Returns { {name=, target=, lang=, rev=, checksum=, dir=, kind=, raw=<compact json>}, ... }
 -- `source` is { file = path } or { cmd = "<shell producing the JSON>" }.
 function M.read_index(source)
-  local filter = [[jq -r '.libraries[] | [.name, .target, (.lang // ""), (.rev // ""), (.checksum // ""), tojson] | @tsv']]
+  local filter = [[jq -r '.libraries[] | [.name, (.target // .url // .git // ""), (.lang // ""), (.rev // ""), (.checksum // ""), (.dir // .subdir // .directory // .file // .path // ""), (.type // .kind // ""), tojson] | @tsv']]
   local cmd
   if source.file then
     cmd = filter .. " " .. M.sq(source.file)
@@ -69,9 +69,11 @@ function M.read_index(source)
   end
   local list = {}
   for _, l in ipairs(M.lines(cmd)) do
-    local name, target, lang, rev, checksum, raw = l:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
+    local name, target, lang, rev, checksum, dir, kind, raw =
+      l:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
     if name then
-      list[#list + 1] = { name = name, target = target, lang = lang, rev = rev, checksum = checksum, raw = raw }
+      list[#list + 1] = { name = name, target = target, lang = lang, rev = rev, checksum = checksum,
+                          dir = dir, kind = kind, raw = raw }
     end
   end
   return list
@@ -102,6 +104,193 @@ function M.clone(url, rev, dest)
   M.run("rm -rf " .. M.sq(dest))
   return M.run(base .. M.sq(url) .. " " .. M.sq(dest)) and
          M.run("git -C " .. M.sq(dest) .. " checkout --quiet " .. M.sq(rev))
+end
+
+-- ── where a package comes from (mirror of bit's src/locator.h#) ──────────────
+--
+-- An entry's `target` is a git repository, ONE DIRECTORY of one (`.../tree/<ref>/<dir>`, `url#dir`,
+-- the `dir` key), ONE FILE of one (`.../blob/<ref>/<file>`, the `file` key) or a file that is
+-- downloaded as it is (raw.githubusercontent.com, any https url that ends in a source file,
+-- `"type": "file"`). Returns { kind = "git" | "http", url =, rev =, dir = }.
+
+local FILE_EXTS = { ".h#", ".hl", ".hcs", ".hlib", ".hk", ".h", ".c", ".rs", ".lua", ".sh", ".md", ".txt", ".json", ".toml" }
+
+local function is_file_name(name)
+  local low = name:lower()
+  for _, ext in ipairs(FILE_EXTS) do
+    if low:sub(-#ext) == ext then return true end
+  end
+  return false
+end
+
+local function segments(path)
+  local out = {}
+  for seg in path:gmatch("[^/]+") do out[#out + 1] = seg end
+  return out
+end
+
+local function join(segs, from, stop)
+  local out = {}
+  for i = from, stop do out[#out + 1] = segs[i] end
+  return table.concat(out, "/")
+end
+
+local function decode(s) return (s:gsub("%%23", "#"):gsub("%%20", " ")) end
+
+-- a branch called main / master / HEAD in a url means "the default branch": no rev
+local function branch_value(b)
+  if b == "main" or b == "master" or b == "HEAD" then return "" end
+  return b
+end
+
+local function forge_parse(base)
+  local rest = base:gsub("^https?://", ""):gsub("%?.*$", "")
+  local segs = segments(rest)
+  local n = #segs
+  if n < 5 then return nil end
+  local host = segs[1]:lower()
+  local function found(repo_end, branch_at, path_from)
+    return { kind = "git", url = "https://" .. join(segs, 1, repo_end),
+             rev = branch_value(decode(segs[branch_at])), dir = decode(join(segs, path_from, n)) }
+  end
+  -- GitLab: group/sub/repo/-/tree|blob|raw/<ref>/<path>
+  for i = 3, n - 2 do
+    if segs[i] == "-" and (segs[i + 1] == "tree" or segs[i + 1] == "blob" or segs[i + 1] == "raw") then
+      return found(i - 1, i + 2, i + 3)
+    end
+  end
+  for j = 4, n - 1 do
+    local s = segs[j]
+    local nx = segs[j + 1]
+    -- Codeberg / Gitea / Forgejo: src|raw/branch|tag|commit/<ref>/<path>
+    if (s == "src" or s == "raw") and j + 2 <= n and (nx == "branch" or nx == "tag" or nx == "commit") then
+      return found(j - 1, j + 2, j + 3)
+    end
+    -- GitHub (and Gitea): tree|blob|raw/<ref>/<path>
+    if s == "tree" or s == "blob" or s == "raw" then return found(j - 1, j + 1, j + 2) end
+    -- Bitbucket: src/<ref>/<path>
+    if s == "src" and host:find("bitbucket", 1, true) then return found(j - 1, j + 1, j + 2) end
+  end
+  return nil
+end
+
+function M.resolve_target(e)
+  local t = decode(e.target or "")
+  local base, frag = t, ""
+  local h = t:find("#", 1, true)
+  if h then
+    base, frag = t:sub(1, h - 1), t:sub(h + 1)
+    if frag == "" and base:sub(-2) == ".h" then base = base .. "#" end   -- `lib.h#` is a file name
+  end
+  local rest = base:gsub("^https?://", ""):gsub("%?.*$", "")
+  local host = (rest:match("^[^/]+") or ""):lower()
+  local last = rest:match("([^/]+)/*$") or ""
+
+  local r
+  if host == "raw.githubusercontent.com" or host == "gist.githubusercontent.com" then
+    r = { kind = "http", url = base, rev = "", dir = "" }
+  else
+    r = forge_parse(base)
+    if r then
+      if r.dir == "" then r.dir = frag end
+    elseif base:match("^https?://") and is_file_name(last) then
+      r = { kind = "http", url = base, rev = "", dir = "" }
+    else
+      r = { kind = "git", url = base, rev = "", dir = frag }
+    end
+  end
+
+  -- the explicit keys of the entry win over what the url says
+  if e.kind == "file" or e.kind == "http" or e.kind == "url" or e.kind == "download" then
+    r = { kind = "http", url = r.url, rev = "", dir = "" }
+  end
+  if r.kind == "git" and e.dir and e.dir ~= "" then r.dir = e.dir end
+  if e.rev and e.rev ~= "" then r.rev = e.rev end
+  if r.kind ~= "git" then r.dir = "" end
+  return r
+end
+
+-- Clones only `sub` (a directory or a file) of a repository: sparse + blob-less, so a monorepo is
+-- not fetched whole. Falls back to the ordinary clone (same result, the caller picks `sub` out).
+function M.clone_sub(url, rev, dest, sub)
+  M.run("rm -rf " .. M.sq(dest))
+  local br = (rev ~= "") and ("--branch " .. M.sq(rev) .. " ") or ""
+  local cmd = "( git clone --quiet --depth=1 --filter=blob:none --sparse " .. br .. M.sq(url) .. " " .. M.sq(dest) ..
+              " && git -C " .. M.sq(dest) .. " sparse-checkout set --no-cone " .. M.sq("/" .. sub) .. " ) 2>/dev/null"
+  if M.run(cmd) then return true end
+  return M.clone(url, rev, dest)
+end
+
+local function lang_of_file(fname)
+  local low = fname:lower()
+  if low:sub(-3) == ".h#" then return "h#" end
+  if low:sub(-3) == ".hl" then return "hl" end
+  if low:sub(-4) == ".hcs" then return "hs" end
+  return nil
+end
+
+-- A lone file becomes a tiny library (same as bit): a directory with the file and, for H# / Hacker
+-- Lang / HackerScript sources, a generated Bit.hk naming it as the library entry.
+local function wrap_file(path, name, out)
+  local fname = path:match("([^/]+)$")
+  M.run("rm -rf " .. M.sq(out) .. " && mkdir -p " .. M.sq(out))
+  if not M.run("cp -f " .. M.sq(path) .. " " .. M.sq(out .. "/" .. fname)) then return false end
+  local lang = lang_of_file(fname)
+  if lang then
+    local f = io.open(out .. "/Bit.hk", "w")
+    if not f then return false end
+    f:write("[package]\n-> name => " .. name .. "\n-> version => 0.0.0\n-> lang => " .. lang ..
+            "\n\n[layout]\n-> lib-entry => " .. fname .. "\n")
+    f:close()
+  end
+  return true
+end
+
+-- Fetches an index entry into `dest` the way `bit install` does: the whole repository, ONE DIRECTORY
+-- of it, ONE FILE of it, or a downloaded file. Returns ok, commit-or-content-id, error message.
+function M.fetch(e, dest)
+  local r = M.resolve_target(e)
+  local stage = dest .. ".stage"
+  M.run("rm -rf " .. M.sq(dest) .. " " .. M.sq(stage))
+
+  if r.kind == "http" then
+    M.run("mkdir -p " .. M.sq(stage))
+    local fname = decode(r.url:gsub("%?.*$", ""):match("([^/]+)$") or "")
+    if fname == "" then return false, "", "the url names no file: " .. r.url end
+    local url = r.url:gsub("#", "%%23")
+    if not M.run("curl -fsSL --retry 3 --connect-timeout 15 " .. M.sq(url) .. " -o " .. M.sq(stage .. "/" .. fname)) then
+      return false, "", "cannot download " .. r.url
+    end
+    local id = M.dir_checksum(stage):sub(1, 40)
+    if not wrap_file(stage .. "/" .. fname, e.name, dest) then return false, "", "cannot prepare " .. fname end
+    M.run("rm -rf " .. M.sq(stage))
+    return true, id, ""
+  end
+
+  if r.dir == "" then
+    if not M.clone(r.url, r.rev, dest) then
+      return false, "", "cannot clone " .. r.url .. (r.rev ~= "" and (" @ " .. r.rev) or "")
+    end
+    return true, M.commit_of(dest), ""
+  end
+
+  if not M.clone_sub(r.url, r.rev, stage, r.dir) then
+    return false, "", "cannot clone " .. r.url .. (r.rev ~= "" and (" @ " .. r.rev) or "")
+  end
+  local commit = M.commit_of(stage)
+  local held = stage .. "/" .. r.dir
+  local ok
+  if M.capture("test -d " .. M.sq(held) .. " && echo dir") == "dir" then
+    ok = M.run("mv " .. M.sq(held) .. " " .. M.sq(dest))
+  elseif M.capture("test -f " .. M.sq(held) .. " && echo file") == "file" then
+    ok = wrap_file(held, e.name, dest)
+  else
+    M.run("rm -rf " .. M.sq(stage))
+    return false, commit, "the repository has no directory or file '" .. r.dir .. "'"
+  end
+  M.run("rm -rf " .. M.sq(stage))
+  if not ok then return false, commit, "cannot place " .. r.dir end
+  return true, commit, ""
 end
 
 function M.commit_of(dir)
