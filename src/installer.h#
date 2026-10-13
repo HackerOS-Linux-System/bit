@@ -12,6 +12,7 @@ mod project
 mod build
 mod registry
 mod bitpkg
+mod locator
 
 pub fn lib_root(name: string) -> string is return util::libs_dir() + "/" + name end
 
@@ -172,10 +173,27 @@ end
 
 ;; url of an index name / git url ("" when the library is not in the index)
 pub fn spec_url(spec: string) -> string is
-    if util::is_url(spec) is return spec end
+    if util::is_url(spec) || locator::is_local_spec(spec) is
+        let lc: locator::Locator = locator::parse(spec)
+        return lc.lc_url
+    end
     let ix: index::Index = index::index_load()
     let e: index::LibEntry = index::index_find(ix, spec)
     return index::e_target(e)
+end
+
+;; Is `spec` a WHOLE git repository (so that a parallel full clone up front is worth it)? A
+;; directory or a single file of a repository is fetched sparsely instead, and a download or a local
+;; path is not a clone at all. `dir` is the dependency's own `dir =>` ("" = none).
+pub fn spec_prefetchable(spec: string, dir: string) -> bool is
+    if dir != "" is return false end
+    if util::is_url(spec) || locator::is_local_spec(spec) is
+        let lc: locator::Locator = locator::parse(spec)
+        return lc.lc_kind == "git" && lc.lc_dir == ""
+    end
+    let ix: index::Index = index::index_load()
+    let e: index::LibEntry = index::index_find(ix, spec)
+    return index::e_name(e) != "" && index::e_kind(e) == "git" && index::e_dir(e) == ""
 end
 
 ;; Newest tag of `spec` that satisfies `range` ("" = none / offline / unreachable).
@@ -242,18 +260,18 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
     let mut hint_lang: string = o.io_lang
     let mut dir: string = o.io_dir
     let mut source: string = if o.io_source != "" then o.io_source else "index"
+    let mut fetch: string = "git"     ;; where the files come from: git | http (a file download) | local (a path)
 
-    if util::is_url(spec) is
-        url = string_slice(spec, 0, string_len(spec))
-        name = repo_name_from_url(spec)
-        if o.io_source == "" is source = "git" end
-        ;; `https://host/org/repo#crates/mine` — the fragment names a directory of the repository
-        let hash: int = string_find(spec, "#")
-        if hash >= 0 is
-            url = string_slice(spec, 0, hash)
-            if dir == "" is dir = string_slice(spec, hash + 1, string_len(spec)) end
-            name = repo_name_from_url(url)
-        end
+    if util::is_url(spec) || locator::is_local_spec(spec) is
+        ;; a repository, ONE DIRECTORY of it (`…/tree/<ref>/<dir>`, `url#dir`), ONE FILE of it
+        ;; (`…/blob/<ref>/<file>`), a file download, or a path on disk — see locator.h#
+        let lc: locator::Locator = locator::parse(spec)
+        url = lc.lc_url
+        fetch = lc.lc_kind
+        name = if lc.lc_name != "" then lc.lc_name else repo_name_from_url(url)
+        if o.io_source == "" is source = fetch end
+        if dir == "" is dir = lc.lc_dir end
+        if rev == "" is rev = lc.lc_rev end
     else is
         if !util::valid_name(spec) is
             ui::fail("invalid library name '" + spec + "'")
@@ -264,11 +282,12 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
         let e: index::LibEntry = index::index_find_lang(ix, spec, lang_hint)
         if index::e_name(e) == "" is
             ui::fail("library '" + spec + "' not found in the index")
-            ui::note("search:  bit search " + spec + "     or install a repo directly:  bit install <git-url>")
+            ui::note("search:  bit search " + spec + "     or install directly:  bit install <git-url | …/tree/<ref>/<dir> | …/blob/<ref>/<file> | file-url | path>")
             return 1
         end
         name = index::e_name(e)
         url = index::e_target(e)
+        fetch = index::e_kind(e)
         if dir == "" is dir = index::e_dir(e) end
         if rev == "" is rev = index::e_rev(e) end
         pinned = index::e_checksum(e)
@@ -291,14 +310,14 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
         end
         ui::note(name + ": installed " + util::short_hash(lock::locked_commit(have)) + ", wanted " + rev + " — installing it")
     end
-    if net::offline() is
+    if net::offline() && fetch != "local" is
         ui::fail(name + " is not installed and bit is offline (BIT_OFFLINE / --offline)")
         return 1
     end
 
     ;; 1b. a prebuilt .bit package from the repository's GitHub release (opt-in: [prebuilt] / --prebuilt)
     let bmode: string = effective_bit(o)
-    if bmode != "off" && dir == "" is
+    if bmode != "off" && dir == "" && fetch == "git" is
         let got: bitpkg::Got = bitpkg::install(name, url, rev, o.io_verbose)
         if got.g_state == 0 is
             return finish_prebuilt(name, url, source, hint_lang, got, o)
@@ -319,35 +338,68 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
     let tmp: string = util::tmp_dir() + "/" + name + "-" + to_string(proc_id())
     util::rm_rf(tmp)
 
-    ;; 2. clone
-    let pre: string = net::prefetch_dir(url, rev)
-    if dir_exists(pre) && !o.io_force is
-        util::run("mv " + util::sq(pre) + " " + util::sq(tmp))
+    ;; 2. fetch — into `tmp`; `held` is what becomes the library (the whole checkout, a directory of
+    ;;    it, or a single file) and `commit` its identity
+    let mut commit: string = ""
+    let mut held: string = ""
+    if fetch == "git" is
+        let pre: string = net::prefetch_dir(url, rev)
+        if dir_exists(pre) && !o.io_force is
+            util::run("mv " + util::sq(pre) + " " + util::sq(tmp))
+        else is
+            ;; one directory / one file of a repository: only that path is downloaded (sparse clone)
+            let rc: int = if dir != "" then net::clone_sub(url, rev, tmp, dir, "cloning " + name, o.io_verbose)
+                          else net::clone(url, rev, tmp, "cloning " + name, o.io_verbose)
+            if rc != 0 is
+                ui::fail("git clone failed: " + url)
+                ui::note("network trouble? retries: BIT_RETRIES, timeout: BIT_TIMEOUT, offline: BIT_OFFLINE=1")
+                util::rm_rf(tmp)
+                return 1
+            end
+        end
+        commit = util::capture("git -C " + util::sq(tmp) + " rev-parse HEAD 2>/dev/null")
+        if commit == "" is
+            ui::fail("not a git repository: " + url)
+            util::rm_rf(tmp)
+            return 1
+        end
+        util::rm_rf(tmp + "/.git")
+        held = if dir != "" then tmp + "/" + dir else tmp
+        if !dir_exists(held) && !file_exists(held) is
+            ui::fail(name + ": the repository has no directory or file '" + dir + "'")
+            util::rm_rf(tmp)
+            return 1
+        end
     else is
-        if net::clone(url, rev, tmp, "cloning " + name, o.io_verbose) != 0 is
-            ui::fail("git clone failed: " + url)
-            ui::note("network trouble? retries: BIT_RETRIES, timeout: BIT_TIMEOUT, offline: BIT_OFFLINE=1")
+        ;; a file download / a path on disk: there is no commit — the content hash stands in for it
+        let lc: locator::Locator = locator::Locator { lc_kind: fetch, lc_url: url, lc_rev: "", lc_dir: "", lc_name: name }
+        held = locator::stage_plain(lc, tmp)
+        if held == "" is
+            util::rm_rf(tmp)
+            return 1
+        end
+        commit = locator::plain_id(tmp)
+        if commit == "" is
+            ui::fail(name + ": nothing was fetched from " + url)
             util::rm_rf(tmp)
             return 1
         end
     end
-    let commit: string = util::capture("git -C " + util::sq(tmp) + " rev-parse HEAD 2>/dev/null")
-    if commit == "" is
-        ui::fail("not a git repository: " + url)
-        util::rm_rf(tmp)
-        return 1
+
+    ;; a single file (not a directory) becomes a tiny library of its own
+    if !dir_exists(held) is
+        let pkg: string = tmp + "/.bit-file-library"
+        if !locator::wrap_file(held, name, pkg) is
+            ui::fail(name + ": cannot prepare the file " + held)
+            util::rm_rf(tmp)
+            return 1
+        end
+        held = pkg
     end
 
     ;; 3. place
     let dest: string = lib_dir(name, util::short_hash(commit))
     let version: string = util::short_hash(commit)
-    util::rm_rf(tmp + "/.git")
-    let held: string = if dir != "" then tmp + "/" + dir else tmp
-    if !dir_exists(held) is
-        ui::fail(name + ": the repository has no directory '" + dir + "'")
-        util::rm_rf(tmp)
-        return 1
-    end
     util::mkdir_p(lib_root(name))
     if dir_exists(dest) is
         bitpkg::close(dest)
@@ -359,7 +411,7 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
         util::rm_rf(tmp)
         return 1
     end
-    if dir != "" is util::rm_rf(tmp) end
+    if held != tmp is util::rm_rf(tmp) end
 
     ;; 4. checksum (+ pin)
     let sum: string = checksum::dir_checksum(dest)
