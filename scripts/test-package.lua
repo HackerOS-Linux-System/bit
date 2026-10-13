@@ -99,9 +99,10 @@ local function test_one(e)
   if not e.target:match("^https://") then return "fail", "target is not an https:// URL", "" end
 
   local dir = opts.work .. "/src/" .. e.name
-  if not C.clone(e.target, e.rev, dir) then
+  local fetched, _, why = C.fetch(e, dir)
+  if not fetched then
     if skip_unreachable then return "skip", "repository not reachable: " .. e.target, "" end
-    return "fail", "cannot clone " .. e.target, ""
+    return "fail", why, ""
   end
 
   local sum = C.dir_checksum(dir)
