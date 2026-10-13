@@ -81,10 +81,45 @@ as `[a, b]`.
 
 Toolchain overrides: `BIT_HSHARP`, `BIT_HL`, `BIT_HACKERC`.
 
+## Where a library comes from — repositories, directories, files
+
+A `target` in `index/repository.json` (also `bit install <spec>` and `git =>` dependencies) is not
+limited to a whole git repository:
+
+| `target` | what is installed |
+|---|---|
+| `https://github.com/org/repo` | the whole repository |
+| `https://github.com/org/repo/tree/v1.2/crates/x` | **one directory** of it, at ref `v1.2` |
+| `https://github.com/org/repo#crates/x` | the same, fragment spelling (also `"dir": "crates/x"`) |
+| `https://github.com/org/repo/blob/main/src/x.h#` | **one file** of it (also `"file": "src/x.h#"`) |
+| `https://raw.githubusercontent.com/org/repo/main/x.hl` | a file, downloaded as it is |
+| `https://example.org/dl/x.h#` | any https url that ends in a source file (`"type": "file"` forces it) |
+| `/path/dir`, `./dir`, `~/dir`, `file:///dir` | a directory on disk (copied); a path to a file works too |
+
+`tree/blob/raw` urls of GitHub, GitLab (`/-/tree/…`), Codeberg/Gitea (`/src/branch/…`) and Bitbucket
+(`/src/<ref>/…`) are understood. The segment after `tree/` is the ref; a branch with a `/` in its name
+needs the explicit `rev` + `dir` keys. A branch `main` / `master` / `HEAD` in a url means "the default
+branch" (no pin). A `#` that ends a file name (`x.h#`) is part of the name; `%23` also works.
+
+```json
+{ "name": "libhammer", "target": "https://github.com/HackerOS-Linux-System/hammer/tree/main/libhammer", ... }
+{ "name": "colors",    "target": "https://github.com/org/mono", "dir": "libs/colors", "rev": "v1.0.0", ... }
+{ "name": "util",      "target": "https://github.com/org/repo/blob/v1.0.0/src/util.h#", ... }
+```
+
+* **Directory / file of a repository** are fetched with a sparse, blob-less clone (only that path is
+  downloaded; older git or servers fall back to a normal clone). The commit, tag ranges, `Bit.lock`
+  (`dir`) and checksums work as for a whole repository.
+* **A single file** becomes a tiny library: the file plus a generated `Bit.hk`
+  (`lang` from the extension — `.h#`, `.hl`, `.hcs`; `[layout] lib-entry` = the file).
+* **Downloads and local paths** have no commit: the content hash (40 hex chars) is the version id.
+  Local paths work offline; they are meant for development, not for the public index (CI requires https).
+* `bit install` / `bit upgrade` of a library installed this way remember the directory/file.
+
 ## Repository
 
 ```
-src/        bit (H#): main, cli, build, installer, bitpkg, workflow, project, index, lock, checksum, hk, ui, util, scaffold, commands, semver, net, task, native
+src/        bit (H#): main, cli, help, build, installer, locator, bitpkg, workflow, project, index, lock, checksum, hk, ui, util, scaffold, commands, semver, net, task, native
 scripts/    CI: build-new-package.lua, test-package.lua, validate-index.lua (+ common.lua, bootstrap-ci.sh)
 website/    bit.io — TypeScript, built with tsc → dist/
 index/      repository.json
@@ -232,16 +267,17 @@ wait for a maintainer to approve the `external-packages` environment before
 
 ## Building bit itself
 
-bit is written in H# and built on three libraries, none of which is re-implemented inside bit:
+bit is written in H# and built on these libraries, none of which is re-implemented inside bit:
 
 | what | where it comes from |
 |---|---|
 | `.hk` manifests | **hk-parser** (`bit-io/hk-parser`; Rust staticlib with a C ABI, linked with `extern static`) |
 | progress bars | **progress-bar** (`bit-io/progress-bar`, pure H#) |
+| colours of `bit help` / `bit --version` | **colors** (`bit-io/colors`, pure H#: named colours, gradients; honours `NO_COLOR`, `TERM=dumb`, `COLORTERM`, downgrades to 256/16 colours) |
 | JSON | H# `std -> json` (in compiled H# it reads flat objects only, so `bit.lock` is JSON Lines and the index is cut into one chunk per library before `json::get_str`) |
 
 `scripts/bootstrap-ci.sh` sets everything up: it installs H# with the official
-`install-utils.sh` + `install.sh` from the H-Sharp repository, puts hk-parser and progress-bar in
+`install-utils.sh` + `install.sh` from the H-Sharp repository, puts hk-parser, progress-bar, nidus and colors in
 `~/.hackeros/H#/build/cache/packages/` and builds `libhk_parser.a` (add it to `LIBRARY_PATH`). Then:
 
 ```sh
