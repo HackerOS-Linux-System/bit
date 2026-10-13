@@ -81,8 +81,20 @@ pub fn clone_cmd(url: string, rev: string, dest: string) -> string is
            " && git -C " + util::sq(dest) + " checkout --quiet " + util::sq(rev) + ")"
 end
 
-;; Clone with spinner + retries. 0 on success.
-pub fn clone(url: string, rev: string, dest: string, label: string, verbose: bool) -> int is
+;; The clone command line for a library that is only ONE DIRECTORY (or ONE FILE) of a repository
+;; (`sub`): a sparse, blob-less clone that downloads just that path — a big monorepo is not fetched
+;; whole. A git or server without partial-clone support falls back to the ordinary clone, so the
+;; result is the same either way (the caller picks `sub` out of the checkout).
+pub fn clone_sub_cmd(url: string, rev: string, dest: string, sub: string) -> string is
+    let g: string = git_env() + "git clone --quiet --progress "
+    let branch: string = if rev != "" then "--branch " + util::sq(rev) + " " else ""
+    let sparse: string = g + "--depth=1 --filter=blob:none --sparse " + branch + util::sq(url) + " " + util::sq(dest) +
+                         " && " + git_env() + "git -C " + util::sq(dest) + " sparse-checkout set --no-cone " + util::sq("/" + sub)
+    return "(" + sparse + ") 2>/dev/null || (rm -rf " + util::sq(dest) + " && (" + clone_cmd(url, rev, dest) + "))"
+end
+
+;; Runs a clone command with spinner + retries. 0 on success.
+fn clone_run(cmd: string, url: string, dest: string, label: string, verbose: bool) -> int is
     if offline() is
         ui::fail("offline mode: cannot fetch " + url)
         return 1
@@ -94,7 +106,7 @@ pub fn clone(url: string, rev: string, dest: string, label: string, verbose: boo
     while tries < attempts is
         tries += 1
         util::rm_rf(dest)
-        rc = task::run(label, limited(clone_cmd(url, rev, dest)), verbose, true)
+        rc = task::run(label, limited(cmd), verbose, true)
         if rc == 0 is return 0 end
         if tries < attempts is
             ui::note("clone failed, retrying in " + to_string(wait) + "s (" + to_string(tries) + "/" + to_string(attempts) + ")")
@@ -103,6 +115,16 @@ pub fn clone(url: string, rev: string, dest: string, label: string, verbose: boo
         end
     end
     return rc
+end
+
+;; Clone with spinner + retries. 0 on success.
+pub fn clone(url: string, rev: string, dest: string, label: string, verbose: bool) -> int is
+    return clone_run(clone_cmd(url, rev, dest), url, dest, label, verbose)
+end
+
+;; Clone only `sub` (a directory or a file of the repository) — see `clone_sub_cmd`. 0 on success.
+pub fn clone_sub(url: string, rev: string, dest: string, sub: string, label: string, verbose: bool) -> int is
+    return clone_run(clone_sub_cmd(url, rev, dest, sub), url, dest, label, verbose)
 end
 
 ;; Version tags of a remote repo: "v1.0.0", "v1.1.0", …  (empty when offline / unreachable)
