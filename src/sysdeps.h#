@@ -185,8 +185,11 @@ pub fn version_ok(d: project::SysDep, f: Found) -> bool is
 end
 
 ;; bit links statically: a library that exists only as a shared object cannot be linked in.
-fn static_note(d: project::SysDep) is
+fn static_note(p: project::Project, d: project::SysDep) is
     if d.sd_lib == "" is return end
+    ;; a project with its own [build] native part (e.g. satsolv building libsolv.a) supplies the
+    ;; static archive itself before it links — no point in warning about the system's .so
+    if project::get(p, "build", "native", "") != "" is return end
     if lib_found(d.sd_lib, "a") is return end
     if lib_found(d.sd_lib, "so") is
         ui::warn(d.sd_name + ": only a shared lib" + d.sd_lib + ".so was found — bit links statically, install the static archive (lib" + d.sd_lib + ".a, usually the -dev / -static package)")
@@ -238,7 +241,7 @@ pub fn check(p: project::Project, install: bool, quiet_ok: bool) -> int is
             if !quiet_ok is
                 ui::ok(d.sd_name + want + "  " + ui::dim((if f.fd_version != "" then "found " + f.fd_version else "found") + " (" + f.fd_how + ")"))
             end
-            static_note(d)
+            static_note(p, d)
         else if f.fd_present is
             ui::bad(d.sd_name + "  " + ui::red("version " + f.fd_version + " does not satisfy" + want))
             print_missing(d)
