@@ -22,6 +22,7 @@ fn catalog() -> [string] is
     return [
         "jobs|BIT_JOBS|parallel downloads / builds|a number (default 4)",
         "offline|BIT_OFFLINE|never touch the network|true | false",
+        "fresh|BIT_FRESH|ask the remote whether an installed library has a newer commit|on (default) | off",
         "plain|BIT_PLAIN|no animations, one line per step|true | false",
         "color|NO_COLOR|coloured output|auto | never",
         "index-url|BIT_INDEX_URL|where the library index comes from|a URL or a file path",
