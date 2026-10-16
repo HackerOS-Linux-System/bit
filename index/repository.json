@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-10-11",
+  "updated_at": "2026-10-16",
   "libraries": [
     {
       "name": "mold",
@@ -51,7 +51,7 @@
     {
       "name": "satsolv",
       "target": "https://github.com/bit-io/satsolv",
-      "description": "Libsolv wrapper for H#.",
+      "description": "Libsolv wrapper for bit.io. Written in H#.",
       "tags": [
         "libsolv",
         "solver"
@@ -126,7 +126,7 @@
     {
       "name": "landlock",
       "target": "https://github.com/bit-io/landlock",
-      "description": "Landlock library for H#.",
+      "description": "Landlock library for bit.io. Written in H#.",
       "tags": [
         "landlock"
       ],
@@ -135,7 +135,7 @@
     {
       "name": "libseccomp",
       "target": "https://github.com/bit-io/libseccomp",
-      "description": "Libseccomp library for H#.",
+      "description": "Libseccomp library for bit.io. Written in H#.",
       "tags": [
         "libseccomp"
       ],
@@ -144,7 +144,7 @@
     {
       "name": "qt",
       "target": "https://github.com/bit-io/qt",
-      "description": "QT library bindings.",
+      "description": "QT library bindings for bit.io.",
       "tags": [
         "qt",
         "qt6"
@@ -154,7 +154,7 @@
     {
       "name": "scopeguard",
       "target": "https://github.com/bit-io/scopeguard",
-      "description": "Scopeguard library bindings.",
+      "description": "Scopeguard library bindings for bit.io.",
       "tags": [
         "scopeguard"
       ],
@@ -183,7 +183,7 @@
     {
       "name": "regex",
       "target": "https://github.com/bit-io/regex",
-      "description": "Regex library for Hacker Lang.",
+      "description": "Regex library for bit.io. Written in Hacker Lang",
       "tags": [
         "regex"
       ],
@@ -233,7 +233,7 @@
     {
       "name": "gui",
       "target": "https://github.com/bit-io/gui",
-      "description": "GUI library for Hacker Lang.",
+      "description": "GUI library for bit.io. Written in HackerScript.",
       "tags": [
         "gui"
       ],
