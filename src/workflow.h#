@@ -184,7 +184,7 @@ fn ensure_one(p: project::Project, d: project::Dep, pk: Pick, pl: lock::Lock, us
     end
     if !integrity_ok(dname, locked, lock::locked_checksum(now), use_lock) is return failed() end
     ;; a .bit package is mounted, not unpacked: after a reboot it has to be opened again
-    if lock::locked_output(now) == "bit" && !bitpkg::ensure_open(dname, util::short_hash(lock::locked_commit(now)), verbose) is
+    if lock::locked_output(now) == "bit" && !bitpkg::ensure_open(dname, lock::locked_id(now), verbose) is
         return failed()
     end
 
@@ -280,7 +280,8 @@ pub fn outdated(p: project::Project) -> int is
         let d: project::Dep = deps[i]
         let k: string = project::dep_kind(d)
         if project::is_git_kind(k) is
-            let tags: [string] = net::remote_tags(installer::spec_url(spec_of(d)))
+            let url: string = installer::spec_url(spec_of(d))
+            let tags: [string] = net::remote_tags(url)
             let locked: lock::Locked = lock::lock_get(pl, project::dep_name(d))
             let cur: string = util::or_default(lock::locked_tag(locked), util::short_hash(lock::locked_commit(locked)))
             let range: string = project::dep_range(d)
@@ -288,11 +289,19 @@ pub fn outdated(p: project::Project) -> int is
             let newest: string = semver::newest_tag(tags)
             let is_old: bool = in_range != "" && lock::locked_tag(locked) != "" && semver::parse(in_range) > semver::parse(lock::locked_tag(locked))
             let beyond: bool = newest != "" && in_range != "" && semver::parse(newest) > semver::parse(in_range)
-            let mark: string = if is_old then ui::yellow("↑") else if beyond then ui::cyan("»") else ui::green("✓")
+            ;; a dependency that follows a branch (no range, no rev) is outdated when the branch moved
+            let mut tip: string = ""
+            if range == "" && project::dep_rev(d) == "" && lock::locked_commit(locked) != "" is
+                tip = net::remote_commit(url, "")
+                if tip == lock::locked_commit(locked) is tip = "" end
+            end
+            let moved: bool = tip != ""
+            let mark: string = if is_old || moved then ui::yellow("↑") else if beyond then ui::cyan("»") else ui::green("✓")
             ui::line(mark + " " + project::dep_name(d) + "  " + ui::dim(util::or_default(cur, "not installed") + " → " +
                      util::or_default(in_range, "-") + " → " + util::or_default(newest, "-")) +
-                     (if range != "" then "  " + ui::dim("(" + range + ")") else ""))
-            if is_old is count += 1 end
+                     (if range != "" then "  " + ui::dim("(" + range + ")") else "") +
+                     (if moved then "  " + ui::yellow("new commits upstream " + util::short_hash(tip)) else ""))
+            if is_old || moved is count += 1 end
         else if project::is_registry_kind(k) && k != "vira" is
             let locked: lock::Locked = lock::lock_get(pl, project::dep_name(d))
             let range: string = project::dep_range(d)
