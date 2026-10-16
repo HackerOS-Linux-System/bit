@@ -33,6 +33,24 @@ pub fn jobs() -> int is
 end
 pub fn set_jobs(n: int) is env_set("BIT_JOBS", to_string(n)) end
 
+;; `bit upgrade` sets this: libraries are re-checked against their remote even when they were
+;; installed "by force", and nothing is downloaded when the remote has nothing new.
+pub fn update_mode() -> bool is
+    return env_get("BIT_UPDATE") == "1"
+end
+
+pub fn set_update(on: bool) is
+    env_set("BIT_UPDATE", if on then "1" else "0")
+end
+
+;; Should an installed library that follows a branch be compared with its remote before it is reused?
+;; On by default; BIT_FRESH=off (or 0 / never / no) turns the check off (and with it the extra
+;; `git ls-remote` per dependency).
+pub fn fresh_check() -> bool is
+    let v: string = string_lower(env_get("BIT_FRESH"))
+    return !(v == "off" || v == "0" || v == "never" || v == "no" || v == "false")
+end
+
 ;; git never prompts (a private repo must fail, not hang) and gives up on a
 ;; connection that stalls.
 pub fn git_env() -> string is
@@ -149,6 +167,58 @@ pub fn remote_tags(url: string) -> [string] is
         if attempt < retries() is sleep_ms(1500 * attempt) end
     end
     return out
+end
+
+;; The commit that `rev` points to on the remote — "" when that cannot be told (offline, unreachable,
+;; unknown ref). Costs one `git ls-remote`, nothing is downloaded.
+;;   rev == ""      the remote's default branch (HEAD)
+;;   rev == a tag   the commit the tag points at (an annotated tag is peeled)
+;;   rev == branch  the tip of that branch
+;; A commit id has no ref to ask for: callers do not pass one.
+pub fn remote_commit(url: string, rev: string) -> string is
+    if offline() is return "" end
+    let want: string = if rev == "" then "HEAD"
+                       else util::sq("refs/heads/" + rev) + " " + util::sq("refs/tags/" + rev) + " " + util::sq("refs/tags/" + rev + "^*")
+    ;; the exit code rides along on the last line: "no such ref" (rc 0, no output) is an answer,
+    ;; a dropped connection (rc != 0) is retried
+    let cmd: string = limited(git_env() + "git ls-remote " + util::sq(url) + " " + want + " 2>/dev/null") + "; echo @@rc=$?"
+    let mut attempt: int = 0
+    while attempt < retries() is
+        attempt += 1
+        let txt: string = util::capture(cmd)
+        let lines: [string] = string_split(txt, "\n")
+        let mut done: bool = false
+        let mut peeled: string = ""
+        let mut tagged: string = ""
+        let mut head: string = ""
+        let mut i: int = 0
+        while i < array_len(lines) is
+            let line: string = string_trim(lines[i])
+            if line == "@@rc=0" is
+                done = true
+            else if line != "" && !string_starts_with(line, "@@rc=") is
+                let parts: [string] = string_split(line, "\t")
+                if array_len(parts) > 1 is
+                    let name: string = string_trim(parts[1])
+                    let tagref: string = "refs/tags/" + rev
+                    ;; an annotated tag is listed twice: the tag object, and `<tag>^` + braces = the commit it points at
+                    ;; (matched by length: braces in a string literal would be read as an interpolation)
+                    if rev != "" && string_starts_with(name, tagref + "^") && string_len(name) == string_len(tagref) + 3 is peeled = string_trim(parts[0])
+                    else if name == tagref is tagged = string_trim(parts[0])
+                    else is head = string_trim(parts[0])
+                    end
+                end
+            end
+            i += 1
+        end
+        if done is
+            if peeled != "" is return peeled end
+            if tagged != "" is return tagged end
+            return head
+        end
+        if attempt < retries() is sleep_ms(1500 * attempt) end
+    end
+    return ""
 end
 
 ;; ── parallel prefetch ────────────────────────────────────────────────────────
