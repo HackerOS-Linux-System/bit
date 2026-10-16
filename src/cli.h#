@@ -423,6 +423,7 @@ end
 
 pub fn cmd_upgrade(name: string, verbose: bool, release: bool, dry_run: bool) -> int is
     if dry_run is return cmd_outdated() end
+    installer::begin_update()
     let p: project::Project = need_project()
     if name == "" && project::is_loaded(p) && array_len(project::deps(p)) > 0 is
         ui::blank()
@@ -480,9 +481,11 @@ pub fn cmd_list() -> int is
     while i < lock::lock_len(gl) is
         let e: lock::Locked = lock::lock_at(gl, i)
         let n: string = lock::locked_name(e)
-        let there: bool = dir_exists(installer::lib_dir(n, util::short_hash(lock::locked_commit(e))))
+        let there: bool = dir_exists(installer::lib_dir(n, lock::locked_id(e)))
         let mark: string = if there then ui::green("✓") else ui::red("✗")
-        ui::line(mark + " " + string_pad_right(n, 20) + ui::dim("@ " + string_pad_right(lock::locked_version(e), 9)) +
+        ;; tag (or the commit) it came from, then the content id that names its directory
+        let came_from: string = util::or_default(lock::locked_tag(e), util::short_hash(lock::locked_commit(e)))
+        ui::line(mark + " " + string_pad_right(n, 20) + ui::dim("@ " + string_pad_right(came_from, 13) + string_pad_right(lock::locked_id(e), 14)) +
                  " " + ui::lang_tag(lock::locked_lang(e)) + "  " + ui::dim(lock::locked_output(e) + "  " + lock::locked_at(e)))
         i += 1
     end
