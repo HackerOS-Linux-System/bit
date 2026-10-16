@@ -116,10 +116,23 @@ pub fn forge_url(host: string, org_repo: string) -> string is
     return "https://github.com/" + path
 end
 
-;; First 12 characters of a commit id (the directory name of an installed lib).
+;; First 12 characters of a commit id (for display; the directory of an installed lib is named after
+;; its content hash — see checksum::short_id).
 pub fn short_hash(h: string) -> string is
     if string_len(h) <= 12 is return h end
     return string_slice(h, 0, 12)
+end
+
+;; Is `s` a non-empty string of hex digits (a commit id or a prefix of one)?
+pub fn is_hex(s: string) -> bool is
+    if string_len(s) == 0 is return false end
+    let digits: string = "0123456789abcdefABCDEF"
+    let mut i: int = 0
+    while i < string_len(s) is
+        if !string_contains(digits, string_at(s, i)) is return false end
+        i += 1
+    end
+    return true
 end
 
 ;; Library / package names: letters, digits, `-`, `_`, `.`; must start with a
@@ -200,7 +213,8 @@ pub fn now_iso() -> string is
 end
 
 ;; ── bit's own directories ────────────────────────────────────────────────────
-;;   libs   ~/.hackeros/libs/<name>/<commit>/     override: BIT_HOME
+;;   libs   ~/.hackeros/libs/<name>/<id>/         override: BIT_HOME
+;;          <id> = the first 12 hex digits of the sha256 of the library's files (see checksum::short_id)
 ;;   state  ~/.hackeros/bit/  (bit.lock, cache/, tmp/)   override: BIT_DIR
 
 fn home() -> string is
@@ -216,7 +230,7 @@ pub fn libs_dir() -> string is
 end
 
 ;; `[directories] file => project` keeps every library inside the project: <root>/cache/libs/<name>/
-;; holds the sources directly (no <commit>/ level, no `current` link, nothing outside the project).
+;; holds the sources directly (no <id>/ level, no `current` link, nothing outside the project).
 pub fn libs_flat() -> bool is
     return env_get("BIT_LIBS_FLAT") == "1"
 end
