@@ -129,8 +129,9 @@ pub fn verify_mode() -> string is
 end
 
 ;; ── Where an installed .bit lives ────────────────────────────────────────────
-;;   <libs>/<name>/<short>/        the mount point — the directory the H# compiler looks into
-;;   <libs>/<name>/<short>.bit     the SquashFS image (a file: the compiler skips it)
+;;   <libs>/<name>/<id>/           the mount point — the directory the H# compiler looks into
+;;   <libs>/<name>/<id>.bit        the SquashFS image (a file: the compiler skips it)
+;;   <id> = the first 12 hex digits of the image's sha256
 ;;   [directories] file => project:   <libs>/<name>/ and <libs>/<name>.bit
 
 pub fn mount_dir(name: string, short: string) -> string is
@@ -310,12 +311,13 @@ pub struct Got is
     pub g_commit:  string   ;; commit the package was built from (or the image's sha256 when it says none)
     pub g_tag:     string
     pub g_sum:     string   ;; sha256 (hex) of the image
+    pub g_id:      string   ;; its first 12 digits: the name of the copy under <libs>/<name>/ (image <id>.bit, mount <id>/)
     pub g_lang:    string
     pub g_how:     string   ;; fuse | kernel | extract
 end
 
 fn got_none(state: int, msg: string) -> Got is
-    return Got { g_state: state, g_msg: msg, g_commit: "", g_tag: "", g_sum: "", g_lang: "", g_how: "" }
+    return Got { g_state: state, g_msg: msg, g_commit: "", g_tag: "", g_sum: "", g_id: "", g_lang: "", g_how: "" }
 end
 
 ;; hex digest from a `.sha256` file's text ("<hex>  <file>" or just "<hex>")
@@ -388,6 +390,10 @@ pub fn install(name: string, url: string, rev: string, verbose: bool) -> Got is
 
     ;; integrity: <asset>.sha256 next to it
     let sum: string = checksum::file_sha256(tmp)
+    if sum == "" is
+        util::run("rm -f " + util::sq(tmp))
+        return got_none(1, "cannot compute the sha256 of " + found_asset + " (sha256sum / shasum missing?)")
+    end
     let vm: string = verify_mode()
     if vm != "off" is
         let side: string = util::capture(curl_base() + util::sq(found_url + ".sha256") + " 2>/dev/null")
@@ -420,7 +426,7 @@ pub fn install(name: string, url: string, rev: string, verbose: bool) -> Got is
         return got_none(1, found_asset + " is for " + pkg_plat + ", not " + plat)
     end
     let commit: string = util::or_default(hk::hk_get(meta, "package", "commit", ""), sum)
-    let short: string = util::short_hash(commit)
+    let short: string = checksum::short_id(sum)     ;; named after the image's sha256, like a source install is after its files'
 
     ;; place the image, open it
     let img: string = image_path(name, short)
@@ -439,7 +445,7 @@ pub fn install(name: string, url: string, rev: string, verbose: bool) -> Got is
     if how == "extract" is
         ui::warn(name + ": no squashfuse / mount available — the package was unpacked instead of mounted")
     end
-    return Got { g_state: 0, g_msg: "", g_commit: commit, g_tag: tag, g_sum: sum,
+    return Got { g_state: 0, g_msg: "", g_commit: commit, g_tag: tag, g_sum: sum, g_id: short,
                  g_lang: hk::hk_get(meta, "package", "lang", ""), g_how: how }
 end
 
@@ -676,7 +682,7 @@ end
 ;; ── bit pkg … ────────────────────────────────────────────────────────────────
 
 fn short_of(e: lock::Locked) -> string is
-    return util::short_hash(lock::locked_commit(e))
+    return lock::locked_id(e)
 end
 
 ;; (image, mount dir) for "name" (an installed library) — ["", ""] when it is not an installed .bit.
