@@ -25,6 +25,14 @@ pub fn dir_file_count(dir: string) -> int is
     return to_int(string_trim(out))
 end
 
+;; The directory name of an installed library: the first 12 hex digits of the sha256 of its files.
+;; The same files always get the same name — whatever commit, tag or url they came from — and a
+;; library that is changed on disk no longer matches its own directory name.
+pub fn short_id(hex: string) -> string is
+    if string_len(hex) <= 12 is return hex end
+    return string_slice(hex, 0, 12)
+end
+
 ;; Lock entries store checksums as `sha256:<hex>`.
 pub fn tag(hex: string) -> string is
     if hex == "" is return "" end
