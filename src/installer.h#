@@ -16,23 +16,33 @@ mod locator
 
 pub fn lib_root(name: string) -> string is return util::libs_dir() + "/" + name end
 
-pub fn lib_dir(name: string, commit: string) -> string is
+;; `<libs>/<name>/<id>/` — <id> names the library's CONTENT: the first 12 hex digits of the sha256
+;; of its files (checksum::short_id), not a commit. The same files always land in the same
+;; directory, a new commit that changed nothing does not create a new copy, and `bit verify` can
+;; tell from the name alone that a directory is not what it was.
+pub fn lib_dir(name: string, id: string) -> string is
     if util::libs_flat() is return util::libs_dir() + "/" + name end
-    return util::libs_dir() + "/" + name + "/" + commit
+    return util::libs_dir() + "/" + name + "/" + id
 end
 
-;; Where the version bit resolves for `name` lives: `<libs>/<name>/current` (a link to <commit>/),
+;; Where the version bit resolves for `name` lives: `<libs>/<name>/current` (a link to <id>/),
 ;; or — with `[directories] file => project` — the library's own directory.
 pub fn current_dir(name: string) -> string is
     if util::libs_flat() is return lib_root(name) end
     return lib_root(name) + "/current"
 end
 
+;; `bit upgrade` calls this first: from then on install_lib looks at the remote before it downloads,
+;; and fetches only what is newer than the installed copy (see `upstream_news`).
+pub fn begin_update() is
+    net::set_update(true)
+end
+
 pub fn is_installed(name: string) -> bool is
     let l: lock::Lock = lock::lock_read(lock::global_lock_path())
     let e: lock::Locked = lock::lock_get(l, name)
     if lock::locked_name(e) == "" is return false end
-    return dir_exists(lib_dir(name, lock::locked_commit(e)))
+    return dir_exists(lib_dir(name, lock::locked_id(e)))
 end
 
 ;; ── Options ──────────────────────────────────────────────────────────────────
@@ -118,6 +128,14 @@ end
 
 ;; ── Building an installed library ────────────────────────────────────────────
 
+;; File name of the artifact of `name` for an output kind.
+fn artifact_name(name: string, output: string) -> string is
+    if output == "so" is return "lib" + name + ".so" end
+    if output == "a" is return "lib" + name + ".a" end
+    if output == "obj" is return name + ".o" end
+    return name + ".hlib"
+end
+
 fn ext_of(output: string) -> string is
     if output == "so" is return "so" end
     if output == "a" is return "a" end
@@ -148,10 +166,7 @@ fn build_installed(name: string, dir: string, lang: string, output: string, o: I
         return ""
     end
     let built_dir: string = dir + "/.bit/build/" + build::profile_name(bo)
-    let art_name: string = if output == "so" then "lib" + name + ".so"
-                           else if output == "a" then "lib" + name + ".a"
-                           else if output == "obj" then name + ".o"
-                           else name + ".hlib"
+    let art_name: string = artifact_name(name, output)
     util::run("cp -f " + util::sq(built_dir + "/" + art_name) + " " + util::sq(outdir + "/" + art_name) + " 2>/dev/null")
     if file_exists(outdir + "/" + art_name) is
         util::run("ln -sfn " + util::sq(".bit/out/" + art_name) + " " + util::sq(dir + "/" + art_name))
@@ -225,9 +240,37 @@ fn current_project_lang_hint() -> string is
     return ""
 end
 
+;; ── Is the installed copy still the newest? ─────────────────────────────────
+
+;; A commit id for people: 12 digits; a tag stays as it is.
+fn shown(v: string) -> string is
+    if util::is_hex(v) && string_len(v) > 12 is return util::short_hash(v) end
+    return v
+end
+
+;; What the remote has that the installed copy `have` lacks — the new commit (for a prebuilt .bit:
+;; the new release tag). "" = nothing newer, "?" = the remote could not be reached.
+;; Costs one `git ls-remote` (a prebuilt: one request to the releases page); nothing is downloaded.
+fn upstream_news(url: string, rev: string, have: lock::Locked) -> string is
+    if lock::locked_output(have) == "bit" is
+        ;; a prebuilt package follows the newest RELEASE, not the branch
+        if rev != "" is return "" end
+        let base: string = bitpkg::release_base(url)
+        if base == "" is return "" end
+        let latest: string = bitpkg::latest_tag(base)
+        if latest == "" is return "?" end
+        if latest != lock::locked_tag(have) is return latest end
+        return ""
+    end
+    let tip: string = net::remote_commit(url, rev)
+    if tip == "" is return "?" end
+    if tip == lock::locked_commit(have) is return "" end
+    return tip
+end
+
 ;; A .bit package was downloaded and opened: link, lock, install its dependencies.
 fn finish_prebuilt(name: string, url: string, source: string, hint_lang: string, got: bitpkg::Got, o: InstallOpts) -> int is
-    let short: string = util::short_hash(got.g_commit)
+    let short: string = got.g_id      ;; the image's sha256 names the copy, like the files' sha256 does for a source install
     let dest: string = lib_dir(name, short)
     if !util::libs_flat() is
         util::run("ln -sfn " + util::sq(short) + " " + util::sq(current_dir(name)))
@@ -299,16 +342,47 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
         return 1
     end
 
-    ;; already there? (no network needed)
-    if !o.io_force && is_installed(name) is
+    ;; already there?
+    ;;   * pinned (a tag, a commit id): the installed copy is the answer, no network;
+    ;;   * following a branch (no rev, or a branch name): ONE `git ls-remote` — a newer commit upstream
+    ;;     is downloaded, otherwise nothing is (BIT_FRESH=off skips the question, --offline too);
+    ;;   * `bit upgrade` (BIT_UPDATE) asks the same question of every library, pinned to a tag or not,
+    ;;     so it fetches only what really changed.
+    let updating: bool = net::update_mode()
+    if (!o.io_force || updating) && is_installed(name) is
         let have: lock::Locked = lock::lock_get(lock::lock_read(lock::global_lock_path()), name)
-        let same_rev: bool = rev == "" || lock::locked_tag(have) == rev || lock::locked_commit(have) == rev ||
-                             string_starts_with(lock::locked_commit(have), rev)
-        if same_rev is
-            ui::note(name + " is already installed (bit upgrade " + name + " to refresh)")
+        let have_commit: string = lock::locked_commit(have)
+        let same_rev: bool = rev == "" || lock::locked_tag(have) == rev || have_commit == rev ||
+                             string_starts_with(have_commit, rev)
+        let pinned_rev: bool = rev != "" && (looks_like_tag(rev) != "" || util::is_hex(rev))
+        let ask: bool = fetch == "git" && !net::offline() &&
+                        (if updating then !util::is_hex(rev) else (!pinned_rev && net::fresh_check()))
+        let news: string = if ask then upstream_news(url, rev, have) else ""
+        let mut stay: bool = false
+        if fetch != "git" && updating is
+            stay = false                         ;; a copied path / a download: `bit upgrade` fetches it again
+        else if same_rev is
+            stay = !(news != "" && news != "?")
+        else is
+            stay = !pinned_rev && ask && news == ""     ;; a branch that is still where the installed copy is
+        end
+        if stay is
+            if news == "?" is
+                ui::note(name + " is installed (the remote could not be reached to look for a newer version)")
+            else if ask is
+                ui::note(name + " is up to date  " + ui::dim(shown(have_commit)))
+            else is
+                ui::note(name + " is already installed (bit upgrade " + name + " to refresh)")
+            end
             return 0
         end
-        ui::note(name + ": installed " + util::short_hash(lock::locked_commit(have)) + ", wanted " + rev + " — installing it")
+        if same_rev is
+            if news != "" && news != "?" is
+                ui::note(name + ": a newer version is available  " + ui::dim(shown(have_commit) + " → " + shown(news)) + " — updating")
+            end
+        else is
+            ui::note(name + ": installed " + shown(have_commit) + ", wanted " + rev + " — installing it")
+        end
     end
     if net::offline() && fetch != "local" is
         ui::fail(name + " is not installed and bit is offline (BIT_OFFLINE / --offline)")
@@ -397,30 +471,44 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
         held = pkg
     end
 
-    ;; 3. place
-    let dest: string = lib_dir(name, util::short_hash(commit))
-    let version: string = util::short_hash(commit)
-    util::mkdir_p(lib_root(name))
-    if dir_exists(dest) is
-        bitpkg::close(dest)
-        util::rm_rf(dest)
-    end
-    util::run("rm -f " + util::sq(bitpkg::image_path(name, util::short_hash(commit))))
-    if util::run("mv " + util::sq(held) + " " + util::sq(dest)) != 0 is
-        ui::fail("cannot move the library into " + dest)
+    ;; 3. identity: sha256 of the files (+ the index's pin). The directory is named after it —
+    ;;    `version` below — so identical files always land in the same place.
+    let sum: string = checksum::dir_checksum(held)
+    if sum == "" is
+        ui::fail(name + ": cannot compute the checksum of the fetched files (sha256sum / shasum missing?)")
         util::rm_rf(tmp)
         return 1
     end
-    if held != tmp is util::rm_rf(tmp) end
-
-    ;; 4. checksum (+ pin)
-    let sum: string = checksum::dir_checksum(dest)
     if pinned != "" && !checksum::matches(pinned, sum) is
         ui::fail(name + ": checksum mismatch — the index pins " + checksum::untag(pinned))
         ui::note("got      " + sum)
-        util::rm_rf(dest)
+        util::rm_rf(tmp)
         return 1
     end
+    let version: string = checksum::short_id(sum)
+
+    ;; 4. place — unless exactly these files are already installed (a new commit that changed
+    ;;    nothing in the library): that copy, with whatever was built in it, stays
+    let dest: string = lib_dir(name, version)
+    util::mkdir_p(lib_root(name))
+    let mut reused: bool = false
+    if dir_exists(dest) is
+        if !o.io_force && checksum::dir_checksum(dest) == sum is
+            reused = true
+        else is
+            bitpkg::close(dest)
+            util::rm_rf(dest)
+        end
+    end
+    if !reused is
+        util::run("rm -f " + util::sq(bitpkg::image_path(name, version)))
+        if util::run("mv " + util::sq(held) + " " + util::sq(dest)) != 0 is
+            ui::fail("cannot move the library into " + dest)
+            util::rm_rf(tmp)
+            return 1
+        end
+    end
+    if reused || held != tmp is util::rm_rf(tmp) end
 
     ;; 5. manifest
     let h: hk::Hk = lib_manifest(dest)
@@ -444,7 +532,12 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
     let mut artifact: string = ""
     let mut out_used: string = "source"
     if o.io_build && lang != "" is
-        artifact = build_installed(name, dest, lang, out_choice, o)
+        let built: string = dest + "/.bit/out/" + artifact_name(name, out_choice)
+        if reused && file_exists(built) is
+            artifact = built               ;; the same files were compiled before — no need to do it again
+        else is
+            artifact = build_installed(name, dest, lang, out_choice, o)
+        end
         if artifact != "" is out_used = out_choice end
     end
 
@@ -456,8 +549,9 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
         lk_range: "", lk_tag: looks_like_tag(rev), lk_source: source, lk_dir: dir
     }))
 
-    ui::ok(ui::bold(name) + " " + ui::dim("@ " + version + "  " + project::lang_label(lang) + "  " + out_used +
-           "  sha256:" + util::short_hash(sum)))
+    ui::ok(ui::bold(name) + " " + ui::dim("@ " + util::or_default(looks_like_tag(rev), util::short_hash(commit)) + "  " +
+           project::lang_label(lang) + "  " + out_used + "  sha256:" + version))
+    if reused is ui::note(name + ": the files are identical to the installed copy — kept it") end
 
     ;; 8. dependencies of the library itself
     if install_lib_deps(name, h, dest, o) != 0 is return 1 end
@@ -606,15 +700,15 @@ pub fn verify_all(only: string) -> int is
         let name: string = lock::locked_name(e)
         if show_bar is pbar.clear() end
         if only == "" || only == name is
-            let dir: string = lib_dir(name, util::short_hash(lock::locked_commit(e)))
+            let dir: string = lib_dir(name, lock::locked_id(e))
             if lock::locked_output(e) == "bit" is
                 ;; a .bit package: the image is what is checksummed; make sure it is open too
-                let img: string = bitpkg::image_path(name, util::short_hash(lock::locked_commit(e)))
+                let img: string = bitpkg::image_path(name, lock::locked_id(e))
                 if !file_exists(img) is
                     ui::bad(name + "  " + ui::red("missing") + " " + ui::dim(img))
                     problems += 1
                 else if checksum::matches(lock::locked_checksum(e), checksum::file_sha256(img)) is
-                    if bitpkg::ensure_open(name, util::short_hash(lock::locked_commit(e)), false) is
+                    if bitpkg::ensure_open(name, lock::locked_id(e), false) is
                         ui::ok(name + "  " + ui::dim("@ " + lock::locked_version(e) + "  .bit checksum ok"))
                     else is
                         problems += 1
@@ -660,7 +754,7 @@ pub fn clean_old() -> int is
     while i < lock::lock_len(gl) is
         let e: lock::Locked = lock::lock_at(gl, i)
         let name: string = lock::locked_name(e)
-        let keep: string = util::short_hash(lock::locked_commit(e))
+        let keep: string = lock::locked_id(e)
         let olds: string = util::capture("find " + util::sq(lib_root(name)) + " -mindepth 1 -maxdepth 1 -type d ! -name " + util::sq(keep) + " 2>/dev/null")
         if olds != "" is
             let lines: [string] = string_split(olds, "\n")
