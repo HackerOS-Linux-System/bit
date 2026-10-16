@@ -253,6 +253,7 @@ Every clone / `ls-remote` / index download goes through one policy:
 | retries | `BIT_RETRIES` (default 3), exponential back-off 2s, 4s, 8s |
 | timeout | `BIT_TIMEOUT` seconds (default 120; stalled connections are cut, git never prompts) |
 | offline | `--offline` or `BIT_OFFLINE=1`: installed libraries + cached index only; `Bit.lock` pins make ranges resolvable offline |
+| freshness | `BIT_FRESH=off` skips the "is there a newer commit?" question (one `git ls-remote`) that `bit install` asks for libraries that follow a branch |
 | parallel | `--jobs N` / `BIT_JOBS` (default 4): missing dependencies are cloned concurrently, then installed in order |
 | feedback | a spinner (with git's clone percentage) for clones and every build step — plain lines in CI or with `--verbose` |
 
@@ -326,9 +327,29 @@ Available for **every** language (`h#`, `hl`, `hs`):
 | `default` | as before: in `~/.hackeros/libs` (the home of whoever runs bit — `/root/…` for root), linked into `<project>/cache/libs/` |
 | `home` | always in the current user's `~/.hackeros/libs` |
 | `root` | always in `/root/.hackeros/libs` |
-| `project` | **only** inside the project: `<project>/cache/libs/<name>/` holds the sources directly — no `<commit>/` level, no `current` link, nothing installed or linked anywhere else |
+| `project` | **only** inside the project: `<project>/cache/libs/<name>/` holds the sources directly — no `<id>/` level, no `current` link, nothing installed or linked anywhere else |
 
 An explicit `BIT_HOME` in the environment beats `file`. An unknown value is an error that suggests the closest one.
+
+### How an installed library is named, and when it is downloaded again
+
+A library lives in `<libs>/<name>/<id>/`, where `<id>` is the first 12 hex digits of the **sha256 of its files** (the same checksum that `Bit.lock` and `bit verify` use) — not a commit id. `<name>/current` links to the copy bit resolves, and `version` in the lock records the `<id>`. Consequences:
+
+- the same files always land in the same directory, whatever commit, tag or URL they came from; a new commit that changed nothing in the library keeps the installed copy (and what was built in it);
+- a directory whose files were changed no longer matches its own name, and `bit verify` says so;
+- a `.bit` package is named after the sha256 of its image.
+
+When bit downloads again:
+
+| situation | what bit does |
+|---|---|
+| pinned to a tag or a commit id | the installed copy is the answer — no network |
+| no rev, or a branch | one `git ls-remote`: a newer commit is downloaded, otherwise nothing (`BIT_FRESH=off` or `--offline` skips the question) |
+| `bit upgrade` | asks the same question of every library, tag-pinned ones included, and fetches only what changed |
+| `bit install --force` | always fetches and replaces |
+| `Bit.lock` has an entry | `bit install` reproduces the locked commit; `bit upgrade` moves it |
+
+`bit outdated` also reports a dependency that follows a branch when the branch has new commits. `bit clean` removes every copy except the one the lock points to.
 
 **`before-build`** tells bit what to run *before* it builds the project (before `pre-build` and before the native
 part) — generating bindings for a Rust / C / other native part, for example. It runs in the project root; a script
