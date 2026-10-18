@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-10-16",
+  "updated_at": "2026-10-18",
   "libraries": [
     {
       "name": "mold",
@@ -317,6 +317,16 @@
       "description": "Colors library for bit.io. Written in H#.",
       "tags": [
         "colors"
+      ],
+      "author": "Bit Developers"
+    },
+    {
+      "name": "BetterAI",
+      "target": "https://github.com/bit-io/BetterAI",
+      "description": "AI library for bit.io.",
+      "tags": [
+        "machine-learning",
+        "ai"
       ],
       "author": "Bit Developers"
     }
