@@ -1,0 +1,172 @@
+mod util
+mod ui
+mod index
+mod lock
+mod project
+mod build
+mod installer
+
+;; hlibcmd.h# — `bit hlib …`: the .hlib archives of the libraries bit installed, for ALL three languages.
+;;
+;;   bit hlib [list]              every installed library: language, compiled archive or sources only
+;;   bit hlib inspect <name|file> manifest + entries      (the toolchain of the archive's own language)
+;;   bit hlib verify  <name|file> checksums / signature   (the toolchain of the archive's own language)
+;;   bit hlib build   <name>      (re)compile an installed library to its .hlib — the cure for
+;;                                "hlib 'x' not found" when the library was installed without a compiler
+;;   bit hlib path    <name>      where the archive lives (scripts: `h# … $(bit hlib path mold)`)
+;;
+;; An .hlib is one format for H#, Hacker Lang and HackerScript (docs/HLIB_FORMAT.md of each language):
+;; a zstd-compressed tar with manifest.json inside. Which compiler reads it is decided by the
+;; manifest's `language`, not by the language of the project that happens to ask.
+
+;; `hackerc hlib` | `hl hlib` | `h# lib` — the sub-command group that handles archives of `lang`.
+fn hlib_group(lang: string) -> string is
+    if lang == "hackerscript" is return build::tool_for("hackerscript") + " hlib" end
+    if lang == "hackerlang" is return build::tool_for("hackerlang") + " hlib" end
+    return build::tool_for("hsharp") + " lib"
+end
+
+;; The language an archive was produced by, read from its manifest ("" when unreadable).
+;; Needs only `zstd` and `tar` — the two things the format is made of.
+pub fn language_of(file: string) -> string is
+    if !file_exists(file) is return "" end
+    let raw: string = util::capture("zstd -dc " + util::sq(file) + " 2>/dev/null | tar -xOf - manifest.json 2>/dev/null | grep -o '\"language\"[^,}]*' | head -1")
+    let colon: int = string_find(raw, ":")
+    if colon < 0 is return "" end
+    return index::normalize_lang(string_slice(raw, colon + 1, string_len(raw)))
+end
+
+;; An archive named on the command line: a path to a .hlib, or the name of an installed library.
+;; "" when there is none.
+pub fn locate(spec: string) -> string is
+    if string_ends_with(spec, ".hlib") && file_exists(spec) is return spec end
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    let e: lock::Locked = lock::lock_get(gl, spec)
+    if lock::locked_name(e) == "" is return "" end
+    let dest: string = installer::lib_dir(spec, lock::locked_id(e))
+    let built: string = dest + "/.bit/out/" + spec + ".hlib"
+    if file_exists(built) is return built end
+    let beside: string = dest + "/" + spec + ".hlib"
+    if file_exists(beside) is return beside end
+    return ""
+end
+
+;; Does the archive carry a compiled native library (`native/<target>/…so`)? That, plus `manifest.exports`, is the ONLY
+;; way another language can call into it (HLIB_FORMAT §5–6: the `ast` artifact is never read across languages).
+pub fn has_native(file: string) -> bool is
+    let n: string = util::capture("zstd -dc " + util::sq(file) + " 2>/dev/null | tar -t 2>/dev/null | grep -c '^native/'")
+    return string_trim(n) != "" && string_trim(n) != "0"
+end
+
+fn size_of(file: string) -> string is
+    return util::capture("du -h " + util::sq(file) + " 2>/dev/null | cut -f1")
+end
+
+fn cmd_list() -> int is
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    let n: int = lock::lock_len(gl)
+    ui::heading("Installed libraries  " + ui::dim("and their .hlib"))
+    if n == 0 is
+        ui::note("nothing installed yet — bit install <name>")
+        ui::blank()
+        return 0
+    end
+    let mut missing: int = 0
+    let mut i: int = 0
+    while i < n is
+        let e: lock::Locked = lock::lock_at(gl, i)
+        let name: string = lock::locked_name(e)
+        let lang: string = lock::locked_lang(e)
+        let label: string = string_pad_right(name, 18) + " " + string_pad_right(project::lang_label(lang), 13)
+        let file: string = locate(name)
+        if lock::locked_output(e) == "bit" is
+            ui::ok(label + ui::dim("prebuilt .bit package"))
+        else if file != "" is
+            let made: string = project::lang_label(language_of(file))
+            ui::ok(label + ui::dim(".hlib " + size_of(file) + "  (" + made + ")  " + file))
+        else is
+            let lib_p: project::Project = project::load(installer::lib_dir(name, lock::locked_id(e)))
+            if project::entry_for(lib_p, lang, "lib") == "" is
+                ui::ok(label + ui::dim("sources (no library entry point — imported as source)"))
+            else is
+                missing += 1
+                ui::bad(label + ui::red("not compiled") + "  " + ui::dim("bit hlib build " + name))
+            end
+        end
+        i += 1
+    end
+    ui::blank()
+    if missing > 0 is
+        ui::fail(to_string(missing) + " librar" + (if missing == 1 then "y has" else "ies have") + " no .hlib — `use \"hlib -> name\"` will not find it")
+        return 1
+    end
+    return 0
+end
+
+fn cmd_delegate(action: string, spec: string) -> int is
+    if spec == "" is
+        ui::fail("bit hlib " + action + " <installed name | file.hlib>")
+        return 2
+    end
+    let file: string = locate(spec)
+    if file == "" is
+        ui::fail("no .hlib for '" + spec + "' (not a file, and not an installed library with a compiled archive)")
+        ui::note("compile it:  bit hlib build " + spec)
+        return 1
+    end
+    let lang: string = language_of(file)
+    if lang == "" is
+        ui::fail(file + " is not a readable .hlib (needs `zstd` and `tar`, and a manifest.json inside)")
+        return 1
+    end
+    if !build::have_toolchain(lang) is
+        ui::fail(project::lang_label(lang) + " toolchain not found — it is the one that reads " + util::basename(file))
+        ui::note(build::missing_tool_hint(lang))
+        return 1
+    end
+    ui::line(ui::dim(project::lang_label(lang) + "  " + file))
+    return util::run(hlib_group(lang) + " " + action + " " + util::sq(file))
+end
+
+fn cmd_build(name: string, verbose: bool) -> int is
+    if name == "" is
+        ui::fail("bit hlib build <installed name>")
+        return 2
+    end
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    let e: lock::Locked = lock::lock_get(gl, name)
+    if lock::locked_name(e) == "" is
+        ui::fail(name + " is not installed (bit install " + name + ")")
+        return 1
+    end
+    ;; a stale archive is replaced, not trusted
+    let old: string = locate(name)
+    if old != "" is util::run("rm -f " + util::sq(old)) end
+    let o: installer::InstallOpts = installer::iopts(false, true, "hlib", "", "", true, verbose)
+    let rc: int = installer::ensure_compiled(name, o)
+    if rc == 0 is
+        let now: string = locate(name)
+        if now != "" is
+            ui::ok(name + "  " + ui::dim(now))
+            return 0
+        end
+        ui::note(name + " has nothing to compile (sources only)")
+        return 0
+    end
+    return 1
+end
+
+pub fn run(sub: string, target: string, verbose: bool) -> int is
+    if sub == "" || sub == "list" || sub == "ls" is return cmd_list() end
+    if sub == "inspect" || sub == "info" is return cmd_delegate("inspect", target) end
+    if sub == "verify" || sub == "check" is return cmd_delegate("verify", target) end
+    if sub == "build" || sub == "rebuild" || sub == "compile" is return cmd_build(target, verbose) end
+    if sub == "path" is
+        let f: string = locate(target)
+        if f == "" is return 1 end
+        write(f)
+        return 0
+    end
+    ui::fail("unknown `bit hlib` command '" + sub + "'  (list | inspect | verify | build | path)")
+    return 2
+end
