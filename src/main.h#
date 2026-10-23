@@ -235,6 +235,7 @@ fn main() is
             "info" => is rc = cli::cmd_info(first) end
             "update" => is rc = cli::cmd_update() end
             "verify" => is rc = cli::cmd_verify(first) end
+            "hlib" | "hlibs" => is rc = cli::cmd_hlib(first, arg_at(pos, 1), verbose) end
             "doctor" => is rc = cli::cmd_doctor() end
             ;; internal: Bit.hk diagnostics render in a child process (see hkdiag.h#)
             "__hk-diag" => is rc = hkdiag::child_main(first, false) end
