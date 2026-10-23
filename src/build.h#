@@ -8,6 +8,8 @@ mod native
 mod sysdeps
 mod net
 mod semver
+mod hsbundle
+mod lock
 
 pub struct BuildOpts is
     pub bo_release:  bool
@@ -636,7 +638,15 @@ end
 fn build_hs_lib(p: project::Project, o: BuildOpts, entry: string, dir: string, output: string) -> int is
     let name: string = project::name_of(p)
     if output == "hlib" is
-        let cmd: string = tool_for("hackerscript") + " hlib build " + util::sq(entry) + " -o " + util::sq(dir + "/" + name + ".hlib") +
+        ;; `hackerc hlib build` packs ONE file. A library whose entry (`lib/mod.hcs`) only `include`s its
+        ;; other files would come out hollow, so bit pastes the whole include graph into
+        ;; <cache>/bundle/<name>.hcs first. The bundle is named after the library on purpose: hackerc
+        ;; derives the archive's name (and its `ast/<name>.hcs` entry) from the file name — building from
+        ;; `mod.hcs` used to produce a library called `mod`, which `get <hlib:name>` could never find.
+        let bundled: string = project::cache_root(p) + "/bundle/" + name + ".hcs"
+        let src: string = if hsbundle::bundle_to(project::root_of(p), entry, project::lib_dir(p), bundled) then bundled else entry
+        let cmd: string = tool_for("hackerscript") + " hlib build " + util::sq(src) + " -o " + util::sq(dir + "/" + name + ".hlib") +
+            " --name " + util::sq(name) +
             " --lib-version " + util::sq(project::version_of(p)) +
             (if o.bo_sign != "" then " --sign " + util::sq(o.bo_sign) else "")
         return run_step(p, "HackerScript  " + name + ".hlib", cmd, o.bo_verbose)
@@ -903,6 +913,30 @@ fn version_map_flag(p: project::Project) -> string is
     return " --version-map " + util::sq(map)
 end
 
+;; When a build fails: name the dependencies written in ANOTHER language than the project. They reach it as
+;; .hlib archives (`use "hlib -> name"` in H#), which is the first place to look.
+fn cross_language_hint(p: project::Project, langs: [string]) is
+    let deps: [project::Dep] = project::deps(p)
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    let mut names: [string] = []
+    let mut i: int = 0
+    while i < array_len(deps) is
+        if project::is_git_kind(project::dep_kind(deps[i])) is
+            let e: lock::Locked = lock::lock_get(gl, project::dep_name(deps[i]))
+            let l: string = lock::locked_lang(e)
+            if l != "" && !util::array_has(langs, l) is
+                names = array_push(names, project::dep_name(deps[i]) + " (" + project::lang_label(l) + ")")
+            end
+        end
+        i += 1
+    end
+    if array_len(names) > 0 is
+        ui::note("this project uses libraries written in another language: " + util::join(names, ", "))
+        ui::note("they are imported through their .hlib — see which exist:  bit hlib list     compile one:  bit hlib build <name>")
+        ui::note("H# can only splice an .hlib whose `ast` is H# (or that carries a native .so); a HackerScript archive holds .hcs source")
+    end
+end
+
 pub fn build_project(p: project::Project, o: BuildOpts) -> int is
     let name: string = project::name_of(p)
     ui::blank()
@@ -982,6 +1016,7 @@ pub fn build_project(p: project::Project, o: BuildOpts) -> int is
         return 0
     end
     ui::fail(to_string(failed) + " language target(s) failed")
+    cross_language_hint(p, langs)
     ui::blank()
     return 1
 end
