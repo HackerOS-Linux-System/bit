@@ -11,6 +11,7 @@ mod build
 mod installer
 mod registry
 mod bitpkg
+mod hlibcmd
 
 fn project_lock_path(p: project::Project) -> string is
     return project::root_of(p) + "/Bit.lock"
@@ -135,6 +136,33 @@ fn ensure_registry(p: project::Project, d: project::Dep, pl: lock::Lock, use_loc
     } }
 end
 
+;; A library in another language than the project (an H# program using a HackerScript `mold`) reaches the
+;; project through its .hlib. Say so, and say it loudly when that archive does not exist — the compiler
+;; would otherwise only print a wall of search paths.
+fn report_cross_language(p: project::Project, dname: string, e: lock::Locked) is
+    let lang: string = lock::locked_lang(e)
+    let mine: [string] = project::langs(p)
+    if lang != "" && array_len(mine) > 0 && !util::array_has(mine, lang) && lock::locked_output(e) != "bit" is
+        let file: string = hlibcmd::locate(dname)
+        if file != "" && !hlibcmd::has_native(file) is
+            ;; HLIB_FORMAT §5–6: another language's `ast` is never read; only a native .so + exports can cross
+            ui::warn(dname + " is " + project::lang_label(lang) + " and its .hlib holds sources only (no native .so, no exports) — " +
+                     project::lang_label(mine[0]) + " cannot call into it")
+            ui::note("it works from " + project::lang_label(lang) + " (get <hlib:" + dname + ">); from " + project::lang_label(mine[0]) +
+                     " the library needs a C-ABI facade built as a native .so, or the project must be written in " + project::lang_label(lang))
+        else if file != "" is
+            ui::note(dname + " is " + project::lang_label(lang) + " — it reaches this project as an .hlib:  " + file)
+        else is
+            let lib_p: project::Project = project::load(installer::lib_dir(dname, lock::locked_id(e)))
+            if project::entry_for(lib_p, lang, "lib") != "" is
+                ui::warn(dname + " is a " + project::lang_label(lang) + " library and has no compiled " + dname + ".hlib — an import from " +
+                         project::lang_label(mine[0]) + " will not find it")
+                ui::note("compile it:  bit hlib build " + dname + "      (needs the " + project::lang_label(lang) + " toolchain: bit langs)")
+            end
+        end
+    end
+end
+
 ;; Installs/links one dependency.
 fn ensure_one(p: project::Project, d: project::Dep, pk: Pick, pl: lock::Lock, use_lock: bool, force: bool,
               verbose: bool, release: bool) -> Outcome is
@@ -183,6 +211,7 @@ fn ensure_one(p: project::Project, d: project::Dep, pk: Pick, pl: lock::Lock, us
         return failed()
     end
     if !integrity_ok(dname, locked, lock::locked_checksum(now), use_lock) is return failed() end
+    report_cross_language(p, dname, lock::lock_get(lock::lock_read(lock::global_lock_path()), dname))
     ;; a .bit package is mounted, not unpacked: after a reboot it has to be opened again
     if lock::locked_output(now) == "bit" && !bitpkg::ensure_open(dname, lock::locked_id(now), verbose) is
         return failed()
