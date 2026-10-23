@@ -25,6 +25,7 @@ mod pipeline
 mod bitpkg
 mod locator
 mod help
+mod hlibcmd
 
 pub fn version() -> string is return "0.3.0" end
 
@@ -562,6 +563,11 @@ pub fn cmd_info(name: string) -> int is
     end
     ui::blank()
     return 0
+end
+
+;; `bit hlib [list|inspect|verify|build|path] [name|file]` — the .hlib archives of installed libraries
+pub fn cmd_hlib(sub: string, target: string, verbose: bool) -> int is
+    return hlibcmd::run(sub, target, verbose)
 end
 
 pub fn cmd_update() -> int is
