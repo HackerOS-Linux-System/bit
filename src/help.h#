@@ -197,6 +197,8 @@ pub fn print(version: string) is
     row("      silver            newest        silver 0.1   that exact version      silver ^0.1   a range")
     row("      github:org/repo#dir   a directory of a repository      pypi:requests 2.31   crates:serde ^1   npm:x   jsr:@s/x   vira:zlib")
     row("    remove <name> [--global]     remove from the project (or uninstall)      (also: remove <source> <name>)")
+    row("    hlib [list|inspect|verify|build|path] [name|file.hlib]   the .hlib of installed libraries — any language;")
+    row("                                 `hlib build <name>` compiles a library that was installed without its compiler")
     row("    upgrade [name] [--dry-run]   re-resolve version ranges, fetch the newest matches, refresh Bit.lock")
     row("    outdated                     locked → newest-in-range → newest version of every dependency")
     row("    features                     list the project's [features]")
