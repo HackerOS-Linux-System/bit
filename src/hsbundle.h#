@@ -1,0 +1,151 @@
+mod util
+mod ui
+
+;; hsbundle.h# — a HackerScript library as ONE source file.
+;;
+;; Why this exists:
+;;   `hackerc hlib build <entry.hcs>` packs the text of ONE file into the archive (`ast/<name>.hcs`,
+;;   see HackerScript/docs/HLIB_FORMAT.md §5). A library such as `mold` has an entry file
+;;   (`lib/mod.hcs`) that consists of nothing but `include <style>`, `include <buffer>`, … — so the
+;;   archive that came out of it was hollow: the consumer got thirteen include lines and none of the
+;;   code behind them.
+;;
+;;   bit therefore pastes every `include <x>` in place (once per file, in dependency order) and hands
+;;   `hackerc` the result. `get <…>` lines are hoisted to the top, because a nested file may not
+;;   carry them in the middle of a program; the first `using <version>` line wins.
+;;
+;; Name resolution of `include <x>` (relative to the file that contains it):
+;;   <dir>/x.hcs     <dir>/x/mod.hcs     <lib root>/x.hcs     <lib root>/x/mod.hcs
+;; An include that matches none of those (a module of the language itself) is left as it is.
+
+pub struct Bundle is
+    pub bd_seen: [string]     ;; absolute / root-relative paths that were already pasted
+    pub bd_gets: [string]     ;; hoisted `get <…>` lines, no duplicates
+    pub bd_uses: [string]     ;; `using <…>` lines found, no duplicates
+    pub bd_body: string       ;; the flattened source (without the hoisted lines)
+    pub bd_left: [string]     ;; include targets that are not files of the library (kept as written)
+    pub bd_pasted: int        ;; how many files were pasted in place of an include
+end
+
+fn empty_bundle() -> Bundle is
+    return Bundle { bd_seen: [], bd_gets: [], bd_uses: [], bd_body: "", bd_left: [], bd_pasted: 0 }
+end
+
+;; "style" for `include <style>` — "" for every other line.
+pub fn include_target(line: string) -> string is
+    let t: string = string_trim(line)
+    if !string_starts_with(t, "include") is return "" end
+    let lt: int = string_find(t, "<")
+    let gt: int = string_find(t, ">")
+    if lt < 0 || gt < lt is return "" end
+    ;; `include` must be followed by a space or by `<` directly — not `include_all <x>`
+    if string_trim(string_slice(t, 7, lt)) != "" is return "" end
+    return string_trim(string_slice(t, lt + 1, gt))
+end
+
+fn is_get_line(line: string) -> bool is
+    let t: string = string_trim(line)
+    return string_starts_with(t, "get <") || string_starts_with(t, "get<")
+end
+
+fn is_using_line(line: string) -> bool is
+    let t: string = string_trim(line)
+    return string_starts_with(t, "using <") || string_starts_with(t, "using<")
+end
+
+;; The file an `include <name>` stands for, "" when it is not a file of the library.
+fn find_include(dir: string, root: string, name: string) -> string is
+    if name == "" || string_contains(name, "..") is return "" end
+    let cands: [string] = [
+        dir + "/" + name + ".hcs",
+        dir + "/" + name + "/mod.hcs",
+        root + "/" + name + ".hcs",
+        root + "/" + name + "/mod.hcs"
+    ]
+    let mut i: int = 0
+    while i < array_len(cands) is
+        if file_exists(cands[i]) is return cands[i] end
+        i += 1
+    end
+    return ""
+end
+
+fn paste(file: string, root: string, b: Bundle) -> Bundle is
+    let lines: [string] = string_split(file_read(file), "\n")
+    let dir: string = util::dirname(file)
+    let mut seen: [string] = array_push(b.bd_seen, file)
+    let mut gets: [string] = b.bd_gets
+    let mut uses: [string] = b.bd_uses
+    let mut body: string = b.bd_body
+    let mut left: [string] = b.bd_left
+    let mut pasted: int = b.bd_pasted
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let raw: string = lines[i]
+        let tgt: string = include_target(raw)
+        if tgt != "" is
+            let f: string = find_include(dir, root, tgt)
+            if f == "" is
+                body = body + raw + "\n"
+                if !util::array_has(left, tgt) is left = array_push(left, tgt) end
+            else if !util::array_has(seen, f) is
+                let sub: Bundle = paste(f, root, Bundle { bd_seen: seen, bd_gets: gets, bd_uses: uses,
+                                                          bd_body: body, bd_left: left, bd_pasted: pasted + 1 })
+                seen = sub.bd_seen
+                gets = sub.bd_gets
+                uses = sub.bd_uses
+                body = sub.bd_body
+                left = sub.bd_left
+                pasted = sub.bd_pasted
+            end
+        else if is_get_line(raw) is
+            let t: string = string_trim(raw)
+            if !util::array_has(gets, t) is gets = array_push(gets, t) end
+        else if is_using_line(raw) is
+            let t: string = string_trim(raw)
+            if !util::array_has(uses, t) is uses = array_push(uses, t) end
+        else is
+            body = body + raw + "\n"
+        end
+        i += 1
+    end
+    return Bundle { bd_seen: seen, bd_gets: gets, bd_uses: uses, bd_body: body, bd_left: left, bd_pasted: pasted }
+end
+
+;; The flattened text of `entry` (a path), `root` being the library's source directory (`lib/`).
+pub fn flatten(entry: string, root: string) -> Bundle is
+    return paste(entry, root, empty_bundle())
+end
+
+fn render(b: Bundle, entry_label: string) -> string is
+    let mut out: string = ""
+    if array_len(b.bd_uses) > 0 is out = out + b.bd_uses[0] + "\n" end
+    out = out + "!!! bundled by bit from " + entry_label + " (" + to_string(b.bd_pasted) + " include(s) pasted)\n"
+    let mut i: int = 0
+    while i < array_len(b.bd_gets) is
+        out = out + b.bd_gets[i] + "\n"
+        i += 1
+    end
+    return out + "\n" + b.bd_body
+end
+
+;; Writes the flattened library to `out`. `entry_rel` is relative to `root_dir` (the project root),
+;; `lib_rel` is the library's source directory (`lib`), also relative to it.
+;; Returns true when `out` was written.
+pub fn bundle_to(root_dir: string, entry_rel: string, lib_rel: string, out: string) -> bool is
+    let entry: string = root_dir + "/" + entry_rel
+    if !file_exists(entry) is
+        ui::fail("bundle: no such file " + entry)
+        return false
+    end
+    let b: Bundle = flatten(entry, root_dir + "/" + lib_rel)
+    util::mkdir_p(util::dirname(out))
+    file_write(out, render(b, entry_rel))
+    if array_len(b.bd_uses) > 1 is
+        ui::warn("bundle: " + to_string(array_len(b.bd_uses)) + " different `using <…>` lines — kept " + b.bd_uses[0])
+    end
+    if array_len(b.bd_left) > 0 is
+        ui::note("bundle: left as written (not files of this library): " + util::join(b.bd_left, ", "))
+    end
+    return file_exists(out)
+end
