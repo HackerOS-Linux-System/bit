@@ -175,6 +175,67 @@ fn build_installed(name: string, dir: string, lang: string, output: string, o: I
     return ""
 end
 
+;; The compiled file bit promises for an installed library, "" when it holds only sources (or is a prebuilt .bit).
+pub fn artifact_of(name: string, e: lock::Locked) -> string is
+    let out: string = lock::locked_output(e)
+    if out == "" || out == "source" || out == "bit" is return "" end
+    return lib_dir(name, lock::locked_id(e)) + "/.bit/out/" + artifact_name(name, out)
+end
+
+;; Records in the global lock which kind of artifact an installed library now has.
+fn lock_record_output(name: string, out: string) is
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    let e: lock::Locked = lock::lock_get(gl, name)
+    if lock::locked_name(e) != "" is
+        lock::lock_write(lock::global_lock_path(), lock::lock_set(gl, lock::Locked {
+            lk_name: lock::locked_name(e), lk_version: lock::locked_version(e), lk_commit: lock::locked_commit(e),
+            lk_url: lock::locked_url(e), lk_checksum: lock::locked_checksum(e), lk_lang: lock::locked_lang(e),
+            lk_output: out, lk_at: lock::locked_at(e), lk_range: lock::locked_range(e), lk_tag: lock::locked_tag(e),
+            lk_source: lock::locked_source(e), lk_dir: lock::locked_dir(e)
+        }))
+    end
+end
+
+;; An installed library that was never compiled — its toolchain was missing when it was fetched, the build
+;; failed once, or an older bit stopped at "already installed" — is compiled NOW, with the toolchain of ITS
+;; OWN language (HackerScript / Hacker Lang / H#), whatever language the project asking for it is written in.
+;; This is what lets an H# program `use "hlib -> mold"` a HackerScript library.
+;; Returns 0 when the library has its compiled artifact afterwards (or has nothing to compile), 1 when it
+;; could not be built — the reason has been printed.
+pub fn ensure_compiled(name: string, o: InstallOpts) -> int is
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    let e: lock::Locked = lock::lock_get(gl, name)
+    if lock::locked_name(e) == "" is return 1 end
+    if lock::locked_output(e) == "bit" is return 0 end          ;; a prebuilt .bit package is compiled already
+    let dest: string = lib_dir(name, lock::locked_id(e))
+    if !dir_exists(dest) is return 1 end
+
+    let h: hk::Hk = lib_manifest(dest)
+    let lang: string = if lock::locked_lang(e) != "" then lock::locked_lang(e) else detect_lang(dest, h, "")
+    if lang == "" is return 0 end
+    let out_choice: string = if o.io_output != "" then o.io_output
+                             else string_lower(util::or_default(hk::hk_get(h, "lib", "output", ""), "hlib"))
+    let want: string = dest + "/.bit/out/" + artifact_name(name, out_choice)
+    if file_exists(want) is
+        if lock::locked_output(e) != out_choice is lock_record_output(name, out_choice) end
+        return 0
+    end
+
+    let p: project::Project = project::load(dest)
+    if project::entry_for(p, lang, "lib") == "" is return 0 end   ;; a library of sources only: nothing to compile
+    if !build::have_toolchain(lang) is
+        ui::warn(name + " (" + project::lang_label(lang) + ") has no compiled " + artifact_name(name, out_choice) + " — the " +
+                 project::lang_label(lang) + " toolchain was not found")
+        ui::note(build::missing_tool_hint(lang))
+        return 1
+    end
+    ui::line(ui::dim("compiling") + " " + ui::bold(name) + "  " + ui::dim(project::lang_label(lang) + " → " + artifact_name(name, out_choice)))
+    let art: string = build_installed(name, dest, lang, out_choice, o)
+    if art == "" is return 1 end
+    lock_record_output(name, out_choice)
+    return 0
+end
+
 ;; .bit packages: the mode that applies to this install — "off" | "auto" | "only"
 fn effective_bit(o: InstallOpts) -> string is
     let m: string = bitpkg::mode_here()
@@ -374,6 +435,8 @@ pub fn install_lib(spec: string, rev_in: string, o: InstallOpts) -> int is
             else is
                 ui::note(name + " is already installed (bit upgrade " + name + " to refresh)")
             end
+            ;; "installed" must also mean "usable": a copy that was never compiled is compiled now
+            if o.io_build is ensure_compiled(name, o) end
             return 0
         end
         if same_rev is
