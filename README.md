@@ -378,3 +378,10 @@ The diagnostics are produced in a **child process** (`bit __hk-diag <Bit.hk>`, a
 the renderer can never take `bit` down: if the nidus child fails, bit falls back to a plain layout (`bit __hk-lint`),
 and as a last resort prints a single line. `BIT_HK_DIAG=inproc` renders in-process instead — handy when debugging
 the renderer itself.
+
+## Biblioteki z innych języków (.hlib)
+
+- `bit` buduje zależność jej własnym kompilatorem (HackerScript / Hacker Lang / H#), niezależnie od języka projektu.
+- Biblioteka zainstalowana bez kompilatora jest dobudowywana przy następnym `bit` (wcześniej: „already installed” i brak `.hlib`).
+- Biblioteki HackerScript są przed spakowaniem spłaszczane (`include <x>` wklejane w miejscu) i budowane z `--name`.
+- `bit hlib [list|inspect|verify|build|path] [nazwa|plik.hlib]` — podgląd i naprawa archiwów `.hlib`.
