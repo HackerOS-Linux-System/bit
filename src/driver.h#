@@ -79,10 +79,10 @@ pub fn run(release: bool, debug: bool, verbose: bool, target: string, platform: 
         while i < array_len(ms) is
             if ms[i].mb_name == sel || ms[i].mb_path == sel || util::basename(ms[i].mb_path) == sel is
                 if ms[i].mb_kind != "bit" is
-                    ui::fail(ms[i].mb_name + " is not a bit member — run its binary from " + ms[i].mb_dir + "/cache/build/")
+                    ui::fail(ms[i].mb_name + " is not a bit member — run its binary from " + workspace::member_out_dir(p0, ms[i], "debug") + "/ (or release/)")
                     return 1
                 end
-                p = project::load(ms[i].mb_dir)
+                p = workspace::member_project(p0, ms[i])
                 found = true
             end
             i += 1
@@ -113,7 +113,7 @@ pub fn check(verbose: bool) -> int is
         while i < array_len(ms) is
             if ms[i].mb_kind == "bit" && (sel == "" || ms[i].mb_name == sel || ms[i].mb_path == sel || util::basename(ms[i].mb_path) == sel) is
                 ui::line(ui::cyan("▸") + " " + ui::bold(ms[i].mb_name))
-                if build::check_project(project::load(ms[i].mb_dir), verbose) != 0 is rc = 1 end
+                if build::check_project(workspace::member_project(p, ms[i]), verbose) != 0 is rc = 1 end
             end
             i += 1
         end
