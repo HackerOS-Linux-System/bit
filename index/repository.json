@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-10-18",
+  "updated_at": "2026-10-24",
   "libraries": [
     {
       "name": "mold",
@@ -329,6 +329,16 @@
         "ai"
       ],
       "author": "Bit Developers"
+    },
+    {
+      "name": "hlib",
+      "target": "https://github.com/HackerOS-Linux-System/hlib",
+      "description": "hlib api for bit.io",
+      "tags": [
+        "hlib",
+        "hlib-api"
+      ],
+      "author": "HackerOS Team"
     }
   ]
 }
