@@ -14,7 +14,7 @@ mod bitpkg
 mod hlibcmd
 
 fn project_lock_path(p: project::Project) -> string is
-    return project::root_of(p) + "/Bit.lock"
+    return project::lock_path(p)
 end
 
 fn link_into_cache(p: project::Project, dep_name: string, target: string) is
