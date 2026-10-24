@@ -271,7 +271,7 @@ pub fn cmd_install(names: [string], output: string, target: string, platform: st
             let mut i: int = 0
             while i < array_len(ms) is
                 if ms[i].mb_kind == "bit" is
-                    let mp: project::Project = project::load(ms[i].mb_dir)
+                    let mp: project::Project = workspace::member_project(p, ms[i])
                     features::activate(mp, flags::features_for(mp, true), flags::no_default(), flags::all_features(), verbose)
                     ui::line(ui::cyan("▸") + " " + ui::bold(ms[i].mb_name))
                     bad += workflow::ensure_deps(mp, verbose, release, use_lock, force)
@@ -730,7 +730,7 @@ pub fn cmd_system(action: string) -> int is
         while i < array_len(ms) is
             if ms[i].mb_kind == "bit" is
                 ui::line(ui::cyan("▸") + " " + ui::bold(ms[i].mb_name))
-                if sysdeps::cmd_system(project::load(ms[i].mb_dir), action) != 0 is rc = 1 end
+                if sysdeps::cmd_system(workspace::member_project(p, ms[i]), action) != 0 is rc = 1 end
             end
             i += 1
         end
