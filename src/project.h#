@@ -12,6 +12,7 @@ pub struct Project is
     pub pj_manifest: string
     pub pj_hk:       hk::Hk
     pub pj_cache:    string   ;; "" = <root>/cache
+    pub pj_lock:     string   ;; "" = <root>/Bit.lock; a workspace member uses the workspace's Bit.lock
     pub pj_sub:      string   ;; workspace member: outputs go to <cache>/build/<pj_sub>/<profile>; "" = a stand-alone project
 end
 
@@ -114,6 +115,7 @@ pub fn load(root: string) -> Project is
         pj_manifest: m,
         pj_hk: h,
         pj_cache: "",
+        pj_lock: "",
         pj_sub: ""
     }
 end
@@ -126,25 +128,33 @@ pub fn cwd() -> string is return getcwd() end
 pub fn load_with_cache(root: string, cache_base: string) -> Project is
     let base: Project = load(root)
     return Project { pj_root: base.pj_root, pj_name: base.pj_name, pj_version: base.pj_version,
-                     pj_manifest: base.pj_manifest, pj_hk: base.pj_hk, pj_cache: cache_base, pj_sub: "" }
+                     pj_manifest: base.pj_manifest, pj_hk: base.pj_hk, pj_cache: cache_base, pj_lock: "", pj_sub: "" }
 end
 
 
-;; A workspace member: its Bit.hk and sources stay in `root`, but cache/ is the WORKSPACE's cache
-;; (`ws_cache`, i.e. <workspace root>/cache, next to the Bit.hk that declares the members) and the
-;; build outputs get their own folder per member: <ws_cache>/build/<sub>/<debug|release>/.
+;; A workspace member: its Bit.hk and sources stay in `root`, but cache/ and Bit.lock are the
+;; WORKSPACE's (`ws_root`: <ws_root>/cache and <ws_root>/Bit.lock, next to the Bit.hk that declares the members) and the
+;; build outputs get their own folder per member: <ws_root>/cache/build/<sub>/<debug|release>/.
 ;; Nothing is ever created inside the member's own directory.
-pub fn load_member(root: string, ws_cache: string, sub: string) -> Project is
+pub fn load_member(root: string, ws_root: string, sub: string) -> Project is
     let base: Project = load(root)
     return Project { pj_root: base.pj_root, pj_name: base.pj_name, pj_version: base.pj_version,
-                     pj_manifest: base.pj_manifest, pj_hk: base.pj_hk, pj_cache: ws_cache, pj_sub: sub }
+                     pj_manifest: base.pj_manifest, pj_hk: base.pj_hk,
+                     pj_cache: ws_root + "/cache", pj_lock: ws_root + "/Bit.lock", pj_sub: sub }
+end
+
+;; The lock file of a project: <root>/Bit.lock — for a workspace member the ONE Bit.lock of the
+;; workspace, next to cache/ and the Bit.hk that declares the members.
+pub fn lock_path(p: Project) -> string is
+    if p.pj_lock != "" is return p.pj_lock end
+    return p.pj_root + "/Bit.lock"
 end
 
 ;; Loads the project around the cwd; `root == ""` when there is none.
 pub fn load_here() -> Project is
     let root: string = find_root(cwd())
     if root == "" is
-        return Project { pj_root: "", pj_name: "", pj_version: "", pj_manifest: "", pj_hk: hk::hk_empty(), pj_cache: "", pj_sub: "" }
+        return Project { pj_root: "", pj_name: "", pj_version: "", pj_manifest: "", pj_hk: hk::hk_empty(), pj_cache: "", pj_lock: "", pj_sub: "" }
     end
     ;; the project the user is working in: every problem in its Bit.hk is reported (nidus) once,
     ;; and its [directories] decide where libraries live for the rest of the process
