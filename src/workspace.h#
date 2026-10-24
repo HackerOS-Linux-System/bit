@@ -77,10 +77,10 @@ pub fn list(p: project::Project) -> [Member] is
 end
 
 
-;; The Project of a member, with cache/ relocated to the workspace root: <ws root>/cache is shared
+;; The Project of a member, with cache/ and Bit.lock relocated to the workspace root: <ws root>/cache is shared
 ;; (libs, source, env) and every member's outputs land in <ws root>/cache/build/<member>/<profile>.
 pub fn member_project(p: project::Project, m: Member) -> project::Project is
-    return project::load_member(m.mb_dir, project::cache_root(p), m.mb_name)
+    return project::load_member(m.mb_dir, project::root_of(p), m.mb_name)
 end
 
 ;; Where a member's build outputs go (one folder per profile).
@@ -232,6 +232,18 @@ fn build_member(p: project::Project, m: Member, o: build::BuildOpts, use_lock: b
     return 0
 end
 
+;; Older bit versions kept a Bit.lock inside every member. They are no longer read: a stale pin there
+;; (e.g. an old commit of a library) would silently win over the workspace's Bit.lock.
+fn warn_stale_locks(ms: [Member], p: project::Project) is
+    let mut i: int = 0
+    while i < array_len(ms) is
+        if ms[i].mb_kind == "bit" && file_exists(ms[i].mb_dir + "/Bit.lock") is
+            ui::warn("ignoring " + ms[i].mb_path + "/Bit.lock — a workspace keeps ONE lock: " + project::root_of(p) + "/Bit.lock  (delete the old file)")
+        end
+        i += 1
+    end
+end
+
 ;; Builds the members (all, or `only`), dependencies first. Stops at the first failure.
 pub fn build_all(p: project::Project, o: build::BuildOpts, use_lock: bool, only: string) -> int is
     let ms: [Member] = selected(ordered(list(p)), only)
@@ -240,6 +252,7 @@ pub fn build_all(p: project::Project, o: build::BuildOpts, use_lock: bool, only:
         if only != "" is ui::note("members:  bit ws list") end
         return 1
     end
+    warn_stale_locks(ms, p)
     ui::blank()
     ui::line(ui::bold("workspace") + " " + ui::bold(project::name_of(p)) + "  " + ui::dim(to_string(array_len(ms)) + " member(s), mode " + project::ws_mode(p)))
     let t0: int = time_ms()
