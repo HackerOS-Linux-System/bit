@@ -410,7 +410,7 @@ pub fn cmd_remove(name: string, global: bool) -> int is
                 util::run("rm -rf " + util::sq(project::cache_libs(p) + "/" + kinds[k] + "/" + name))
                 k += 1
             end
-            let pl: string = project::root_of(p) + "/Bit.lock"
+            let pl: string = project::lock_path(p)
             lock::lock_write(pl, lock::lock_del(lock::lock_read(pl), name))
             ui::ok(name + " removed from Bit.hk")
             touched = true
