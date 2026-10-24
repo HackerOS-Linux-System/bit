@@ -75,6 +75,32 @@ A bare `bit` reads `Bit.hk` → installs missing dependencies → builds with `[
 -> members => [core, cli]
 ```
 
+### Workspace cache
+
+In a workspace there is **one** `cache/`, next to the root `Bit.hk` that declares the members
+(not one inside every member's directory). Members keep only their sources and their own `Bit.hk`:
+
+```
+my-ws/
+├── Bit.hk                 [workspace] -> members => [core, cli]
+├── Bit.lock               one lock for all members
+├── cache/
+│   ├── libs/  source/  env/   shared by all members
+│   └── build/
+│       ├── core/{debug,release}/…     outputs of member `core`
+│       └── cli/{debug,release}/…      outputs of member `cli`
+├── core/  (Bit.hk, src/)
+└── cli/   (Bit.hk, src/)
+```
+
+There is also exactly **one `Bit.lock`** per workspace, at the root next to `cache/` — the members
+share it (entries are keyed by library name). A `Bit.lock` left inside a member by an older bit is
+ignored with a warning, so an old pin can never override the workspace lock.
+
+`bit` passes `-o` to `h# compile` / `h# lib build`, so under `bit` no `build/` directory is created
+anywhere — everything lives in `cache/`. `bit clean` in a workspace removes the root `cache/` (and
+the stray per-member `cache/` directories older bit versions left behind).
+
 `Bit.hk` is parsed by the **hk-parser** library (bit.io), so its grammar is hk-parser's: `!` starts a
 comment (whole lines only), `-> key => value`, one more dash per nesting level (`-->`, `--->`), arrays
 as `[a, b]`.
