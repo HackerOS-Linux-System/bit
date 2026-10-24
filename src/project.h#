@@ -12,6 +12,7 @@ pub struct Project is
     pub pj_manifest: string
     pub pj_hk:       hk::Hk
     pub pj_cache:    string   ;; "" = <root>/cache
+    pub pj_sub:      string   ;; workspace member: outputs go to <cache>/build/<pj_sub>/<profile>; "" = a stand-alone project
 end
 
 pub fn root_of(p: Project)     -> string is return p.pj_root end
@@ -112,7 +113,8 @@ pub fn load(root: string) -> Project is
         pj_version: hk::hk_pkg(h, "version", "0.1.0"),
         pj_manifest: m,
         pj_hk: h,
-        pj_cache: ""
+        pj_cache: "",
+        pj_sub: ""
     }
 end
 
@@ -124,14 +126,25 @@ pub fn cwd() -> string is return getcwd() end
 pub fn load_with_cache(root: string, cache_base: string) -> Project is
     let base: Project = load(root)
     return Project { pj_root: base.pj_root, pj_name: base.pj_name, pj_version: base.pj_version,
-                     pj_manifest: base.pj_manifest, pj_hk: base.pj_hk, pj_cache: cache_base }
+                     pj_manifest: base.pj_manifest, pj_hk: base.pj_hk, pj_cache: cache_base, pj_sub: "" }
+end
+
+
+;; A workspace member: its Bit.hk and sources stay in `root`, but cache/ is the WORKSPACE's cache
+;; (`ws_cache`, i.e. <workspace root>/cache, next to the Bit.hk that declares the members) and the
+;; build outputs get their own folder per member: <ws_cache>/build/<sub>/<debug|release>/.
+;; Nothing is ever created inside the member's own directory.
+pub fn load_member(root: string, ws_cache: string, sub: string) -> Project is
+    let base: Project = load(root)
+    return Project { pj_root: base.pj_root, pj_name: base.pj_name, pj_version: base.pj_version,
+                     pj_manifest: base.pj_manifest, pj_hk: base.pj_hk, pj_cache: ws_cache, pj_sub: sub }
 end
 
 ;; Loads the project around the cwd; `root == ""` when there is none.
 pub fn load_here() -> Project is
     let root: string = find_root(cwd())
     if root == "" is
-        return Project { pj_root: "", pj_name: "", pj_version: "", pj_manifest: "", pj_hk: hk::hk_empty(), pj_cache: "" }
+        return Project { pj_root: "", pj_name: "", pj_version: "", pj_manifest: "", pj_hk: hk::hk_empty(), pj_cache: "", pj_sub: "" }
     end
     ;; the project the user is working in: every problem in its Bit.hk is reported (nidus) once,
     ;; and its [directories] decide where libraries live for the rest of the process
@@ -168,6 +181,7 @@ end
 ;;   cache/source/  fetched sources (git/path dependencies)
 ;;   cache/env/     toolchain helpers
 ;;   cache/build/   outputs: cache/build/<debug|release>/…
+;;                  (workspace members: <workspace root>/cache/build/<member>/<debug|release>/…)
 
 pub fn cache_root(p: Project) -> string is
     if p.pj_cache != "" is return p.pj_cache end
@@ -176,7 +190,10 @@ end
 pub fn cache_libs(p: Project) -> string is return cache_root(p) + "/libs" end
 pub fn cache_source(p: Project) -> string is return cache_root(p) + "/source" end
 pub fn cache_env(p: Project) -> string is return cache_root(p) + "/env" end
-pub fn cache_build(p: Project) -> string is return cache_root(p) + "/build" end
+pub fn cache_build(p: Project) -> string is
+    if p.pj_sub != "" is return cache_root(p) + "/build/" + p.pj_sub end
+    return cache_root(p) + "/build"
+end
 
 pub fn cache_ensure(p: Project) -> int is
     let mut rc: int = util::mkdir_p(cache_libs(p))
