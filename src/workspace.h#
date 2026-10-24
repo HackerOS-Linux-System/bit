@@ -76,6 +76,18 @@ pub fn list(p: project::Project) -> [Member] is
     return out
 end
 
+
+;; The Project of a member, with cache/ relocated to the workspace root: <ws root>/cache is shared
+;; (libs, source, env) and every member's outputs land in <ws root>/cache/build/<member>/<profile>.
+pub fn member_project(p: project::Project, m: Member) -> project::Project is
+    return project::load_member(m.mb_dir, project::cache_root(p), m.mb_name)
+end
+
+;; Where a member's build outputs go (one folder per profile).
+pub fn member_out_dir(p: project::Project, m: Member, profile: string) -> string is
+    return project::cache_root(p) + "/build/" + m.mb_name + "/" + profile
+end
+
 ;; ── Build order ──────────────────────────────────────────────────────────────
 
 fn real(path: string) -> string is
@@ -193,14 +205,14 @@ fn build_member(p: project::Project, m: Member, o: build::BuildOpts, use_lock: b
     let special: bool = project::ws_mode(p) == "special"
     if m.mb_kind == "unknown" is return unknown_member(m, special) end
     if m.mb_kind == "bit" is
-        let mp: project::Project = project::load(m.mb_dir)
+        let mp: project::Project = member_project(p, m)
         let own: bool = array_len(project::langs(mp)) > 0
         let o2: build::BuildOpts = if m.mb_lang != "" && !own then build::opts_with_lang(o, m.mb_lang) else o
         return pipeline::build_one(mp, o2, use_lock, true)
     end
     if !external::preflight(m.mb_lang) is return 1 end
     let profile: string = if build::opts_release(o) then "release" else "debug"
-    let out: string = m.mb_dir + "/cache/build/" + profile
+    let out: string = member_out_dir(p, m, profile)
     util::mkdir_p(out)
     let cmd: string = external::build_command(m.mb_dir, m.mb_name, m.mb_lang, build::opts_release(o), out)
     if cmd == "" is
@@ -268,7 +280,7 @@ pub fn test_all(p: project::Project, filter: string, verbose: bool, release: boo
         ui::blank()
         ui::line(ui::cyan("▸") + " " + ui::bold(m.mb_name) + "  " + ui::dim(kind_label(m)))
         if m.mb_kind == "bit" is
-            if devtools::cmd_test(project::load(m.mb_dir), filter, verbose, release) != 0 is failed += 1 end
+            if devtools::cmd_test(member_project(p, m), filter, verbose, release) != 0 is failed += 1 end
         else if m.mb_kind == "external" is
             let cmd: string = external::test_command(m.mb_dir, m.mb_lang)
             if !external::preflight(m.mb_lang) is
@@ -297,6 +309,7 @@ pub fn clean_all(p: project::Project) -> int is
     let ms: [Member] = list(p)
     let mut i: int = 0
     while i < array_len(ms) is
+        ;; leftovers of older bit versions, which kept a cache/ inside every member
         util::rm_rf(ms[i].mb_dir + "/cache")
         i += 1
     end
