@@ -1,6 +1,7 @@
 import { initTheme } from "./theme.js";
 import { initOffline } from "./offline.js";
 import { hasGithubToken } from "./github.js";
+import { initGetApp } from "./getapp.js";
 
 function registerServiceWorker(): void {
   if (!("serviceWorker" in navigator)) return;
@@ -14,6 +15,7 @@ function registerServiceWorker(): void {
 export function initChrome(): void {
   initTheme();
   initOffline();
+  initGetApp();
   registerServiceWorker();
   if (hasGithubToken()) document.querySelectorAll("[data-settings-link]").forEach((a) => a.classList.add("has-token"));
 }
