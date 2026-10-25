@@ -1,6 +1,19 @@
 package org.hackeros.bitio.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
+import org.hackeros.bitio.R
+import org.hackeros.bitio.markdown.Highlighter
+import org.hackeros.bitio.markdown.SyntaxColors
+import org.hackeros.bitio.markdown.extOf
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -107,7 +120,7 @@ fun LibraryDetailScreen(
         }
 
         val gh = entry.github
-        val defaultRef = entry.rev.ifEmpty { "HEAD" }
+        val defaultRef = entry.rev.ifEmpty { gh?.ref.orEmpty().ifEmpty { "HEAD" } }
         var ref by rememberSaveable(entry.name) { mutableStateOf(defaultRef) }
         var tab by rememberSaveable(entry.name) { mutableIntStateOf(0) }
 
@@ -128,6 +141,7 @@ fun LibraryDetailScreen(
                         entry.tags.forEach { TagChip(it) }
                     }
                 }
+                if (gh != null) LangLeadCard(gh, ref, repo)
             }
             TabRow(selectedTabIndex = tab) {
                 TABS.forEachIndexed { i, label ->
@@ -328,8 +342,8 @@ private fun SourceTab(gh: GithubRepo?, ref: String, repo: BitRepository) {
         return
     }
     val tree by rememberLoad(gh, ref) { repo.loadTree(gh, ref) }
-    var dir by rememberSaveable(gh.repo, ref) { mutableStateOf("") }
-    var file by rememberSaveable(gh.repo, ref) { mutableStateOf<String?>(null) }
+    var dir by rememberSaveable(gh.slug, ref) { mutableStateOf("") }
+    var file by rememberSaveable(gh.slug, ref) { mutableStateOf<String?>(null) }
 
     BackHandler(enabled = file != null || dir.isNotEmpty()) {
         if (file != null) file = null else dir = dir.substringBeforeLast('/', "")
@@ -356,7 +370,7 @@ private fun SourceTab(gh: GithubRepo?, ref: String, repo: BitRepository) {
                 item {
                     Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            "${gh.repo}/" + dir,
+                            (if (gh.dir.isEmpty()) gh.repo else "${gh.repo}/${gh.dir}") + "/" + dir,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -413,7 +427,21 @@ private fun FileViewer(gh: GithubRepo, ref: String, repo: BitRepository, path: S
                 if (f.value.contains('\u0000')) {
                     Notice("Binary file - not shown.", modifier = Modifier.padding(16.dp))
                 } else {
+                    val dark = isDarkTheme()
+                    val styled = remember(f.value, path, dark) {
+                        Highlighter.annotate(f.value, extOf(path), path.substringAfterLast('/'), if (dark) SyntaxColors.Dark else SyntaxColors.Light)
+                    }
+                    // line i = [starts[i], starts[i] + length): sub-sequences keep the colours (multi-line comments included)
                     val lines = remember(f.value) { f.value.lines().take(5000) }
+                    val starts = remember(f.value) {
+                        val s = IntArray(lines.size)
+                        var pos = 0
+                        for (k in lines.indices) {
+                            s[k] = pos
+                            pos += lines[k].length + 1
+                        }
+                        s
+                    }
                     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 8.dp)) {
                         items(lines.size) { i ->
                             Row(Modifier.padding(horizontal = 12.dp)) {
@@ -424,12 +452,65 @@ private fun FileViewer(gh: GithubRepo, ref: String, repo: BitRepository, path: S
                                     color = MaterialTheme.colorScheme.outline,
                                     modifier = Modifier.width(40.dp),
                                 )
-                                Text(lines[i], fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.weight(1f))
+                                Text(styled.subSequence(starts[i], starts[i] + lines[i].length), fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.weight(1f))
                             }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+/* ------------------------------------------------------------ "<lang> leads this repo" */
+
+private class LangShare(val name: String, val pct: Double)
+
+private class LangBrand(val label: String, val icon: Int, val top: Color, val bottom: Color, val border: Color)
+
+private val EXT_LANG = mapOf("h#" to "H#", "h#i" to "H#", "hcs" to "HackerScript", "hl" to "Hacker Lang")
+
+private val BRANDS = mapOf(
+    "H#" to LangBrand("H#", R.drawable.lang_hsharp, Color(0xFF2A0D12), Color(0xFF0B0B0D), Color(0xFF5C0710)),
+    "HackerScript" to LangBrand("HackerScript", R.drawable.lang_hackerscript, Color(0xFF3A3A42), Color(0xFF1C1C21), Color(0xFF55555F)),
+    "Hacker Lang" to LangBrand("Hacker Lang", R.drawable.lang_hackerlang, Color(0xFF1F1536), Color(0xFF0B0B0D), Color(0xFF3D2A6B)),
+)
+
+/** Share of H# / HackerScript / Hacker Lang bytes among the library's files (website/src/langcolors.ts). */
+private fun breakdown(items: List<TreeItem>): List<LangShare> {
+    val totals = HashMap<String, Long>()
+    for (it in items) {
+        if (it.isDir) continue
+        val lang = EXT_LANG[extOf(it.path)] ?: continue
+        totals[lang] = (totals[lang] ?: 0L) + it.size
+    }
+    val sum = totals.values.sum().toDouble()
+    if (sum <= 0.0) return emptyList()
+    return totals.entries.sortedByDescending { it.value }.map { LangShare(it.key, it.value / sum * 100.0) }
+}
+
+/** The project's own icon plus "H# leads this repo" when one of the three HackerOS languages has the most code. */
+@Composable
+private fun LangLeadCard(gh: GithubRepo, ref: String, repo: BitRepository) {
+    val tree by rememberLoad(gh, ref) { repo.loadTree(gh, ref) }
+    val t = tree
+    if (t !is Load.Ok) return
+    val top = remember(t.value) { breakdown(t.value.items).firstOrNull() } ?: return
+    val brand = BRANDS[top.name] ?: return
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(Brush.linearGradient(listOf(brand.top, brand.bottom)))
+            .border(1.dp, brand.border, RoundedCornerShape(12.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Image(painterResource(brand.icon), contentDescription = null, modifier = Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)))
+        Column {
+            Text("${brand.label} leads this repo", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            Text("${"%.1f".format(top.pct)}% of tracked bytes", color = Color(0xFFA8A8B3), fontSize = 11.sp)
         }
     }
 }
