@@ -99,8 +99,38 @@ export async function loadIndex(): Promise<Index> {
   throw lastError instanceof Error ? lastError : new Error("could not load the library index");
 }
 
-/** `https://github.com/owner/repo(.git)` → { owner, repo } */
-export function parseGithub(url: string): { owner: string; repo: string } | null {
-  const m = url.match(/^https:\/\/github\.com\/([^/\s]+)\/([^/\s#?]+?)(?:\.git)?\/?$/);
-  return m && m[1] && m[2] ? { owner: m[1], repo: m[2] } : null;
+export interface GithubTarget {
+  owner: string;
+  repo: string;
+  /** branch / tag from a `/tree/<ref>/…` URL */
+  ref?: string;
+  /** sub-directory of the repository (libraries that live in a folder of a bigger repo) */
+  dir?: string;
+}
+
+function decodeSegment(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
+/**
+ * `https://github.com/owner/repo(.git)` → { owner, repo }
+ * `https://github.com/owner/repo/tree/main/libs/x` → { owner, repo, ref: "main", dir: "libs/x" }
+ * (the same shape the index uses for libhammer and blue-api).
+ */
+export function parseGithub(url: string): GithubTarget | null {
+  const m = url.trim().match(/^https:\/\/github\.com\/([^/\s]+)\/([^/\s#?]+?)(?:\.git)?(?:\/tree\/([^/\s#?]+)(?:\/([^\s#?]*?))?)?\/?(?:[#?].*)?$/);
+  if (!m || !m[1] || !m[2]) return null;
+  const target: GithubTarget = { owner: m[1], repo: m[2] };
+  if (m[3]) target.ref = decodeSegment(m[3]);
+  const dir = (m[4] ?? "")
+    .split("/")
+    .filter(Boolean)
+    .map(decodeSegment)
+    .join("/");
+  if (dir && !dir.split("/").some((p) => p === ".." || p === ".")) target.dir = dir;
+  return target;
 }
