@@ -1,4 +1,4 @@
-const VERSION = "bitio-v3";
+const VERSION = "bitio-v4";
 const FONTS = "bitio-fonts-v1";
 
 const SHELL = [
@@ -12,6 +12,9 @@ const SHELL = [
   "repository.json",
   "images/icon.png",
   "images/logo.png",
+  "images/lang/hsharp.png",
+  "images/lang/hackerlang.png",
+  "images/lang/hackerscript.png",
   ...[
     "home", "lib", "about", "settings", "chrome", "theme", "offline", "store", "github", "dom", "langs", "hk",
     "index-data", "repodata", "markdown", "highlight", "langcolors", "langbar", "source", "versions",
