@@ -98,7 +98,7 @@ const key = (kind: string, r: Repo, extra = ""): string => `${kind}:${r.owner}/$
 
 /* ------------------------------------------------------------------ manifest */
 
-const MANIFESTS = ["Bit.hk", "bit.hk", "Bytes.hk", "Virus.hk"];
+const MANIFESTS = ["Bit.hk", "bit.hk"];
 
 export interface ManifestSrc {
   file: string;
