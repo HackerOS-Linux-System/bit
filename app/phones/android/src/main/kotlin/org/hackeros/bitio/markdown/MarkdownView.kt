@@ -26,6 +26,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.sp
 
 @Composable
@@ -61,7 +62,7 @@ fun MdBlockView(block: MdBlock, modifier: Modifier = Modifier) {
             style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
             modifier = modifier.padding(vertical = 4.dp),
         )
-        is MdBlock.Code -> CodeBlock(block.code, modifier.padding(vertical = 4.dp))
+        is MdBlock.Code -> CodeBlock(block.code, modifier.padding(vertical = 4.dp), lang = block.lang)
         is MdBlock.Quote -> Row(modifier.padding(vertical = 4.dp).height(IntrinsicSize.Min)) {
             Box(Modifier.width(3.dp).fillMaxHeight().background(scheme.primary.copy(alpha = 0.6f)))
             Column(Modifier.padding(start = 12.dp)) {
@@ -86,8 +87,13 @@ fun MdBlockView(block: MdBlock, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun CodeBlock(code: String, modifier: Modifier = Modifier) {
+fun CodeBlock(code: String, modifier: Modifier = Modifier, lang: String = "") {
     val scroll = rememberScrollState()
+    val dark = MaterialTheme.colorScheme.background.red < 0.5f
+    val styled = remember(code, lang, dark) {
+        if (lang.isBlank()) AnnotatedString(code)
+        else Highlighter.annotate(code, extForLang(lang), "", if (dark) SyntaxColors.Dark else SyntaxColors.Light)
+    }
     Box(
         modifier
             .fillMaxWidth()
@@ -97,7 +103,7 @@ fun CodeBlock(code: String, modifier: Modifier = Modifier) {
             .padding(12.dp),
     ) {
         Text(
-            code,
+            styled,
             fontFamily = FontFamily.Monospace,
             fontSize = 12.5.sp,
             lineHeight = 18.sp,
