@@ -293,3 +293,10 @@ test("API parser: H# methods in impl blocks and /// docs", async () => {
   assert.equal(parseApiFile("pub fun a() [ ]", "a.hcs")[0].name, "a");
   assert.equal(parseApiFile(": a def\ndone", "a.hl")[0].name, "a");
 });
+
+test("app downloads point at the v0.3 release assets; HackerOS gets the unpack command", async () => {
+  const { APP_DOWNLOADS, HACKEROS_COMMAND } = await js("getapp");
+  assert.equal(APP_DOWNLOADS.android.url, "https://github.com/HackerOS-Linux-System/bit/releases/download/v0.3/bit-io-android-app.apk");
+  assert.equal(APP_DOWNLOADS.ios.url, "https://github.com/HackerOS-Linux-System/bit/releases/download/v0.3/bit-io-ios-app.ipa");
+  assert.equal(HACKEROS_COMMAND, "hacker unpack bit-app");
+});
