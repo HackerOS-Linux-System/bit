@@ -94,7 +94,7 @@ class BitRepository(private val context: Context, private val prefs: Prefs) {
 
     /** raw.githubusercontent.com has no API quota and never sees the token. null = 404. */
     private suspend fun fetchRaw(r: GithubRepo, ref: String, path: String): String? {
-        val url = "https://raw.githubusercontent.com/${r.owner}/${r.repo}/${encPath(ref)}/${encPath(path)}"
+        val url = "https://raw.githubusercontent.com/${r.owner}/${r.repo}/${encPath(ref)}/${encPath(r.path(path))}"
         val res = Http.get(url)
         if (res.status == 404) return null
         if (!res.ok) throw IOException("HTTP ${res.status}")
@@ -141,7 +141,7 @@ class BitRepository(private val context: Context, private val prefs: Prefs) {
 
     suspend fun loadManifest(r: GithubRepo, ref: String): Loaded<Manifest> =
         cached(
-            "manifest:${r.owner}/${r.repo}@$ref", TTL_MANIFEST,
+            "manifest:${r.slug}@$ref", TTL_MANIFEST,
             fetch = {
                 var found: String? = null
                 for (f in MANIFESTS) {
@@ -158,7 +158,7 @@ class BitRepository(private val context: Context, private val prefs: Prefs) {
 
     suspend fun loadReadme(r: GithubRepo, ref: String): Loaded<Readme> =
         cached(
-            "readme:${r.owner}/${r.repo}@$ref", TTL_README,
+            "readme:${r.slug}@$ref", TTL_README,
             fetch = {
                 var found: String? = null
                 for (f in README_FILES) {
@@ -262,7 +262,7 @@ class BitRepository(private val context: Context, private val prefs: Prefs) {
 
     suspend fun loadTree(r: GithubRepo, ref: String): Loaded<RepoTree> =
         cached(
-            "tree:${r.owner}/${r.repo}@$ref", TTL_TREE,
+            "tree:${r.slug}@$ref", TTL_TREE,
             fetch = { apiOk("/repos/${enc(r.owner)}/${enc(r.repo)}/git/trees/${encPath(ref)}?recursive=1") },
             parse = { s ->
                 val o = JSONObject(s)
@@ -272,7 +272,13 @@ class BitRepository(private val context: Context, private val prefs: Prefs) {
                     val t = arr.optJSONObject(i) ?: continue
                     val type = t.optString("type")
                     if (type != "blob" && type != "tree") continue
-                    items += TreeItem(t.optString("path"), type == "tree", t.optLong("size"))
+                    var path = t.optString("path")
+                    if (r.dir.isNotEmpty()) {
+                        // a library in a sub-folder: only its entries, relative to the folder
+                        if (!path.startsWith(r.dir + "/")) continue
+                        path = path.substring(r.dir.length + 1)
+                    }
+                    items += TreeItem(path, type == "tree", t.optLong("size"))
                 }
                 RepoTree(items, o.optBoolean("truncated"))
             },
@@ -280,7 +286,7 @@ class BitRepository(private val context: Context, private val prefs: Prefs) {
 
     suspend fun loadFile(r: GithubRepo, ref: String, path: String): Loaded<String> =
         cached(
-            "src:${r.owner}/${r.repo}@$ref:$path", TTL_FILE,
+            "src:${r.slug}@$ref:$path", TTL_FILE,
             fetch = { fetchRaw(r, ref, path)?.take(300_000) },
             parse = { it },
         )
@@ -290,7 +296,7 @@ class BitRepository(private val context: Context, private val prefs: Prefs) {
         val INDEX_URLS = listOf(
             "https://raw.githubusercontent.com/HackerOS-Linux-System/bit/main/index/repository.json",
         )
-        val MANIFESTS = listOf("Bit.hk", "bit.hk", "Bytes.hk", "Virus.hk")
+        val MANIFESTS = listOf("Bit.hk", "bit.hk")
         val README_FILES = listOf("README.md", "Readme.md", "readme.md", "README.markdown", "README.MD", "README", "README.txt", "README.rst")
 
         const val HOUR = 3_600_000L
