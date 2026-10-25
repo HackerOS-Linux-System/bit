@@ -3,7 +3,7 @@ import { highlight, toLines } from "./highlight.js";
 import { extensionOf } from "./langcolors.js";
 import { renderMarkdown } from "./markdown.js";
 import { decorateCode } from "./codeblocks.js";
-import { loadDir, loadFile, loadTree, pool, readFileLight, type FileEntry, type Repo } from "./repodata.js";
+import { githubUrl, loadDir, loadFile, loadTree, pool, rawUrl, readFileLight, type FileEntry, type Repo } from "./repodata.js";
 import { GithubError } from "./github.js";
 import { formatAge, formatBytes } from "./store.js";
 
@@ -102,8 +102,6 @@ export function mountSource(panel: HTMLElement, repo: Repo): SourceBrowser {
   let current = "";
   let pending: string | null = null;
 
-  const ghBase = `https://github.com/${repo.owner}/${repo.repo}`;
-  const ghRef = repo.ref.split("/").map(encodeURIComponent).join("/");
 
   let renderLevel: (node: Node) => HTMLElement = () => h("ul", {});
 
@@ -217,7 +215,7 @@ export function mountSource(panel: HTMLElement, repo: Repo): SourceBrowser {
       try {
         const res = await loadTree(repo);
         if (!res.value || res.value.files.length === 0) {
-          treeBox.replaceChildren(h("p", { class: "muted small" }, res.value ? "This repository has no files." : `Nothing found at "${repo.ref}".`));
+          treeBox.replaceChildren(h("p", { class: "muted small" }, res.value ? "This repository has no files." : `Nothing found at "${repo.dir ? `${repo.dir} @ ` : ""}${repo.ref}".`));
           return;
         }
         files = res.value.files;
@@ -238,7 +236,7 @@ export function mountSource(panel: HTMLElement, repo: Repo): SourceBrowser {
         status.textContent = `${files.length} files · ${repo.ref === "HEAD" ? "default branch" : repo.ref}${res.stale ? ` · saved copy (${formatAge(res.ageMs)})` : ""}`;
         renderTree();
         if (res.value.truncated) {
-          treeBox.append(h("p", { class: "muted small" }, "Large repository — partial listing. ", h("a", { href: `${ghBase}/tree/${ghRef}`, target: "_blank", rel: "noopener" }, "Open on GitHub ↗")));
+          treeBox.append(h("p", { class: "muted small" }, "Large repository — partial listing. ", h("a", { href: githubUrl(repo, "tree"), target: "_blank", rel: "noopener" }, "Open on GitHub ↗")));
         }
       } catch (e) {
         const retry = h("button", { class: "retry-btn", type: "button" }, "Try again");
@@ -264,7 +262,7 @@ export function mountSource(panel: HTMLElement, repo: Repo): SourceBrowser {
       if (i > 0) crumbs.push(" / ");
       crumbs.push(h("span", { class: i === all.length - 1 ? "src-crumb is-last" : "src-crumb" }, p));
     });
-    const rawUrl = `https://raw.githubusercontent.com/${repo.owner}/${repo.repo}/${ghRef}/${path.split("/").map(encodeURIComponent).join("/")}`;
+    const rawHref = rawUrl(repo, path);
     return h(
       "div",
       { class: "src-view-head" },
@@ -273,8 +271,8 @@ export function mountSource(panel: HTMLElement, repo: Repo): SourceBrowser {
         "div",
         { class: "src-view-actions" },
         ...extra,
-        h("a", { class: "copy", href: rawUrl, target: "_blank", rel: "noopener" }, "Raw"),
-        h("a", { class: "copy", href: `${ghBase}/blob/${ghRef}/${path.split("/").map(encodeURIComponent).join("/")}`, target: "_blank", rel: "noopener" }, "GitHub ↗"),
+        h("a", { class: "copy", href: rawHref, target: "_blank", rel: "noopener" }, "Raw"),
+        h("a", { class: "copy", href: githubUrl(repo, "blob", path), target: "_blank", rel: "noopener" }, "GitHub ↗"),
       ),
     );
   }
@@ -314,7 +312,7 @@ export function mountSource(panel: HTMLElement, repo: Repo): SourceBrowser {
       code.append(h("div", { class: "src-line", "data-n": String(n) }, ln, lc));
     });
     const wrap = h("div", { class: "src-code-wrap" }, h("pre", { class: "src-code" }, code));
-    if (cut) wrap.append(h("p", { class: "src-truncated-note" }, `Showing the first ${MAX_LINES.toLocaleString()} of ${total.toLocaleString()} lines. `, h("a", { href: `${ghBase}/blob/${ghRef}/${path}`, target: "_blank", rel: "noopener" }, "Open the full file on GitHub ↗")));
+    if (cut) wrap.append(h("p", { class: "src-truncated-note" }, `Showing the first ${MAX_LINES.toLocaleString()} of ${total.toLocaleString()} lines. `, h("a", { href: githubUrl(repo, "blob", path), target: "_blank", rel: "noopener" }, "Open the full file on GitHub ↗")));
     void range;
     return wrap;
   }
@@ -336,7 +334,7 @@ export function mountSource(panel: HTMLElement, repo: Repo): SourceBrowser {
       return;
     }
     if (IMAGE_EXT.has(ext)) {
-      const src = `https://raw.githubusercontent.com/${repo.owner}/${repo.repo}/${ghRef}/${path.split("/").map(encodeURIComponent).join("/")}`;
+      const src = rawUrl(repo, path);
       view.replaceChildren(head(path, []), h("div", { class: "src-image" }, h("img", { src, alt: path, loading: "lazy", referrerpolicy: "no-referrer" })));
       return;
     }
@@ -367,7 +365,7 @@ export function mountSource(panel: HTMLElement, repo: Repo): SourceBrowser {
         const draw = (): void => {
           if (preview) {
             const md = h("div", { class: "markdown-body" });
-            md.append(renderMarkdown(text, { owner: repo.owner, repo: repo.repo, ref: repo.ref }));
+            md.append(renderMarkdown(text, { owner: repo.owner, repo: repo.repo, ref: repo.ref, ...(repo.dir ? { dir: repo.dir } : {}) }));
             decorateCode(md);
             body.replaceChildren(md);
             toggle.textContent = "Code";
