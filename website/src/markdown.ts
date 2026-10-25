@@ -3,6 +3,8 @@ export interface MdContext {
   repo: string;
   /** Tag, commit or "HEAD" — used to resolve relative links and images. */
   ref: string;
+  /** Folder of the repository the README lives in (libraries inside a bigger repo); relative links resolve against it. */
+  dir?: string;
 }
 
 export function escapeHtml(s: string): string {
@@ -413,7 +415,8 @@ function resolve(url: string, ctx: MdContext, kind: "link" | "media"): string | 
   if (!isSafeScheme(u, kind === "link")) return null;
   if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(u)) return u;
   // relative to the repository root (GitHub resolves them against the README's folder; READMEs live at the root)
-  const clean = u.replace(/^\.\//, "").replace(/^\//, "");
+  const rel = u.replace(/^\.\//, "").replace(/^\//, "");
+  const clean = ctx.dir && !u.startsWith("/") ? `${ctx.dir}/${rel}` : rel;
   const ref = ctx.ref.split("/").map(encodeURIComponent).join("/");
   return kind === "media"
     ? `https://raw.githubusercontent.com/${ctx.owner}/${ctx.repo}/${ref}/${clean}`
