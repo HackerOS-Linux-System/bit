@@ -1,7 +1,7 @@
 import type { HkDoc } from "./types.js";
 
 /**
- * Reader for the `.hk` manifests (Bit.hk, Bytes.hk, Virus.hk):
+ * Reader for the `.hk` manifests (Bit.hk / bit.hk):
  *   [section]
  *   -> key => value     ;; comment
  *   --> sub => value    (stored as "key.sub")
