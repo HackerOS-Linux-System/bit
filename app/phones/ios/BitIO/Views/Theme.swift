@@ -13,7 +13,7 @@ enum Theme {
     static let warn = Color.orange
     static let err = Color.red
 
-    private static func dynamic(light: UInt32, dark: UInt32) -> Color {
+    static func dynamic(light: UInt32, dark: UInt32) -> Color {
         Color(UIColor { trait in
             let v = trait.userInterfaceStyle == .dark ? dark : light
             return UIColor(
@@ -29,7 +29,7 @@ enum Theme {
         switch l {
         case .hsharp: return dynamic(light: 0xA5001A, dark: 0xFF5468)
         case .hackerlang: return dynamic(light: 0x6C1FD6, dark: 0xA78BFA)
-        case .hackerscript: return dynamic(light: 0x0A8FA6, dark: 0x38D3EA)
+        case .hackerscript: return dynamic(light: 0x4B4B55, dark: 0x8E8E9C) // dark grey
         case .any: return dynamic(light: 0x6E6E85, dark: 0x8B8B9C)
         }
     }
