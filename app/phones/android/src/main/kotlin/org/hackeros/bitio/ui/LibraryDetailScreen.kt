@@ -149,7 +149,7 @@ fun LibraryDetailScreen(
                         entry.tags.forEach { TagChip(it) }
                     }
                 }
-                if (gh != null) LangLeadCard(gh, ref, repo)
+                if (gh != null) LanguagesCard(gh, ref, repo)
             }
             TabRow(selectedTabIndex = tab) {
                 TABS.forEachIndexed { i, label ->
@@ -466,89 +466,6 @@ private fun FileViewer(gh: GithubRepo, ref: String, repo: BitRepository, path: S
                     }
                 }
             }
-        }
-    }
-}
-
-/* ------------------------------------------------------------ "<lang> leads this repo" */
-
-private class LangShare(val name: String, val pct: Double)
-
-private class LangBrand(val label: String, val url: String, val icon: Int, val top: Color, val bottom: Color, val border: Color)
-
-private val EXT_LANG = mapOf("h#" to "H#", "h#i" to "H#", "hcs" to "HackerScript", "hl" to "Hacker Lang")
-
-private val BRANDS = mapOf(
-    "H#" to LangBrand("H#", "https://raw.githubusercontent.com/HackerOS-Linux-System/H-Sharp/main/images/icon.png", R.drawable.lang_hsharp, Color(0xFF2A0D12), Color(0xFF0B0B0D), Color(0xFF5C0710)),
-    "HackerScript" to LangBrand("HackerScript", "https://raw.githubusercontent.com/HackerOS-Linux-System/HackerScript/main/images/icon.png", R.drawable.lang_hackerscript, Color(0xFF3A3A42), Color(0xFF1C1C21), Color(0xFF55555F)),
-    "Hacker Lang" to LangBrand("Hacker Lang", "https://raw.githubusercontent.com/HackerOS-Linux-System/Hacker-Lang/main/images/icon.png", R.drawable.lang_hackerlang, Color(0xFF1F1536), Color(0xFF0B0B0D), Color(0xFF3D2A6B)),
-)
-
-/** Share of H# / HackerScript / Hacker Lang bytes among the library's files (website/src/langcolors.ts). */
-private fun breakdown(items: List<TreeItem>): List<LangShare> {
-    val totals = HashMap<String, Long>()
-    for (it in items) {
-        if (it.isDir) continue
-        val lang = EXT_LANG[extOf(it.path)] ?: continue
-        totals[lang] = (totals[lang] ?: 0L) + it.size
-    }
-    val sum = totals.values.sum().toDouble()
-    if (sum <= 0.0) return emptyList()
-    return totals.entries.sortedByDescending { it.value }.map { LangShare(it.key, it.value / sum * 100.0) }
-}
-
-private val iconCache = java.util.concurrent.ConcurrentHashMap<String, ImageBitmap>()
-
-/** Downloads [url] (the project's real icon on GitHub); the bundled copy [fallback] is shown while loading and when offline. */
-@Composable
-private fun RemoteIcon(url: String, fallback: Int, modifier: Modifier = Modifier) {
-    val bitmap by produceState<ImageBitmap?>(iconCache[url], url) {
-        if (value != null) return@produceState
-        value = withContext(Dispatchers.IO) {
-            try {
-                val conn = URL(url).openConnection() as HttpURLConnection
-                conn.connectTimeout = 8000
-                conn.readTimeout = 8000
-                try {
-                    if (conn.responseCode == 200) {
-                        val opts = BitmapFactory.Options().apply { inSampleSize = 4 } // the source icon is ~1250 px
-                        BitmapFactory.decodeStream(conn.inputStream, null, opts)?.asImageBitmap()?.also { iconCache[url] = it }
-                    } else null
-                } finally {
-                    conn.disconnect()
-                }
-            } catch (e: Exception) {
-                null
-            }
-        }
-    }
-    val bmp = bitmap
-    if (bmp != null) Image(bmp, contentDescription = null, modifier = modifier)
-    else Image(painterResource(fallback), contentDescription = null, modifier = modifier)
-}
-
-/** The project's own icon plus "H# leads this repo" when one of the three HackerOS languages has the most code. */
-@Composable
-private fun LangLeadCard(gh: GithubRepo, ref: String, repo: BitRepository) {
-    val tree by rememberLoad(gh, ref) { repo.loadTree(gh, ref) }
-    val t = tree
-    if (t !is Load.Ok) return
-    val top = remember(t.value) { breakdown(t.value.items).firstOrNull() } ?: return
-    val brand = BRANDS[top.name] ?: return
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(Brush.linearGradient(listOf(brand.top, brand.bottom)))
-            .border(1.dp, brand.border, RoundedCornerShape(12.dp))
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        RemoteIcon(brand.url, brand.icon, Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)))
-        Column {
-            Text("${brand.label} leads this repo", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-            Text("${"%.1f".format(top.pct)}% of tracked bytes", color = Color(0xFFA8A8B3), fontSize = 11.sp)
         }
     }
 }
