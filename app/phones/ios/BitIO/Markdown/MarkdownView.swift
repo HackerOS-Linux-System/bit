@@ -18,8 +18,8 @@ struct MarkdownBlockView: View {
                 .font(.body)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-        case let .code(_, code):
-            CodeBlockView(code: code)
+        case let .code(lang, code):
+            CodeBlockView(code: code, lang: lang)
 
         case let .quote(blocks):
             HStack(alignment: .top, spacing: 10) {
@@ -81,10 +81,15 @@ struct MarkdownBlockView: View {
 
 struct CodeBlockView: View {
     let code: String
+    var lang: String = ""
+
+    private var styled: AttributedString {
+        lang.trimmingCharacters(in: .whitespaces).isEmpty ? AttributedString(code) : Highlighter.attributed(code, ext: extForLang(lang))
+    }
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            Text(code)
+            Text(styled)
                 .font(.system(.footnote, design: .monospaced))
                 .fixedSize(horizontal: true, vertical: true)
                 .padding(12)
