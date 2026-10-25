@@ -138,7 +138,7 @@ final class BitRepository: ObservableObject {
     private static let indexURLs = [
         "https://raw.githubusercontent.com/HackerOS-Linux-System/bit/main/index/repository.json",
     ]
-    private static let manifests = ["Bit.hk", "bit.hk", "Bytes.hk", "Virus.hk"]
+    private static let manifests = ["Bit.hk", "bit.hk"]
     private static let readmeFiles = ["README.md", "Readme.md", "readme.md", "README.markdown", "README.MD", "README", "README.txt", "README.rst"]
 
     private static let hour: TimeInterval = 3600
