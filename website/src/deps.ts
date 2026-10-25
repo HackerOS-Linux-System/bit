@@ -81,7 +81,7 @@ export async function scanUsedBy(
       const gh = parseGithub(lib.target);
       if (gh) {
         try {
-          const res = await loadManifest({ ...gh, ref: lib.rev || "HEAD" });
+          const res = await loadManifest({ owner: gh.owner, repo: gh.repo, ref: lib.rev || gh.ref || "HEAD", ...(gh.dir ? { dir: gh.dir } : {}) });
           const hit = dependenciesOf(res.value?.doc).find((d) => d.name.toLowerCase() === target.name.toLowerCase());
           if (hit) found.push({ lib, spec: hit.spec });
         } catch {
