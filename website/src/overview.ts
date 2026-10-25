@@ -6,7 +6,7 @@ import { renderMarkdown } from "./markdown.js";
 import { langInfo, normalizeLang } from "./langs.js";
 import { highlight } from "./highlight.js";
 import { extensionOf } from "./langcolors.js";
-import { loadFile, loadManifest, loadReadme, loadRepoMeta, loadTree, rememberSha, resolveRev, seenSha, type Repo, type RepoMeta } from "./repodata.js";
+import { githubUrl, loadFile, loadManifest, loadReadme, loadRepoMeta, loadTree, rememberSha, resolveRev, seenSha, type Repo, type RepoMeta } from "./repodata.js";
 import { GithubError } from "./github.js";
 import { formatAge } from "./store.js";
 import { verifyChecksum, VerifyError, untag } from "./verify.js";
@@ -292,7 +292,7 @@ export function mountOverview(panel: HTMLElement, ctx: OverviewCtx): { reload: (
         if (mode === "rendered") {
           const md = h("div", { class: "markdown-body" });
           try {
-            md.append(renderMarkdown(text, { owner: repo.owner, repo: repo.repo, ref: repo.ref }));
+            md.append(renderMarkdown(text, { owner: repo.owner, repo: repo.repo, ref: repo.ref, ...(repo.dir ? { dir: repo.dir } : {}) }));
             decorateCode(md);
             const toc = buildToc(md);
             if (toc) tocSlot.append(toc);
@@ -309,7 +309,7 @@ export function mountOverview(panel: HTMLElement, ctx: OverviewCtx): { reload: (
         draw();
       });
       draw();
-      const ghFile = `https://github.com/${repo.owner}/${repo.repo}/blob/${repo.ref.split("/").map(encodeURIComponent).join("/")}/${encodeURIComponent(file)}`;
+      const ghFile = githubUrl(repo, "blob", file);
       readmeBox.replaceChildren(
         h(
           "div",
