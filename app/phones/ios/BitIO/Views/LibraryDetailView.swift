@@ -32,7 +32,7 @@ struct LibraryDetailView: View {
 
     @ViewBuilder
     private func content(_ entry: LibEntry) -> some View {
-        let defaultRef = entry.rev.isEmpty ? "HEAD" : entry.rev
+        let defaultRef = entry.rev.isEmpty ? ((entry.github?.ref ?? "").isEmpty ? "HEAD" : (entry.github?.ref ?? "HEAD")) : entry.rev
         let ref = refOverride ?? defaultRef
         let gh = entry.github
 
@@ -64,6 +64,8 @@ struct LibraryDetailView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal)
             .padding(.bottom, 8)
+
+            if let gh = gh { LangLeadCard(gh: gh, ref: ref).padding(.horizontal).padding(.bottom, 8) }
 
             Picker("Section", selection: $tab) {
                 ForEach(DetailTab.allCases) { Text($0.rawValue).tag($0) }
@@ -338,7 +340,7 @@ private struct SourceTab: View {
             List {
                 Section {
                     HStack {
-                        Text("\(gh?.repo ?? "")/\(dir)")
+                        Text("\((gh?.dir ?? "").isEmpty ? (gh?.repo ?? "") : "\(gh?.repo ?? "")/\(gh?.dir ?? "")")/\(dir)")
                             .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(.secondary)
                         Spacer()
@@ -410,7 +412,7 @@ private struct FileViewer: View {
                 if text.contains("\u{0}") {
                     Text("Binary file - not shown.").foregroundStyle(.secondary).padding(); Spacer()
                 } else {
-                    let lines = Array(text.components(separatedBy: "\n").prefix(5000))
+                    let lines = Highlighter.lines(text, ext: extOf(path), fileName: path.split(separator: "/").last.map(String.init) ?? path)
                     ScrollView([.vertical, .horizontal]) {
                         LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(Array(lines.enumerated()), id: \.offset) { i, line in
@@ -419,7 +421,7 @@ private struct FileViewer: View {
                                         .font(.system(size: 11, design: .monospaced))
                                         .foregroundStyle(.tertiary)
                                         .frame(width: 38, alignment: .trailing)
-                                    Text(line.isEmpty ? " " : line)
+                                    Text(line.characters.isEmpty ? AttributedString(" ") : line)
                                         .font(.system(size: 12, design: .monospaced))
                                         .fixedSize(horizontal: true, vertical: false)
                                 }
@@ -435,6 +437,78 @@ private struct FileViewer: View {
         .task(id: path) {
             state = .loading
             if let s = await runLoad({ try await repo.loadFile(gh, ref: ref, path: path) }) { state = s }
+        }
+    }
+}
+
+// MARK: - "<lang> leads this repo"
+
+private struct LangBrand {
+    let label: String
+    let url: String
+    let asset: String
+    let top: Color
+    let bottom: Color
+    let border: Color
+}
+
+private let langExt: [String: String] = ["h#": "H#", "h#i": "H#", "hcs": "HackerScript", "hl": "Hacker Lang"]
+
+private let langBrands: [String: LangBrand] = [
+    "H#": LangBrand(label: "H#", url: "https://raw.githubusercontent.com/HackerOS-Linux-System/H-Sharp/main/images/icon.png", asset: "LangHSharp",
+                    top: Color(red: 0x2A / 255, green: 0x0D / 255, blue: 0x12 / 255), bottom: Color(red: 0x0B / 255, green: 0x0B / 255, blue: 0x0D / 255),
+                    border: Color(red: 0x5C / 255, green: 0x07 / 255, blue: 0x10 / 255)),
+    "HackerScript": LangBrand(label: "HackerScript", url: "https://raw.githubusercontent.com/HackerOS-Linux-System/HackerScript/main/images/icon.png", asset: "LangHackerScript",
+                              top: Color(red: 0x3A / 255, green: 0x3A / 255, blue: 0x42 / 255), bottom: Color(red: 0x1C / 255, green: 0x1C / 255, blue: 0x21 / 255),
+                              border: Color(red: 0x55 / 255, green: 0x55 / 255, blue: 0x5F / 255)),
+    "Hacker Lang": LangBrand(label: "Hacker Lang", url: "https://raw.githubusercontent.com/HackerOS-Linux-System/Hacker-Lang/main/images/icon.png", asset: "LangHackerLang",
+                             top: Color(red: 0x1F / 255, green: 0x15 / 255, blue: 0x36 / 255), bottom: Color(red: 0x0B / 255, green: 0x0B / 255, blue: 0x0D / 255),
+                             border: Color(red: 0x3D / 255, green: 0x2A / 255, blue: 0x6B / 255)),
+]
+
+/// The project's own icon plus "H# leads this repo" when one of the three HackerOS languages has the most code.
+private struct LangLeadCard: View {
+    let gh: GithubRepo
+    let ref: String
+
+    @EnvironmentObject private var repo: BitRepository
+    @State private var top: (name: String, pct: Double)?
+
+    var body: some View {
+        Group {
+            if let top = top, let brand = langBrands[top.name] {
+                HStack(spacing: 10) {
+                    AsyncImage(url: URL(string: brand.url)) { phase in
+                        if let img = phase.image {
+                            img.resizable().scaledToFit()
+                        } else {
+                            Image(brand.asset).resizable().scaledToFit()
+                        }
+                    }
+                    .frame(width: 36, height: 36)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("\(brand.label) leads this repo").font(.footnote.weight(.bold)).foregroundColor(.white)
+                        Text(String(format: "%.1f%% of tracked bytes", top.pct)).font(.caption2).foregroundColor(Color(white: 0.66))
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(LinearGradient(colors: [brand.top, brand.bottom], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(brand.border, lineWidth: 1))
+            }
+        }
+        .task(id: ref) {
+            top = nil
+            guard case let .ok(tree, _)? = await runLoad({ try await repo.loadTree(gh, ref: ref) }) else { return }
+            var totals: [String: Int] = [:]
+            for item in tree.items where !item.isDir {
+                if let lang = langExt[extOf(item.path)] { totals[lang, default: 0] += item.size }
+            }
+            let sum = Double(totals.values.reduce(0, +))
+            guard sum > 0, let best = totals.max(by: { $0.value < $1.value }) else { return }
+            top = (best.key, Double(best.value) / sum * 100)
         }
     }
 }
