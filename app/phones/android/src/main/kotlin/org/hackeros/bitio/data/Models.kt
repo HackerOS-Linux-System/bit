@@ -51,14 +51,39 @@ data class LibEntry(
 
 data class Index(val updatedAt: String, val libraries: List<LibEntry>)
 
-data class GithubRepo(val owner: String, val repo: String)
+/**
+ * A GitHub repository, or a folder of one (libhammer, blue-api: `https://github.com/o/r/tree/main/libhammer`).
+ * [ref] is the branch/tag from a `/tree/` URL ("" = none), [dir] the folder ("" = repository root).
+ */
+data class GithubRepo(val owner: String, val repo: String, val ref: String = "", val dir: String = "") {
+    /** owner/repo[/dir] - cache keys and display. */
+    val slug: String get() = if (dir.isEmpty()) "$owner/$repo" else "$owner/$repo/$dir"
 
-private val GITHUB_URL = Regex("^https://github\\.com/([^/\\s]+)/([^/\\s#?]+?)(?:\\.git)?/?$")
+    /** A path inside the library -> the path inside the repository. */
+    fun path(p: String): String = if (dir.isEmpty()) p else if (p.isEmpty()) dir else "$dir/$p"
+}
 
-/** `https://github.com/owner/repo(.git)` -> owner/repo */
+private val GITHUB_URL = Regex(
+    "^https://github\\.com/([^/\\s]+)/([^/\\s#?]+?)(?:\\.git)?(?:/tree/([^/\\s#?]+)(?:/([^\\s#?]*?))?)?/?(?:[#?].*)?$",
+)
+
+private fun decodeSegment(s: String): String =
+    try {
+        java.net.URLDecoder.decode(s.replace("+", "%2B"), "UTF-8")
+    } catch (e: IllegalArgumentException) {
+        s
+    }
+
+/**
+ * `https://github.com/owner/repo(.git)` -> owner/repo
+ * `https://github.com/owner/repo/tree/main/libs/x` -> owner/repo, ref "main", dir "libs/x"
+ */
 fun parseGithub(url: String): GithubRepo? {
     val m = GITHUB_URL.matchEntire(url.trim()) ?: return null
-    return GithubRepo(m.groupValues[1], m.groupValues[2])
+    val ref = m.groups[3]?.value?.let(::decodeSegment).orEmpty()
+    val parts = m.groups[4]?.value.orEmpty().split('/').filter { it.isNotEmpty() }.map(::decodeSegment)
+    val dir = if (parts.any { it == ".." || it == "." }) "" else parts.joinToString("/")
+    return GithubRepo(m.groupValues[1], m.groupValues[2], ref, dir)
 }
 
 /** Only http(s) links are ever opened. */
