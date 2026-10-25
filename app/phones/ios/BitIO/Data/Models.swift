@@ -37,9 +37,19 @@ enum Lang: String, CaseIterable, Identifiable {
     }
 }
 
+/// A GitHub repository, or a folder of one (libhammer, blue-api: `https://github.com/o/r/tree/main/libhammer`).
+/// `ref` is the branch/tag from a `/tree/` URL ("" = none), `dir` the folder ("" = repository root).
 struct GithubRepo: Hashable {
     let owner: String
     let repo: String
+    var ref: String = ""
+    var dir: String = ""
+
+    /// owner/repo[/dir] - cache keys and display.
+    var slug: String { dir.isEmpty ? "\(owner)/\(repo)" : "\(owner)/\(repo)/\(dir)" }
+
+    /// A path inside the library -> the path inside the repository.
+    func path(_ p: String) -> String { dir.isEmpty ? p : (p.isEmpty ? dir : "\(dir)/\(p)") }
 }
 
 struct LibEntry: Identifiable, Hashable {
@@ -64,10 +74,20 @@ struct LibIndex {
 }
 
 /// `https://github.com/owner/repo(.git)` -> owner/repo
+/// `https://github.com/owner/repo/tree/main/libs/x` -> owner/repo, ref "main", dir "libs/x"
 func parseGithub(_ url: String) -> GithubRepo? {
-    let pattern = #"^https://github\.com/([^/\s]+)/([^/\s#?]+?)(?:\.git)?/?$"#
-    guard let m = Rx(pattern).match(url.trimmingCharacters(in: .whitespaces)), m.count >= 3 else { return nil }
-    return GithubRepo(owner: m[1], repo: m[2])
+    let pattern = #"^https://github\.com/([^/\s]+)/([^/\s#?]+?)(?:\.git)?(?:/tree/([^/\s#?]+)(?:/([^\s#?]*?))?)?/?(?:[#?].*)?$"#
+    let trimmed = url.trimmingCharacters(in: .whitespaces)
+    guard let re = try? NSRegularExpression(pattern: pattern),
+          let m = re.firstMatch(in: trimmed, range: NSRange(location: 0, length: (trimmed as NSString).length)) else { return nil }
+    func group(_ i: Int) -> String {
+        let r = m.range(at: i)
+        return r.location == NSNotFound ? "" : (trimmed as NSString).substring(with: r)
+    }
+    func decode(_ s: String) -> String { s.removingPercentEncoding ?? s }
+    let parts = group(4).split(separator: "/").map { decode(String($0)) }
+    let dir = parts.contains("..") || parts.contains(".") ? "" : parts.joined(separator: "/")
+    return GithubRepo(owner: group(1), repo: group(2), ref: decode(group(3)), dir: dir)
 }
 
 /// Only http(s) links are ever opened.
