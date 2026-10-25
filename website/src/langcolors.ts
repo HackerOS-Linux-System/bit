@@ -3,7 +3,7 @@ export const LANGUAGE_COLORS: Record<string, string> = {
   "H#": "#9c1120",
   "H# Interface": "#c23b4e",
   hk: "#ffffff",
-  HackerScript: "#8a8a94",
+  HackerScript: "#4b4b55", // dark grey
   "Hacker Lang": "#8250df",
   // common languages (GitHub's colours)
   JavaScript: "#f1e05a",
@@ -103,9 +103,45 @@ export function isCustomLanguage(name: string): boolean {
   return CUSTOM.has(name);
 }
 
-/** Near-white swatches need an outline against a light background. */
+/** Near-white swatches (hk) and the dark grey of HackerScript need an outline to stay visible on either theme. */
 export function needsOutline(name: string): boolean {
-  return name === "hk";
+  return name === "hk" || name === "HackerScript";
+}
+
+export interface LangBrand {
+  id: "hsharp" | "hackerlang" | "hackerscript";
+  /** name shown in "<name> leads this repo" */
+  label: string;
+  /** the real project icon (raw.githubusercontent.com) */
+  icon: string;
+  /** copy shipped with the site, used when the icon can't be loaded (offline, blocked) */
+  fallback: string;
+}
+
+const BRANDS: Record<string, LangBrand> = {
+  "H#": {
+    id: "hsharp",
+    label: "H#",
+    icon: "https://raw.githubusercontent.com/HackerOS-Linux-System/H-Sharp/main/images/icon.png",
+    fallback: "images/lang/hsharp.png",
+  },
+  HackerScript: {
+    id: "hackerscript",
+    label: "HackerScript",
+    icon: "https://raw.githubusercontent.com/HackerOS-Linux-System/HackerScript/main/images/icon.png",
+    fallback: "images/lang/hackerscript.png",
+  },
+  "Hacker Lang": {
+    id: "hackerlang",
+    label: "Hacker Lang",
+    icon: "https://raw.githubusercontent.com/HackerOS-Linux-System/Hacker-Lang/main/images/icon.png",
+    fallback: "images/lang/hackerlang.png",
+  },
+};
+
+/** Icon + name of the three HackerOS languages (by the name `breakdownFromTree` reports); null for anything else. */
+export function brandFor(name: string): LangBrand | null {
+  return BRANDS[name] ?? null;
 }
 
 /** "src/main.h#" → "h#", "Bit.hk" → "hk", "Makefile" → "" (handles multi-char extensions like h#i). */
