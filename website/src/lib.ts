@@ -24,7 +24,7 @@ function validRef(v: string | null): string | null {
 
 /** Version picker: shows the version being viewed; the release list is only fetched when it is opened. */
 function versionPicker(entry: LibEntry, repo: Repo, refParam: string | null): HTMLElement {
-  const current = refParam ?? (entry.rev || "");
+  const current = refParam ?? (entry.rev || repo.ref.replace(/^HEAD$/, ""));
   const select = h("select", { class: "ver-select", "aria-label": "Version" }, h("option", { value: current }, current || "default branch"));
   let loaded = false;
   const populate = async (): Promise<void> => {
@@ -100,7 +100,9 @@ async function main(): Promise<void> {
 
   const gh = parseGithub(entry.target);
   const refParam = validRef(params.get("ref"));
-  const repo: Repo | null = gh ? { owner: gh.owner, repo: gh.repo, ref: refParam ?? (entry.rev || "HEAD") } : null;
+  const repo: Repo | null = gh
+    ? { owner: gh.owner, repo: gh.repo, ref: refParam ?? (entry.rev || gh.ref || "HEAD"), ...(gh.dir ? { dir: gh.dir } : {}) }
+    : null;
 
   clear(root);
   root.append(
