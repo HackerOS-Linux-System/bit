@@ -29,13 +29,11 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.hackeros.bitio.R
 import org.hackeros.bitio.data.BitRepository
 import org.hackeros.bitio.data.GithubRepo
 import org.hackeros.bitio.data.TreeItem
@@ -183,19 +181,19 @@ private fun colorOf(name: String): Color = Color(LANGUAGE_COLORS[name] ?: 0xFF8F
 /** Swatches that vanish on a white or dark card (hk is white, HackerScript is dark grey) get an outline. */
 private fun needsOutline(name: String) = name == "hk" || name == "HackerScript"
 
-private class LangBrand(val label: String, val url: String, val icon: Int, val top: Color, val bottom: Color, val border: Color)
+private class LangBrand(val label: String, val url: String, val top: Color, val bottom: Color, val border: Color)
 
 private val BRANDS = mapOf(
-    "H#" to LangBrand("H#", "https://raw.githubusercontent.com/HackerOS-Linux-System/H-Sharp/main/images/icon.png", R.drawable.lang_hsharp, Color(0xFF2A0D12), Color(0xFF0B0B0D), Color(0xFF5C0710)),
-    "HackerScript" to LangBrand("HackerScript", "https://raw.githubusercontent.com/HackerOS-Linux-System/HackerScript/main/images/icon.png", R.drawable.lang_hackerscript, Color(0xFF3A3A42), Color(0xFF1C1C21), Color(0xFF55555F)),
-    "Hacker Lang" to LangBrand("Hacker Lang", "https://raw.githubusercontent.com/HackerOS-Linux-System/Hacker-Lang/main/images/icon.png", R.drawable.lang_hackerlang, Color(0xFF1F1536), Color(0xFF0B0B0D), Color(0xFF3D2A6B)),
+    "H#" to LangBrand("H#", "https://raw.githubusercontent.com/HackerOS-Linux-System/H-Sharp/main/images/icon.png", Color(0xFF2A0D12), Color(0xFF0B0B0D), Color(0xFF5C0710)),
+    "HackerScript" to LangBrand("HackerScript", "https://raw.githubusercontent.com/HackerOS-Linux-System/HackerScript/main/images/icon.png", Color(0xFF3A3A42), Color(0xFF1C1C21), Color(0xFF55555F)),
+    "Hacker Lang" to LangBrand("Hacker Lang", "https://raw.githubusercontent.com/HackerOS-Linux-System/Hacker-Lang/main/images/icon.png", Color(0xFF1F1536), Color(0xFF0B0B0D), Color(0xFF3D2A6B)),
 )
 
 private val iconCache = java.util.concurrent.ConcurrentHashMap<String, ImageBitmap>()
 
-/** Downloads [url] (the project's real icon on GitHub); the bundled copy [fallback] is shown while loading and when offline. */
+/** Downloads [url] (the project's real icon on GitHub). Nothing is bundled: an empty placeholder is shown while loading and when offline. */
 @Composable
-private fun RemoteIcon(url: String, fallback: Int, modifier: Modifier = Modifier) {
+private fun RemoteIcon(url: String, modifier: Modifier = Modifier) {
     val bitmap by produceState<ImageBitmap?>(iconCache[url], url) {
         if (value != null) return@produceState
         value = withContext(Dispatchers.IO) {
@@ -218,7 +216,7 @@ private fun RemoteIcon(url: String, fallback: Int, modifier: Modifier = Modifier
     }
     val bmp = bitmap
     if (bmp != null) Image(bmp, contentDescription = null, modifier = modifier)
-    else Image(painterResource(fallback), contentDescription = null, modifier = modifier)
+    else Box(modifier.background(Color(0x22FFFFFF)))
 }
 
 /** "H# leads this repo" with the project's own icon, for the three HackerOS languages. */
@@ -234,7 +232,7 @@ private fun LeadBadge(brand: LangBrand, pct: Double) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        RemoteIcon(brand.url, brand.icon, Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)))
+        RemoteIcon(brand.url, Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)))
         Column {
             Text("${brand.label} leads this repo", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
             Text("${"%.1f".format(pct)}% of tracked bytes", color = Color(0xFFA8A8B3), fontSize = 11.sp)
