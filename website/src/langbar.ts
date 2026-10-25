@@ -1,5 +1,5 @@
 import { h } from "./dom.js";
-import { breakdownFromTree, colorForLanguage, needsOutline, type LangShare } from "./langcolors.js";
+import { breakdownFromTree, brandFor, colorForLanguage, needsOutline, type LangShare } from "./langcolors.js";
 import { loadTree, type Repo } from "./repodata.js";
 import { GithubError } from "./github.js";
 import { formatAge } from "./store.js";
@@ -89,13 +89,20 @@ function render(body: HTMLElement, shares: LangShare[], staleAge: number | null)
   }
 
   const nodes: Array<HTMLElement | null> = [];
-  if (top && top.name === "H#") {
+  const brand = top ? brandFor(top.name) : null;
+  if (top && brand) {
+    const icon = h("img", { class: "lang-badge-icon", src: brand.icon, alt: "", width: "36", height: "36", decoding: "async", referrerpolicy: "no-referrer" });
+    icon.addEventListener("error", () => {
+      if (icon.dataset["fallback"]) return;
+      icon.dataset["fallback"] = "1";
+      icon.src = brand.fallback;
+    });
     nodes.push(
       h(
         "div",
-        { class: "hsharp-badge" },
-        h("div", { class: "hsharp-hex" }, h("span", { class: "hsharp-hex-label" }, "H#")),
-        h("div", { class: "hsharp-badge-text" }, h("div", { class: "top" }, "H# leads this library"), h("div", { class: "sub" }, `${top.pct.toFixed(1)}% of tracked bytes`)),
+        { class: `lang-badge is-${brand.id}` },
+        icon,
+        h("div", { class: "lang-badge-text" }, h("div", { class: "top" }, `${brand.label} leads this repo`), h("div", { class: "sub" }, `${top.pct.toFixed(1)}% of tracked bytes`)),
       ),
     );
   }
