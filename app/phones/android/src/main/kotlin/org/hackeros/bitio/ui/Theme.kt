@@ -28,7 +28,7 @@ object BitColors {
     fun lang(lang: Lang, dark: Boolean): Color = when (lang) {
         Lang.HSHARP -> if (dark) Color(0xFFFF5468) else Color(0xFFA5001A)
         Lang.HACKERLANG -> if (dark) Color(0xFFA78BFA) else Color(0xFF6C1FD6)
-        Lang.HACKERSCRIPT -> if (dark) Color(0xFF38D3EA) else Color(0xFF0A8FA6)
+        Lang.HACKERSCRIPT -> if (dark) Color(0xFF8E8E9C) else Color(0xFF4B4B55) // dark grey
         Lang.ANY -> if (dark) Color(0xFF8B8B9C) else Color(0xFF6E6E85)
     }
 }
