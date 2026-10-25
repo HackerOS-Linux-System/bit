@@ -8,6 +8,26 @@ export interface Repo {
   owner: string;
   repo: string;
   ref: string;
+  /** Library lives in this folder of the repository (no leading/trailing slash); every path below is relative to it. */
+  dir?: string;
+}
+
+const encPath = (p: string): string => p.split("/").map(encodeURIComponent).join("/");
+
+/** A path inside the library → the path inside the repository. */
+export function repoPath(r: Pick<Repo, "dir">, path: string): string {
+  return r.dir ? (path ? `${r.dir}/${path}` : r.dir) : path;
+}
+
+/** raw.githubusercontent.com URL of a file of the library. */
+export function rawUrl(r: Repo, path: string): string {
+  return `https://raw.githubusercontent.com/${r.owner}/${r.repo}/${encPath(r.ref)}/${encPath(repoPath(r, path))}`;
+}
+
+/** github.com URL of a file ("blob") or folder ("tree") of the library; "" = the library root. */
+export function githubUrl(r: Repo, kind: "blob" | "tree", path = ""): string {
+  const full = repoPath(r, path);
+  return `https://github.com/${r.owner}/${r.repo}/${kind}/${encPath(r.ref)}${full ? `/${encPath(full)}` : ""}`;
 }
 
 export class NetworkError extends Error {}
@@ -62,8 +82,7 @@ async function firstHit(r: Repo, candidates: string[]): Promise<{ file: string; 
 }
 
 export async function fetchRaw(r: Repo, path: string): Promise<string | null> {
-  const ref = r.ref.split("/").map(encodeURIComponent).join("/");
-  const url = `https://raw.githubusercontent.com/${r.owner}/${r.repo}/${ref}/${path.split("/").map(encodeURIComponent).join("/")}`;
+  const url = rawUrl(r, path);
   let res: Response;
   try {
     res = await fetch(url);
@@ -75,7 +94,7 @@ export async function fetchRaw(r: Repo, path: string): Promise<string | null> {
   return res.text();
 }
 
-const key = (kind: string, r: Repo, extra = ""): string => `${kind}:${r.owner}/${r.repo}@${r.ref}${extra}`;
+const key = (kind: string, r: Repo, extra = ""): string => `${kind}:${r.owner}/${r.repo}${r.dir ? `/${r.dir}` : ""}@${r.ref}${extra}`;
 
 /* ------------------------------------------------------------------ manifest */
 
@@ -143,8 +162,15 @@ export function loadTree(r: Repo): Promise<Loaded<RepoTree>> {
     if (!res.ok) throw new GithubError(`GitHub API → HTTP ${res.status}`, res.status);
     const data = (await res.json()) as { tree?: Array<{ path: string; type: string; size?: number; mode?: string }>; truncated?: boolean };
     if (!Array.isArray(data.tree)) return null;
-    const files = data.tree.filter((e) => e.type === "blob").slice(0, MAX_FILES).map((e) => ({ path: e.path, size: e.size ?? 0, mode: e.mode }));
-    return { truncated: !!data.truncated || data.tree.length > MAX_FILES, files };
+    let blobs = data.tree.filter((e) => e.type === "blob");
+    if (r.dir) {
+      // a library in a sub-folder: only its files, with paths relative to the folder
+      const prefix = `${r.dir}/`;
+      blobs = blobs.filter((e) => e.path.startsWith(prefix)).map((e) => ({ ...e, path: e.path.slice(prefix.length) }));
+      if (blobs.length === 0 && !data.truncated) return null;
+    }
+    const files = blobs.slice(0, MAX_FILES).map((e) => ({ path: e.path, size: e.size ?? 0, mode: e.mode }));
+    return { truncated: !!data.truncated || blobs.length > MAX_FILES, files };
   }, "tree").finally(() => inflight.delete(k));
   inflight.set(k, p);
   return p;
@@ -351,16 +377,18 @@ export interface DirListing {
 export async function loadDir(r: Repo, dir: string): Promise<DirListing | null> {
   const k = key("dir", r, `:${dir}`);
   const res = await loadCached<DirListing>(k, TTL.TREE, async () => {
-    const path = dir ? `/${dir.split("/").map(encodeURIComponent).join("/")}` : "";
+    const full = repoPath(r, dir);
+    const path = full ? `/${encPath(full)}` : "";
     const resp = await githubApi(`/repos/${r.owner}/${r.repo}/contents${path}?ref=${encodeURIComponent(r.ref)}`);
     throwForStatus(resp);
     if (resp.status === 404) return null;
     if (!resp.ok) throw new GithubError(`GitHub API → HTTP ${resp.status}`, resp.status);
     const list = (await resp.json()) as Array<{ path: string; type: string; size?: number }>;
     if (!Array.isArray(list)) return { files: [], dirs: [] };
+    const strip = (p: string): string => (r.dir && p.startsWith(`${r.dir}/`) ? p.slice(r.dir.length + 1) : p);
     return {
-      files: list.filter((e) => e.type === "file").map((e) => ({ path: e.path, size: e.size ?? 0 })),
-      dirs: list.filter((e) => e.type === "dir").map((e) => e.path),
+      files: list.filter((e) => e.type === "file").map((e) => ({ path: strip(e.path), size: e.size ?? 0 })),
+      dirs: list.filter((e) => e.type === "dir").map((e) => strip(e.path)),
     };
   }, "source");
   return res.value;
@@ -386,8 +414,7 @@ export async function readFileLight(r: Repo, path: string): Promise<string | nul
 
 /** Raw bytes of a file (checksum verification). null = 404. */
 export async function fetchRawBytes(r: Repo, path: string): Promise<ArrayBuffer | null> {
-  const ref = r.ref.split("/").map(encodeURIComponent).join("/");
-  const url = `https://raw.githubusercontent.com/${r.owner}/${r.repo}/${ref}/${path.split("/").map(encodeURIComponent).join("/")}`;
+  const url = rawUrl(r, path);
   let res: Response;
   try {
     res = await fetch(url);
