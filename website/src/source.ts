@@ -487,7 +487,7 @@ export function mountSource(panel: HTMLElement, repo: Repo): SourceBrowser {
       if (files.length === 0) return;
       let { path, lines } = parseSourceSpec(spec ?? "");
       if (!path) {
-        const prefer = ["Bit.hk", "bit.hk", "Bytes.hk", "README.md", "Readme.md", "readme.md"];
+        const prefer = ["Bit.hk", "bit.hk", "README.md", "Readme.md", "readme.md"];
         path = prefer.find((p) => files.some((f) => f.path === p)) ?? files[0]?.path ?? "";
         lines = null;
       }
