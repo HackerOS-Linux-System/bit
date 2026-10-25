@@ -217,7 +217,7 @@ final class BitRepository: ObservableObject {
 
     /// raw.githubusercontent.com has no API quota and never sees the token. nil = 404.
     private func fetchRaw(_ r: GithubRepo, _ ref: String, _ path: String) async throws -> String? {
-        let url = "https://raw.githubusercontent.com/\(r.owner)/\(r.repo)/\(encPath(ref))/\(encPath(path))"
+        let url = "https://raw.githubusercontent.com/\(r.owner)/\(r.repo)/\(encPath(ref))/\(encPath(r.path(path)))"
         let res = try await HTTP.get(url)
         if res.status == 404 { return nil }
         if !res.ok { throw SimpleError(message: "HTTP \(res.status)") }
@@ -272,7 +272,7 @@ final class BitRepository: ObservableObject {
 
     func loadManifest(_ r: GithubRepo, ref: String) async throws -> Loaded<Manifest> {
         try await cached(
-            key: "manifest:\(r.owner)/\(r.repo)@\(ref)", ttl: 6 * Self.hour,
+            key: "manifest:\(r.slug)@\(ref)", ttl: 6 * Self.hour,
             fetch: {
                 for f in Self.manifests {
                     if let t = try await self.fetchRaw(r, ref, f) { return "\(f)\n\(t.prefix(100_000))" }
@@ -288,7 +288,7 @@ final class BitRepository: ObservableObject {
 
     func loadReadme(_ r: GithubRepo, ref: String) async throws -> Loaded<Readme> {
         try await cached(
-            key: "readme:\(r.owner)/\(r.repo)@\(ref)", ttl: 6 * Self.hour,
+            key: "readme:\(r.slug)@\(ref)", ttl: 6 * Self.hour,
             fetch: {
                 for f in Self.readmeFiles {
                     if let t = try await self.fetchRaw(r, ref, f) { return "\(f)\n\(t.prefix(200_000))" }
@@ -385,13 +385,18 @@ final class BitRepository: ObservableObject {
 
     func loadTree(_ r: GithubRepo, ref: String) async throws -> Loaded<RepoTree> {
         try await cached(
-            key: "tree:\(r.owner)/\(r.repo)@\(ref)", ttl: 6 * Self.hour,
+            key: "tree:\(r.slug)@\(ref)", ttl: 6 * Self.hour,
             fetch: { try await self.apiOK("/repos/\(self.enc(r.owner))/\(self.enc(r.repo))/git/trees/\(self.encPath(ref))?recursive=1") },
             parse: { s in
                 guard let o = try JSONSerialization.jsonObject(with: Data(s.utf8)) as? [String: Any] else { throw ParseError.invalid }
                 let items: [TreeItem] = (o["tree"] as? [[String: Any]] ?? []).compactMap { t in
                     let type = t["type"] as? String ?? ""
-                    guard type == "blob" || type == "tree", let path = t["path"] as? String else { return nil }
+                    guard type == "blob" || type == "tree", var path = t["path"] as? String else { return nil }
+                    if !r.dir.isEmpty {
+                        // a library in a sub-folder: only its entries, relative to the folder
+                        guard path.hasPrefix(r.dir + "/") else { return nil }
+                        path = String(path.dropFirst(r.dir.count + 1))
+                    }
                     return TreeItem(path: path, isDir: type == "tree", size: t["size"] as? Int ?? 0)
                 }
                 return RepoTree(items: items, truncated: o["truncated"] as? Bool ?? false)
@@ -401,7 +406,7 @@ final class BitRepository: ObservableObject {
 
     func loadFile(_ r: GithubRepo, ref: String, path: String) async throws -> Loaded<String> {
         try await cached(
-            key: "src:\(r.owner)/\(r.repo)@\(ref):\(path)", ttl: 24 * Self.hour,
+            key: "src:\(r.slug)@\(ref):\(path)", ttl: 24 * Self.hour,
             fetch: { try await self.fetchRaw(r, ref, path).map { String($0.prefix(300_000)) } },
             parse: { $0 }
         )
