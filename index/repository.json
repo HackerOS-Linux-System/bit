@@ -339,6 +339,15 @@
         "hlib-api"
       ],
       "author": "HackerOS Team"
+    },
+    {
+      "name": "webview",
+      "target": "https://github.com/bit-io/webview",
+      "description": "Webview bindings for bit.io",
+      "tags": [
+        "webview"
+      ],
+      "author": "Bit Developers"
     }
   ]
 }
