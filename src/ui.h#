@@ -41,3 +41,36 @@ pub fn lang_tag(lang: string) -> string is
     if lang == "hackerscript" is return cyan("HackerScript") end
     return dim(lang)
 end
+
+;; ── step labels: "<tag>  <name>" ──────────────────────────────────────────────
+;; build steps are labelled `H#  bit`, `Hacker Lang  foo.hlib`, `before-build  gen.sh` ... — a known tag, two
+;; spaces, then the name. The spinner / result lines show them as `H# › bit` (tag in colour, name plain), so the
+;; gap between tag and name is one fixed, tidy separator instead of a doubled space.
+
+fn known_tags() -> [string] is
+    return ["H#", "Hacker Lang", "HackerScript", "before-build", "wasm-bindgen", "native", "jar"]
+end
+
+;; ["H#", "bit"] for "H#  bit"; ["", label] when the label carries no known tag.
+pub fn split_tag(label: string) -> [string] is
+    let tags: [string] = known_tags()
+    let mut i: int = 0
+    while i < array_len(tags) is
+        let t: string = tags[i]
+        if string_starts_with(label, t + "  ") is
+            return [t, string_slice(label, string_len(t) + 2, string_len(label))]
+        end
+        i += 1
+    end
+    return ["", label]
+end
+
+;; The tag painted for a step line: bold, one colour per language / kind of step.
+pub fn tag_paint(tag: string) -> string is
+    if tag == ""             is return "" end
+    if tag == "H#"           is return paint("1;31", tag) end
+    if tag == "Hacker Lang"  is return paint("1;35", tag) end
+    if tag == "HackerScript" is return paint("1;36", tag) end
+    if tag == "native"       is return paint("1;33", tag) end
+    return paint("1;34", tag)
+end
