@@ -198,12 +198,7 @@ pub fn run_step(p: project::Project, label: string, cmd: string, verbose: bool) 
     ;; on a TTY the spinner reports the result itself; without one, print it here
     let rc: int = task::run(label, in_root(p, cmd), verbose, false)
     if animated is return rc end
-    let ms: int = time_ms() - t0
-    if rc == 0 is
-        ui::ok(label + "  " + ui::dim("(" + util::elapsed_str(ms) + ")"))
-    else is
-        ui::bad(label + "  " + ui::red("failed") + " " + ui::dim("(" + util::elapsed_str(ms) + ")"))
-    end
+    task::report(rc == 0, time_ms() - t0, label)
     return rc
 end
 
