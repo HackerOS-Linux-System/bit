@@ -58,7 +58,7 @@ pub fn ensure_native(p: project::Project, verbose: bool, is_dep: bool, triple: s
     let cmd: string = native_command(p, triple)
     let full: string = "cd " + util::sq(root) + " && BIT_NATIVE=1 " + cmd
     if verbose is ui::note("$ " + cmd) end
-    let rc: int = task::run("native " + name + "  " + ui::dim(cmd), full, verbose, false)
+    let rc: int = task::run("native  " + name + " " + ui::dim("· " + cmd), full, verbose, false)
     if rc != 0 is
         ui::fail(name + ": native build failed (" + cmd + ")")
         return rc
