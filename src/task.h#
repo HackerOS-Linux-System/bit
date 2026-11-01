@@ -12,6 +12,22 @@ fn scratch(kind: string) -> string is
     return util::tmp_dir() + "/" + kind + "-" + to_string(proc_id()) + "-" + to_string(time_ms())
 end
 
+;; Colour switches for a child whose output goes to a log file (see `run`). Only called when bit's stdout is a TTY
+;; (NO_COLOR / BIT_PLAIN / CI already made is_tty() false). Values the user set explicitly are left alone.
+;;   HSHARP_COLOR=1    h# CLI + the nidus error frames of the parser/codegen
+;;   NIDUS_COLOR       nidus-based tools
+;;   CLICOLOR_FORCE    cargo, colors library and most other tools
+;; Skipped for git's clone progress (`show_git`): that log is parsed for the percentage.
+fn child_color_env(show_git: bool) -> string is
+    if show_git is return "" end
+    let mut e: string = "export "
+    if env_get("HSHARP_COLOR") == "" is e += "HSHARP_COLOR=1 " end
+    if env_get("NIDUS_COLOR") == "" is e += "NIDUS_COLOR=always " end
+    if env_get("CLICOLOR_FORCE") == "" is e += "CLICOLOR_FORCE=1 " end
+    if e == "export " is return "" end
+    return e + "; "
+end
+
 ;; Last `n` lines of a log, for an error message.
 fn tail_of(path: string, n: int) -> string is
     return util::capture("tail -n " + to_string(n) + " " + util::sq(path) + " 2>/dev/null")
@@ -39,7 +55,9 @@ pub fn run(label: string, cmd: string, verbose: bool, show_git: bool) -> int is
     ;; run detached; the exit status lands in rcf when the command is done
     ;; the WHOLE list must go to the background: `( cmd ) > log ; echo $? > rcf &` only backgrounded the
     ;; `echo`, so the command ran in the foreground (output hidden in the log) and the spinner never turned.
-    util::run("{ ( " + cmd + " ) >" + util::sq(log) + " 2>&1 ; echo $? >" + util::sq(rcf) + " ; } >/dev/null 2>&1 &")
+    ;; the child writes into a log file, not a terminal, so H# / nidus / cargo would switch colours off and the
+    ;; error replayed below would be plain. bit's own stdout IS a terminal here (is_tty), so force colours in the child.
+    util::run("{ ( " + child_color_env(show_git) + cmd + " ) >" + util::sq(log) + " 2>&1 ; echo $? >" + util::sq(rcf) + " ; } >/dev/null 2>&1 &")
 
     let mut sp = pb::quick_spinner(label)
     let t0: int = time_ms()
