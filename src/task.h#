@@ -41,14 +41,36 @@ fn git_percent(log: string) -> int is
     return str_to_int(txt)
 end
 
-;; Runs `cmd` (a shell line) while a spinner turns. `show_git` adds git's clone
-;; percentage to the message. Returns 0 on success; on failure the tail of the
+;; One finished step as a line: `✓  [18s]  H# › bit` / `✗  [1m04s]  H# › bit  failed`. The same layout the spinner uses
+;; while the step runs (progress-bar's `Spinner::finish`), for the runs that draw no spinner (no TTY, --verbose).
+pub fn report(ok: bool, ms: int, label: string) is
+    let parts: [string] = ui::split_tag(label)
+    let tag: string = parts[0]
+    let mut name: string = parts[1]
+    if !ok is name += " " + ui::red("failed") end
+    let glyph: string = if ok then ui::green("✓") else ui::red("✗")
+    let field: string = pb::format_elapsed_label(ms)
+    let pad: int = 5 - string_len(field)
+    let mut out: string = "  " + glyph + "  " + ui::dim(field)
+    if pad > 0 is out += string_repeat(" ", pad) end
+    out += "  "
+    if tag != "" is out += ui::tag_paint(tag) + " " + ui::dim("›") + " " end
+    write(out + name)
+end
+
+;; Runs `cmd` (a shell line) while a spinner turns:   ⠹  [16s]  H# › bit
+;; `label` is `<tag>  <name>` (see ui::split_tag) or a plain message. The seconds counter is the progress-bar
+;; spinner's `elapsed` field, read from the clock on every frame, so it keeps counting during a long compile.
+;; `show_git` adds git's clone percentage to the message. Returns 0 on success; on failure the tail of the
 ;; command's output is printed. Nothing is drawn without a TTY.
 pub fn run(label: string, cmd: string, verbose: bool, show_git: bool) -> int is
     if verbose || !is_tty() is
         if !verbose is ui::note(label + " …") end
         return util::run(cmd)
     end
+
+    let parts: [string] = ui::split_tag(label)
+    let name: string = parts[1]
 
     let log: string = scratch("task") + ".log"
     let rcf: string = scratch("task") + ".rc"
@@ -59,23 +81,21 @@ pub fn run(label: string, cmd: string, verbose: bool, show_git: bool) -> int is
     ;; error replayed below would be plain. bit's own stdout IS a terminal here (is_tty), so force colours in the child.
     util::run("{ ( " + child_color_env(show_git) + cmd + " ) >" + util::sq(log) + " 2>&1 ; echo $? >" + util::sq(rcf) + " ; } >/dev/null 2>&1 &")
 
-    let mut sp = pb::quick_spinner(label)
-    let t0: int = time_ms()
+    let mut sp = pb::quick_spinner_timed(ui::tag_paint(parts[0]), name)
     while !file_exists(rcf) is
         if show_git is
             let pct: int = git_percent(log)
-            if pct > 0 is sp = sp.set_message(label + "  " + to_string(pct) + "%") end
+            if pct > 0 is sp = sp.set_message(name + " " + ui::dim(to_string(pct) + "%")) end
         end
         sp = sp.tick()
-        sp.draw()
+        sp.draw()      ;; flushes: without it the frames sat in stdout's line buffer and never showed up
         sleep_ms(90)
     end
     let rc: int = str_to_int(util::capture("cat " + util::sq(rcf)))
-    let took: string = util::elapsed_str(time_ms() - t0)
     if rc == 0 is
-        sp.finish(label + "  " + took)
+        sp.finish(name)
     else is
-        sp.fail(label + "  failed (" + took + ")")
+        sp.fail(name + " " + ui::red("failed"))
         let tail: string = tail_of(log, 30)
         if tail != "" is write(tail) end
     end
