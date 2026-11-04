@@ -144,12 +144,33 @@ fn report_cross_language(p: project::Project, dname: string, e: lock::Locked) is
     let mine: [string] = project::langs(p)
     if lang != "" && array_len(mine) > 0 && !util::array_has(mine, lang) && lock::locked_output(e) != "bit" is
         let file: string = hlibcmd::locate(dname)
+        ;; mirror image: a HackerScript project using an H# library — its .hlib has a native .so, but only C++-mangled
+        ;; symbols; `h# lib build --ffi` adds the C-ABI facade (hksh_<lib>_*) that `get <hlib:…>` binds to typed wrappers
+        if file != "" && lang == "hsharp" && util::array_has(mine, "hackerscript") && !hlibcmd::has_facade(file) is
+            ui::note(dname + " is H# and its .hlib has no C-ABI facade — building it for HackerScript …")
+            let base2: installer::InstallOpts = installer::iopts(false, true, "hlib", "hsharp", "", true, false)
+            if installer::ensure_ffi(dname, base2) == 0 is
+                ui::ok(dname + "  " + ui::dim("C-ABI facade ready — use it from HackerScript with  get <hlib:" + dname + ">"))
+                return
+            end
+            ui::warn(dname + ": could not build the C-ABI facade — HackerScript cannot call this library")
+            return
+        end
         if file != "" && !hlibcmd::has_native(file) is
-            ;; HLIB_FORMAT §5–6: another language's `ast` is never read; only a native .so + exports can cross
-            ui::warn(dname + " is " + project::lang_label(lang) + " and its .hlib holds sources only (no native .so, no exports) — " +
+            ;; HLIB_FORMAT §5–7: another language's `ast` is never read; only a native library + `manifest.exports` can cross.
+            ;; For an H# project bit builds that bridge itself: the library is recompiled with `hackerc hlib build --ffi`.
+            if util::array_has(mine, "hsharp") && lang == "hackerscript" is
+                ui::note(dname + " is HackerScript and its .hlib holds sources only — building its C-ABI facade for H# …")
+                let base: installer::InstallOpts = installer::iopts(false, true, "hlib", "hackerscript", "", true, false)
+                if installer::ensure_ffi(dname, base) == 0 is
+                    ui::ok(dname + "  " + ui::dim("C-ABI facade ready — use it from H# with  use \"hlib -> " + dname + "\" from \"" + dname + "\""))
+                    return
+                end
+            end
+            ui::warn(dname + " is " + project::lang_label(lang) + " and its .hlib holds sources only (no native library, no exports) — " +
                      project::lang_label(mine[0]) + " cannot call into it")
             ui::note("it works from " + project::lang_label(lang) + " (get <hlib:" + dname + ">); from " + project::lang_label(mine[0]) +
-                     " the library needs a C-ABI facade built as a native .so, or the project must be written in " + project::lang_label(lang))
+                     " build the facade:  bit hlib build " + dname + " --ffi   (needs cargo)")
         else if file != "" is
             ui::note(dname + " is " + project::lang_label(lang) + " — it reaches this project as an .hlib:  " + file)
         else is
