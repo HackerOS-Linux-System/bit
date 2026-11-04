@@ -236,6 +236,40 @@ pub fn ensure_compiled(name: string, o: InstallOpts) -> int is
     return 0
 end
 
+;; A HackerScript library reaches an H# program only through a C-ABI facade (`hackerc hlib build --ffi`: a
+;; `static_lib` artifact + `manifest.exports`). Rebuilds the installed library's .hlib with it. 0 = done.
+pub fn ensure_ffi(name: string, o: InstallOpts) -> int is
+    let gl: lock::Lock = lock::lock_read(lock::global_lock_path())
+    let e: lock::Locked = lock::lock_get(gl, name)
+    if lock::locked_name(e) == "" is return 1 end
+    let dest: string = lib_dir(name, lock::locked_id(e))
+    if !dir_exists(dest) is return 1 end
+    let lang: string = lock::locked_lang(e)
+    if lang != "hackerscript" && lang != "hsharp" is return 0 end
+    if !build::have_toolchain(lang) is
+        ui::warn(name + ": the " + project::lang_label(lang) + " toolchain was not found — cannot build the C-ABI facade")
+        ui::note(build::missing_tool_hint(lang))
+        return 1
+    end
+    let p: project::Project = project::load(dest)
+    if project::entry_for(p, lang, "lib") == "" is return 0 end
+    ui::line(ui::dim("compiling") + " " + ui::bold(name) + "  " + ui::dim(project::lang_label(lang) + " → " + name + ".hlib + C-ABI facade (for " + (if lang == "hsharp" then "HackerScript" else "H#") + ")"))
+    let bo: build::BuildOpts = build::opts_with_ffi(build::opts_new(true, o.io_verbose, lang, o.io_platform, "hlib"), true)
+    let rc: int = build::build_project(project::load_with_cache(dest, dest + "/.bit"), bo)
+    if rc != 0 is
+        ui::warn(name + ": building the C-ABI facade failed (needs cargo; the library stays usable from HackerScript)")
+        return 1
+    end
+    let outdir: string = dest + "/.bit/out"
+    util::mkdir_p(outdir)
+    let art: string = name + ".hlib"
+    util::run("cp -f " + util::sq(dest + "/.bit/build/" + build::profile_name(bo) + "/" + art) + " " + util::sq(outdir + "/" + art) + " 2>/dev/null")
+    if !file_exists(outdir + "/" + art) is return 1 end
+    util::run("ln -sfn " + util::sq(".bit/out/" + art) + " " + util::sq(dest + "/" + art))
+    lock_record_output(name, "hlib")
+    return 0
+end
+
 ;; .bit packages: the mode that applies to this install — "off" | "auto" | "only"
 fn effective_bit(o: InstallOpts) -> string is
     let m: string = bitpkg::mode_here()
