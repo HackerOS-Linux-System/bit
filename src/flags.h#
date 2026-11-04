@@ -12,6 +12,7 @@ pub fn bin() -> string is return env_get("BIT_SEL_BIN") end
 pub fn wasm() -> bool is return env_get("BIT_SEL_WASM") == "1" end
 pub fn jar() -> bool is return env_get("BIT_SEL_JAR") == "1" end
 pub fn rlib() -> bool is return env_get("BIT_SEL_RLIB") == "1" end
+pub fn ffi() -> bool is return env_get("BIT_SEL_FFI") == "1" end
 pub fn no_system_check() -> bool is return env_get("BIT_NO_SYSTEM_CHECK") == "1" end
 
 ;; In a workspace a requested feature only applies to the members that declare it.
