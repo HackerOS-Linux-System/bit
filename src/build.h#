@@ -9,6 +9,7 @@ mod sysdeps
 mod net
 mod semver
 mod hsbundle
+mod flags
 mod lock
 
 pub struct BuildOpts is
@@ -22,6 +23,7 @@ pub struct BuildOpts is
     pub bo_jar:      bool       ;; HackerScript: pack the generated Java classes (`--jar`)
     pub bo_rlib:     bool       ;; HackerScript: build a Rust library (`--library`, .rlib)
     pub bo_bin:      string     ;; build only this binary (`--bin NAME`), "" = all of them
+    pub bo_ffi:      bool       ;; HackerScript hlib: also build the C-ABI facade (`hackerc hlib build --ffi`) so H# can call it
 end
 
 pub fn opts_new(release: bool, verbose: bool, target: string, platform: string, emit: string) -> BuildOpts is
@@ -30,27 +32,43 @@ pub fn opts_new(release: bool, verbose: bool, target: string, platform: string, 
     return BuildOpts {
         bo_release: release, bo_verbose: verbose, bo_lang: lang,
         bo_platform: plat, bo_emit: string_lower(emit), bo_sign: "",
-        bo_wasm: false, bo_jar: false, bo_rlib: false, bo_bin: ""
+        bo_wasm: false, bo_jar: false, bo_rlib: false, bo_bin: "", bo_ffi: false
     }
 end
 
 pub fn opts_with_sign(o: BuildOpts, key: string) -> BuildOpts is
     return BuildOpts { bo_release: o.bo_release, bo_verbose: o.bo_verbose, bo_lang: o.bo_lang,
                        bo_platform: o.bo_platform, bo_emit: o.bo_emit, bo_sign: key,
-                       bo_wasm: o.bo_wasm, bo_jar: o.bo_jar, bo_rlib: o.bo_rlib, bo_bin: o.bo_bin }
+                       bo_wasm: o.bo_wasm, bo_jar: o.bo_jar, bo_rlib: o.bo_rlib, bo_bin: o.bo_bin, bo_ffi: o.bo_ffi }
 end
 
 ;; `--wasm`, `--jar`, `--library` (rlib) and `--bin NAME`
 pub fn opts_with_targets(o: BuildOpts, wasm: bool, jar: bool, rlib: bool, bin: string) -> BuildOpts is
     return BuildOpts { bo_release: o.bo_release, bo_verbose: o.bo_verbose, bo_lang: o.bo_lang,
                        bo_platform: o.bo_platform, bo_emit: o.bo_emit, bo_sign: o.bo_sign,
-                       bo_wasm: wasm, bo_jar: jar, bo_rlib: rlib, bo_bin: bin }
+                       bo_wasm: wasm, bo_jar: jar, bo_rlib: rlib, bo_bin: bin, bo_ffi: o.bo_ffi }
 end
 
 pub fn opts_with_release(o: BuildOpts, release: bool) -> BuildOpts is
     return BuildOpts { bo_release: release, bo_verbose: o.bo_verbose, bo_lang: o.bo_lang,
                        bo_platform: o.bo_platform, bo_emit: o.bo_emit, bo_sign: o.bo_sign,
-                       bo_wasm: o.bo_wasm, bo_jar: o.bo_jar, bo_rlib: o.bo_rlib, bo_bin: o.bo_bin }
+                       bo_wasm: o.bo_wasm, bo_jar: o.bo_jar, bo_rlib: o.bo_rlib, bo_bin: o.bo_bin, bo_ffi: o.bo_ffi }
+end
+
+;; HackerScript libraries: also pack the C-ABI facade (`--ffi`), the only way an H# program can call them
+pub fn opts_with_ffi(o: BuildOpts, ffi: bool) -> BuildOpts is
+    return BuildOpts { bo_release: o.bo_release, bo_verbose: o.bo_verbose, bo_lang: o.bo_lang,
+                       bo_platform: o.bo_platform, bo_emit: o.bo_emit, bo_sign: o.bo_sign,
+                       bo_wasm: o.bo_wasm, bo_jar: o.bo_jar, bo_rlib: o.bo_rlib, bo_bin: o.bo_bin, bo_ffi: ffi }
+end
+
+;; The target triple of the facade must be the one the H# compiler reports as its host (musl on Linux).
+;; BIT_FFI_TARGET overrides it.
+pub fn ffi_target() -> string is
+    let e: string = env_get("BIT_FFI_TARGET")
+    if e != "" is return e end
+    let arch: string = string_trim(util::capture("uname -m"))
+    return (if arch == "" then "x86_64" else arch end) + "-unknown-linux-musl"
 end
 
 pub fn opts_bin(o: BuildOpts) -> string is return o.bo_bin end
@@ -59,7 +77,7 @@ pub fn opts_bin(o: BuildOpts) -> string is return o.bo_bin end
 pub fn opts_with_lang(o: BuildOpts, lang: string) -> BuildOpts is
     return BuildOpts { bo_release: o.bo_release, bo_verbose: o.bo_verbose, bo_lang: lang,
                        bo_platform: o.bo_platform, bo_emit: o.bo_emit, bo_sign: o.bo_sign,
-                       bo_wasm: o.bo_wasm, bo_jar: o.bo_jar, bo_rlib: o.bo_rlib, bo_bin: o.bo_bin }
+                       bo_wasm: o.bo_wasm, bo_jar: o.bo_jar, bo_rlib: o.bo_rlib, bo_bin: o.bo_bin, bo_ffi: o.bo_ffi }
 end
 
 pub fn opts_release(o: BuildOpts) -> bool is return o.bo_release end
@@ -198,7 +216,12 @@ pub fn run_step(p: project::Project, label: string, cmd: string, verbose: bool) 
     ;; on a TTY the spinner reports the result itself; without one, print it here
     let rc: int = task::run(label, in_root(p, cmd), verbose, false)
     if animated is return rc end
-    task::report(rc == 0, time_ms() - t0, label)
+    let ms: int = time_ms() - t0
+    if rc == 0 is
+        ui::ok(label + "  " + ui::dim("(" + util::elapsed_str(ms) + ")"))
+    else is
+        ui::bad(label + "  " + ui::red("failed") + " " + ui::dim("(" + util::elapsed_str(ms) + ")"))
+    end
     return rc
 end
 
@@ -352,8 +375,10 @@ fn build_hsharp_lib(p: project::Project, o: BuildOpts, entry: string, dir: strin
             (if plat != "" then " --target " + plat else "") +
             (if o.bo_release then " --release" else "") +
             edition_flag(p) +
+            (if o.bo_ffi || flags::ffi() then " --ffi" +
+                (if project::get(p, "ffi", "instantiate", "") != "" then " --ffi-inst " + util::sq(project::get(p, "ffi", "instantiate", "")) else "") else "") +
             (if o.bo_sign != "" then " --sign " + util::sq(o.bo_sign) else "")
-        return run_step(p, "H#  " + name + ".hlib", cmd, o.bo_verbose)
+        return run_step(p, "H#  " + name + ".hlib" + (if o.bo_ffi then " (+ C-ABI facade)" else ""), cmd, o.bo_verbose)
     end
     let emit: string = if output == "a" then "lib" else output
     let file: string = if output == "so" then "lib" + name + ".so"
@@ -460,6 +485,37 @@ fn vira_wiring(p: project::Project) -> ViraWiring is
     return ViraWiring { vw_lines: lines, vw_rustc: rustc, vw_errors: errors }
 end
 
+;; `<crate>/.hks-extern-links.txt` (written by hackerc: one `kind<TAB>name<TAB>mode` per `get <extern:…>` / `get <c:…>`)
+;; -> build.rs link statements. An `extern` entry is a path to a native archive (`/…/libfoo.a`, e.g. the C-ABI facade of an H#
+;; library) or a bare library name; `c` / `cpp` entries are system libraries (`stdc++`, `m`, …) that must come after it.
+fn extern_link_lines(crate_dir: string) -> string is
+    let f: string = crate_dir + "/.hks-extern-links.txt"
+    if !file_exists(f) is return "" end
+    let rows: [string] = string_split(file_read(f), "\n")
+    let mut out: string = ""
+    let mut sys: string = ""
+    let mut i: int = 0
+    while i < array_len(rows) is
+        let cols: [string] = string_split(rows[i], "\t")
+        if array_len(cols) >= 2 is
+            let kind: string = cols[0]
+            let nm: string = cols[1]
+            let mode: string = if array_len(cols) >= 3 then cols[2] else "dynamic"
+            if kind == "extern" is
+                let base: string = util::basename(nm)
+                let stem0: string = if string_ends_with(base, ".a") then string_slice(base, 0, string_len(base) - 2) else if string_ends_with(base, ".so") then string_slice(base, 0, string_len(base) - 3) else base
+                let libname: string = if string_starts_with(stem0, "lib") then string_slice(stem0, 3, string_len(stem0)) else stem0
+                if string_contains(nm, "/") is out = out + "    println!(\"cargo:rustc-link-search=native=" + util::dirname(nm) + "\");\n" end
+                out = out + "    println!(\"cargo:rustc-link-lib=" + (if mode == "static" then "static=" else "") + libname + "\");\n"
+            else if kind == "c" || kind == "cpp" is
+                sys = sys + "    println!(\"cargo:rustc-link-lib=" + nm + "\");\n"
+            end
+        end
+        i += 1
+    end
+    return out + sys
+end
+
 fn cc_call(root: string, files: [string], cpp: bool, incs: [string], flags: string, label: string) -> string is
     let mut c: string = "    cc::Build::new()" + (if cpp then ".cpp(true)" else "")
     let mut i: int = 0
@@ -485,7 +541,7 @@ end
 fn wire_crate(p: project::Project, crate_dir: string, vw: ViraWiring) -> int is
     let c: [string] = project::native_c(p)
     let cpp: [string] = project::native_cpp(p)
-    let mut body: string = vw.vw_lines
+    let mut body: string = vw.vw_lines + extern_link_lines(crate_dir)
     let root: string = project::root_of(p)
     if array_len(c) > 0 is
         body = body + cc_call(root, c, false, project::native_include(p), project::native_flags(p), "bit_native_c")
@@ -541,7 +597,8 @@ fn build_hs_cargo(p: project::Project, o: BuildOpts, entry: string, dir: string,
     let profile: string = profile_name(o)
     let wasm: bool = m.hm_kind == "wasm"
 
-    let gen: string = tool_for("hackerscript") + " build " + util::sq(entry) + " -o " + util::sq(crate_dir) +
+    ;; HKS_TARGET_TRIPLE tells hackerc's `get <hlib:…>` importer which native artifact (static_lib triple) to link
+    let gen: string = "HKS_TARGET_TRIPLE=" + util::sq(triple) + " " + tool_for("hackerscript") + " build " + util::sq(entry) + " -o " + util::sq(crate_dir) +
         " --crate-name " + crate + (if library then " --library" else " --bin-name " + name) + flags_of(p) + version_map_flag(p)
     let rc1: int = run_step(p, "HackerScript  transpile " + name, gen, o.bo_verbose)
     if rc1 != 0 is return rc1 end
@@ -553,7 +610,7 @@ fn build_hs_cargo(p: project::Project, o: BuildOpts, entry: string, dir: string,
     if !library && !file_exists(crate_dir + "/Cargo.toml") is
         ui::warn("hackerc did not write " + crate_dir + "/Cargo.toml for --bin-name — retrying without it (use hackerc >= 0.5)")
         util::run("rm -rf " + util::sq(crate_dir + "/src/bin"))
-        let gen2: string = tool_for("hackerscript") + " build " + util::sq(entry) + " -o " + util::sq(crate_dir) +
+        let gen2: string = "HKS_TARGET_TRIPLE=" + util::sq(triple) + " " + tool_for("hackerscript") + " build " + util::sq(entry) + " -o " + util::sq(crate_dir) +
             " --crate-name " + crate + flags_of(p) + version_map_flag(p)
         let rc1b: int = run_step(p, "HackerScript  transpile " + name + " (fallback)", gen2, o.bo_verbose)
         if rc1b != 0 is return rc1b end
@@ -643,8 +700,10 @@ fn build_hs_lib(p: project::Project, o: BuildOpts, entry: string, dir: string, o
         let cmd: string = tool_for("hackerscript") + " hlib build " + util::sq(src) + " -o " + util::sq(dir + "/" + name + ".hlib") +
             " --name " + util::sq(name) +
             " --lib-version " + util::sq(project::version_of(p)) +
-            (if o.bo_sign != "" then " --sign " + util::sq(o.bo_sign) else "")
-        return run_step(p, "HackerScript  " + name + ".hlib", cmd, o.bo_verbose)
+            (if o.bo_sign != "" then " --sign " + util::sq(o.bo_sign) else "") +
+            (if o.bo_ffi || flags::ffi() then " --ffi --ffi-target " + util::sq(ffi_target()) +
+                (if project::get(p, "ffi", "instantiate", "") != "" then " --ffi-inst " + util::sq(project::get(p, "ffi", "instantiate", "")) else "") else "")
+        return run_step(p, "HackerScript  " + name + ".hlib" + (if o.bo_ffi then " (+ C-ABI facade)" else ""), cmd, o.bo_verbose)
     end
     if output == "a" is return build_hs_cargo(p, o, entry, dir, hs_mode("lib", "")) end
     if output == "rlib" is return build_hs_cargo(p, o, entry, dir, hs_mode("rlib", "")) end
