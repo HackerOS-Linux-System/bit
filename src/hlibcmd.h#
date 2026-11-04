@@ -4,6 +4,7 @@ mod index
 mod lock
 mod project
 mod build
+mod flags
 mod installer
 
 ;; hlibcmd.h# — `bit hlib …`: the .hlib archives of the libraries bit installed, for ALL three languages.
@@ -55,6 +56,12 @@ end
 ;; way another language can call into it (HLIB_FORMAT §5–6: the `ast` artifact is never read across languages).
 pub fn has_native(file: string) -> bool is
     let n: string = util::capture("zstd -dc " + util::sq(file) + " 2>/dev/null | tar -t 2>/dev/null | grep -c '^native/'")
+    return string_trim(n) != "" && string_trim(n) != "0"
+end
+
+;; does the archive carry a C-ABI facade (exports with an `api` symbol)? Without one a foreign language cannot call it.
+pub fn has_facade(file: string) -> bool is
+    let n: string = util::capture("zstd -dc " + util::sq(file) + " 2>/dev/null | tar -xO manifest.json 2>/dev/null | grep -c '\"api\"'")
     return string_trim(n) != "" && string_trim(n) != "0"
 end
 
@@ -143,7 +150,8 @@ fn cmd_build(name: string, verbose: bool) -> int is
     let old: string = locate(name)
     if old != "" is util::run("rm -f " + util::sq(old)) end
     let o: installer::InstallOpts = installer::iopts(false, true, "hlib", "", "", true, verbose)
-    let rc: int = installer::ensure_compiled(name, o)
+    ;; `bit hlib build <name> --ffi`: also the C-ABI facade, so an H# program can `use "hlib -> <name>"` it
+    let rc: int = if flags::ffi() then installer::ensure_ffi(name, o) else installer::ensure_compiled(name, o) end
     if rc == 0 is
         let now: string = locate(name)
         if now != "" is
