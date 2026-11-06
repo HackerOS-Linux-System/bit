@@ -405,6 +405,38 @@ the renderer can never take `bit` down: if the nidus child fails, bit falls back
 and as a last resort prints a single line. `BIT_HK_DIAG=inproc` renders in-process instead — handy when debugging
 the renderer itself.
 
+## Target `wasm` (H# → WebAssembly)
+
+```
+bit --target wasm            # bare bit, flags win over [default-build]
+bit build --target wasm      # the same, explicitly (-t wasm, --platform wasm)
+bit run --target wasm        # builds, then runs app.js in node
+```
+
+H# translates to C++, so a wasm build is made by `emcc`. No distro packages Emscripten, so bit keeps an
+emsdk per project and sets it up the first time a wasm build asks for it:
+
+```
+git clone https://github.com/emscripten-core/emsdk.git cache/env/emsdk
+cd cache/env/emsdk && ./emsdk install latest && ./emsdk activate latest
+```
+
+bit then tells H# where it is (`HSHARP_EMSDK`, for the commands bit starts — nothing is written to
+`.bashrc`, `.profile` or any other shell file, `emsdk_env.sh` is never sourced). An Emscripten that is
+already there is used instead of a download: `HSHARP_EMCC`, `HSHARP_EMSDK`, an activated `$EMSDK`,
+`~/.hackeros/env/emsdk`, or `emcc` + `em++` on `PATH`. Offline, bit says so instead of trying to clone.
+
+Output: `cache/build/<profile>/<name>.js` + `<name>.wasm`. Browser bindings (DOM, events, timers,
+storage, fetch, canvas) come from the `wasm` library:
+
+```
+[default-build]
+-> target => wasm
+
+[dependencies]
+-> wasm => newest
+```
+
 ## Biblioteki z innych języków (.hlib)
 
 - `bit` buduje zależność jej własnym kompilatorem (HackerScript / Hacker Lang / H#), niezależnie od języka projektu.
