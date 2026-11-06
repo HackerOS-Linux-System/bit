@@ -156,13 +156,15 @@ end
 
 ;; ── bare `bit` ───────────────────────────────────────────────────────────────
 
-pub fn auto(verbose: bool) -> int is
+pub fn auto(verbose: bool, release: bool, target: string, platform: string) -> int is
     let p: project::Project = project::load_here()
     if !project::is_loaded(p) is return no_project() end
 
+    ;; flags on the command line win over [default-build]:  bit --target wasm   bit --platform linux-aarch64 --release
     let o0: build::BuildOpts = build::opts_default(p)
-    let o: build::BuildOpts = build::opts_new(build::opts_release(o0), verbose, project::get(p, "default-build", "target", ""),
-                                             project::get(p, "default-build", "platform", ""),
+    let o: build::BuildOpts = build::opts_new(release || build::opts_release(o0), verbose,
+                                             if target != "" then target else project::get(p, "default-build", "target", ""),
+                                             if platform != "" then platform else project::get(p, "default-build", "platform", ""),
                                              project::get(p, "default-build", "emit", ""))
 
     let before: string = project::get(p, "default-build", "before", "")
