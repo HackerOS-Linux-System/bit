@@ -175,7 +175,7 @@ fn main() is
     settings::apply()
 
     if cmd == "" is
-        rc = cli::cmd_auto(verbose)
+        rc = cli::cmd_auto(verbose, release, target, platform)
     else is
         let first: string = arg_at(pos, 0)
         match cmd is
