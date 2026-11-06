@@ -164,6 +164,8 @@ pub fn print(version: string) is
     row("      --gen is Hacker Lang only ([package] -> gen in Bit.hk); writes a matching `using <gen N>` into the entry file")
     row("    build [--release] [--target h#|hl|hs] [--platform P] [--emit bin|hlib|so|a|rlib|obj]")
     row("      [--bin NAME] [--wasm] [--jar] [--library]   extra binaries (src/bin/*.h#, cmd/bin/*.hcs), wasm32, jar, rlib")
+    row("    build --target wasm          H# → WebAssembly (app.js + app.wasm) through emcc; bit sets up emsdk in cache/env/emsdk")
+    row("    bit --target wasm            the same from bare `bit` (command-line flags win over [default-build])")
     row("    build <file.hcs|file.h#>     compile one file without a Bit.hk          (virus build <file>)")
     row("      [--features a,b] [--all-features] [--no-default-features] [--no-system-check]")
     row("                                 without flags: uses [default-build] from Bit.hk")
