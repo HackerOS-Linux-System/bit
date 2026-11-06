@@ -991,6 +991,101 @@ fn cross_language_hint(p: project::Project, langs: [string]) is
     end
 end
 
+;; ── target wasm: Emscripten (emsdk) ──────────────────────────────────────────
+;;
+;; H# translates to C++, so a WebAssembly build is made by emcc (Emscripten). No distro packages emsdk, so bit keeps
+;; one per project, in cache/env/emsdk:
+;;     git clone https://github.com/emscripten-core/emsdk.git cache/env/emsdk
+;;     ./emsdk install latest
+;;     ./emsdk activate latest
+;; and tells H# where it is (HSHARP_EMSDK — set for this process and the commands it starts; H# hands it to emcc the
+;; same way). Nothing is written to .bashrc, .profile or any other shell file: `emsdk activate` is run WITHOUT
+;; --permanent and emsdk_env.sh is never sourced. The browser bindings come from the `wasm` library (a normal
+;; dependency: `-> wasm => newest`); H# finds it through HLIB_PATH, which every step already exports.
+
+pub fn is_wasm_platform(plat: string) -> bool is
+    return plat == "wasm" || plat == "wasm32" || plat == "wasm32-emscripten" || plat == "wasm32-unknown-emscripten" || plat == "emscripten"
+end
+
+pub fn emsdk_dir(p: project::Project) -> string is
+    return project::cache_env(p) + "/emsdk"
+end
+
+;; an emsdk where `./emsdk install` has already run
+fn emsdk_ready(dir: string) -> bool is
+    return dir != "" && file_exists(dir + "/upstream/emscripten/emcc")
+end
+
+;; An Emscripten H# can already use besides the project copy ("" = none): HSHARP_EMCC, HSHARP_EMSDK, an activated
+;; $EMSDK, ~/.hackeros/env/emsdk, or emcc + em++ on PATH — the same places H# itself looks in.
+fn external_emscripten() -> string is
+    let direct: string = env_get("HSHARP_EMCC")
+    if direct != "" && file_exists(direct) is return direct end
+    if emsdk_ready(env_get("HSHARP_EMSDK")) is return env_get("HSHARP_EMSDK") end
+    if emsdk_ready(env_get("EMSDK")) is return env_get("EMSDK") end
+    let home: string = env_get("HOME")
+    if home != "" && emsdk_ready(home + "/.hackeros/env/emsdk") is return home + "/.hackeros/env/emsdk" end
+    if util::tool_exists("emcc") && util::tool_exists("em++") is return "emcc" end
+    return ""
+end
+
+;; one emsdk command, in the emsdk directory, retried like a download (the install fetches a few hundred MB)
+fn emsdk_run(p: project::Project, label: string, dir: string, cmd: string, verbose: bool) -> int is
+    let attempts: int = net::retries()
+    let mut tries: int = 0
+    let mut rc: int = 1
+    while tries < attempts && rc != 0 is
+        tries += 1
+        rc = run_step(p, label, "cd " + util::sq(dir) + " && " + cmd, verbose)
+        if rc != 0 && tries < attempts is
+            ui::note(label + " failed, trying again (" + to_string(tries) + "/" + to_string(attempts) + ")")
+        end
+    end
+    return rc
+end
+
+;; 0 when an Emscripten is ready for the H# compiler (installing the project copy when there is none)
+pub fn ensure_emscripten(p: project::Project, verbose: bool) -> int is
+    let dir: string = emsdk_dir(p)
+    if emsdk_ready(dir) is
+        env_set("HSHARP_EMSDK", dir)
+        return 0
+    end
+    if external_emscripten() != "" is return 0 end
+    if net::offline() is
+        ui::fail("target wasm needs Emscripten (emsdk) and bit is offline")
+        ui::note("run once online, or point H# at an install:  HSHARP_EMSDK=/path/to/emsdk")
+        return 1
+    end
+    if !util::tool_exists("git") is
+        ui::fail("target wasm: git is needed to fetch emsdk")
+        return 1
+    end
+    ui::line(ui::dim("target wasm needs Emscripten — setting up emsdk in " + dir))
+    util::mkdir_p(project::cache_env(p))
+    if !file_exists(dir + "/emsdk") is
+        if net::clone("https://github.com/emscripten-core/emsdk.git", "", dir, "emsdk  git clone", verbose) != 0 is
+            ui::fail("could not clone emsdk")
+            return 1
+        end
+    end
+    if emsdk_run(p, "emsdk  install latest", dir, "./emsdk install latest", verbose) != 0 is
+        ui::fail("`./emsdk install latest` failed")
+        return 1
+    end
+    if emsdk_run(p, "emsdk  activate latest", dir, "./emsdk activate latest", verbose) != 0 is
+        ui::fail("`./emsdk activate latest` failed")
+        return 1
+    end
+    if !emsdk_ready(dir) is
+        ui::fail("emsdk was set up but " + dir + "/upstream/emscripten/emcc is missing")
+        return 1
+    end
+    env_set("HSHARP_EMSDK", dir)
+    ui::ok("emsdk ready  " + ui::dim("→ " + dir))
+    return 0
+end
+
 pub fn build_project(p: project::Project, o: BuildOpts) -> int is
     let name: string = project::name_of(p)
     ui::blank()
@@ -1020,6 +1115,7 @@ pub fn build_project(p: project::Project, o: BuildOpts) -> int is
 
     let langs: [string] = target_langs(p, o)
     if util::array_has(langs, "hsharp") && check_toolchain(p) != 0 is return 1 end
+    if util::array_has(langs, "hsharp") && is_wasm_platform(build_platform(p, o)) && ensure_emscripten(p, o.bo_verbose) != 0 is return 1 end
     if util::array_has(langs, "hackerscript") && ensure_using(p) != 0 is return 1 end
     if array_len(langs) == 0 is
         ui::fail("nothing to build: no " + project::src_dir(p) + "/ (H#), " + project::cmd_dir(p) + "/ or " +
@@ -1141,6 +1237,15 @@ pub fn run_project(p: project::Project, o: BuildOpts, args: string, no_build: bo
     end
     let sfx: string = if array_len(langs) > 1 && lang != "hsharp" then "-" + short_lang(lang) else ""
     let exe: string = if o.bo_bin != "" && o.bo_bin != project::name_of(p) && o.bo_bin != "main" then out_dir(p, o) + "/" + o.bo_bin else bin_path(p, o, lang, sfx)
+    if lang == "hsharp" && is_wasm_platform(build_platform(p, o)) is
+        ;; a wasm build is app.js + app.wasm: node runs a program that does not need a browser
+        if !util::tool_exists("node") is
+            ui::fail("running a wasm build needs node (or open the page in a browser)")
+            ui::note("built: " + exe + ".js + " + exe + ".wasm")
+            return 1
+        end
+        return util::run(in_root(p, "node " + util::sq(exe + ".js") + (if args != "" then " " + args else "")))
+    end
     return util::run(in_root(p, util::sq(exe) + (if args != "" then " " + args else "")))
 end
 
