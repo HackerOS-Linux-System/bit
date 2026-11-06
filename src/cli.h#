@@ -110,8 +110,8 @@ end
 ;; ── init ─────────────────────────────────────────────────────────────────────
 
 ;; bare `bit`: everything Bit.hk describes.
-pub fn cmd_auto(verbose: bool) -> int is
-    return driver::auto(verbose)
+pub fn cmd_auto(verbose: bool, release: bool, target: string, platform: string) -> int is
+    return driver::auto(verbose, release, target, platform)
 end
 
 pub fn cmd_init(name: string, lang: string, is_lib: bool, gen: string) -> int is
