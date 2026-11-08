@@ -202,6 +202,7 @@ fn ensure_one(p: project::Project, d: project::Dep, pk: Pick, pl: lock::Lock, us
             return failed()
         end
         link_into_cache(p, dname, dir)
+        if installer::ensure_path_compiled(dname, dir, release, verbose) != 0 is return failed() end
         ui::ok(dname + "  " + ui::dim("path " + dir))
         return fine_no_lock()      ;; path deps are not part of the global install/lock
     end
