@@ -236,6 +236,34 @@ pub fn ensure_compiled(name: string, o: InstallOpts) -> int is
     return 0
 end
 
+;; A `path` dependency (`-> gui => path ../libs/gui`) is used straight from its directory, so nothing ever
+;; compiled it: the compiler then failed with "hlib 'gui' not found" (it looks in <lib>/.bit/out/<name>.hlib,
+;; reached through cache/libs/<name>). Compiles it there when the artifact is missing or older than a source
+;; file. A library of sources only is left alone. 0 = fine (or nothing to compile), 1 = the build failed.
+pub fn ensure_path_compiled(name: string, dir: string, release: bool, verbose: bool) -> int is
+    let h: hk::Hk = lib_manifest(dir)
+    let lang: string = detect_lang(dir, h, "")
+    if lang == "" is return 0 end
+    let p: project::Project = project::load(dir)
+    if project::entry_for(p, lang, "lib") == "" is return 0 end
+    let out_choice: string = string_lower(util::or_default(hk::hk_get(h, "lib", "output", ""), "hlib"))
+    let want: string = dir + "/.bit/out/" + artifact_name(name, out_choice)
+    if file_exists(want) is
+        let newer: string = util::capture("find " + util::sq(dir) + " -type f -newer " + util::sq(want) +
+                                          " -not -path '*/.bit/*' -not -path '*/cache/*' -not -path '*/.git/*' 2>/dev/null | head -n 1")
+        if newer == "" is return 0 end
+    end
+    if !build::have_toolchain(lang) is
+        ui::warn(name + " (" + project::lang_label(lang) + ") has no compiled " + artifact_name(name, out_choice) + " — the toolchain was not found")
+        ui::note(build::missing_tool_hint(lang))
+        return 1
+    end
+    ui::line(ui::dim("compiling") + " " + ui::bold(name) + "  " + ui::dim(project::lang_label(lang) + " → " + artifact_name(name, out_choice) + "  (path dependency)"))
+    let o: InstallOpts = iopts(false, true, out_choice, lang, "", release, verbose)
+    if build_installed(name, dir, lang, out_choice, o) == "" is return 1 end
+    return 0
+end
+
 ;; A HackerScript library reaches an H# program only through a C-ABI facade (`hackerc hlib build --ffi`: a
 ;; `static_lib` artifact + `manifest.exports`). Rebuilds the installed library's .hlib with it. 0 = done.
 pub fn ensure_ffi(name: string, o: InstallOpts) -> int is
