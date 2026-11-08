@@ -18,17 +18,24 @@ mod ui
 ;;   <dir>/x.hcs     <dir>/x/mod.hcs     <lib root>/x.hcs     <lib root>/x/mod.hcs
 ;; An include that matches none of those (a module of the language itself) is left as it is.
 
+;; MEMORY NOTE (why the body is NOT a string any more):
+;;   H# never frees a string (`hsh_string_free` is a no-op) and `a + b` allocates a fresh copy. The first
+;;   version of this file did `body = body + raw + "\n"` once per source line, i.e. it copied the whole,
+;;   growing body for every line: for a library of ~12 000 lines / ~560 KB (`gui`) that is several GB of
+;;   garbage that is never released — the process was killed by the OOM killer ("Killed  bit").
+;;   The body is therefore streamed line by line into a scratch file (`bd_tmp`, via `fs_append`) and glued
+;;   behind the header once at the end: memory use is linear in the size of the library, not quadratic.
 pub struct Bundle is
     pub bd_seen: [string]     ;; absolute / root-relative paths that were already pasted
     pub bd_gets: [string]     ;; hoisted `get <…>` lines, no duplicates
     pub bd_uses: [string]     ;; `using <…>` lines found, no duplicates
-    pub bd_body: string       ;; the flattened source (without the hoisted lines)
+    pub bd_tmp: string        ;; scratch file that receives the flattened source (without the hoisted lines)
     pub bd_left: [string]     ;; include targets that are not files of the library (kept as written)
     pub bd_pasted: int        ;; how many files were pasted in place of an include
 end
 
-fn empty_bundle() -> Bundle is
-    return Bundle { bd_seen: [], bd_gets: [], bd_uses: [], bd_body: "", bd_left: [], bd_pasted: 0 }
+fn empty_bundle(tmp: string) -> Bundle is
+    return Bundle { bd_seen: [], bd_gets: [], bd_uses: [], bd_tmp: tmp, bd_left: [], bd_pasted: 0 }
 end
 
 ;; "style" for `include <style>` — "" for every other line.
@@ -76,7 +83,7 @@ fn paste(file: string, root: string, b: Bundle) -> Bundle is
     let mut seen: [string] = array_push(b.bd_seen, file)
     let mut gets: [string] = b.bd_gets
     let mut uses: [string] = b.bd_uses
-    let mut body: string = b.bd_body
+    let tmp: string = b.bd_tmp
     let mut left: [string] = b.bd_left
     let mut pasted: int = b.bd_pasted
     let mut i: int = 0
@@ -86,15 +93,14 @@ fn paste(file: string, root: string, b: Bundle) -> Bundle is
         if tgt != "" is
             let f: string = find_include(dir, root, tgt)
             if f == "" is
-                body = body + raw + "\n"
+                fs_append(tmp, raw + "\n")
                 if !util::array_has(left, tgt) is left = array_push(left, tgt) end
             else if !util::array_has(seen, f) is
                 let sub: Bundle = paste(f, root, Bundle { bd_seen: seen, bd_gets: gets, bd_uses: uses,
-                                                          bd_body: body, bd_left: left, bd_pasted: pasted + 1 })
+                                                          bd_tmp: tmp, bd_left: left, bd_pasted: pasted + 1 })
                 seen = sub.bd_seen
                 gets = sub.bd_gets
                 uses = sub.bd_uses
-                body = sub.bd_body
                 left = sub.bd_left
                 pasted = sub.bd_pasted
             end
@@ -105,19 +111,21 @@ fn paste(file: string, root: string, b: Bundle) -> Bundle is
             let t: string = string_trim(raw)
             if !util::array_has(uses, t) is uses = array_push(uses, t) end
         else is
-            body = body + raw + "\n"
+            fs_append(tmp, raw + "\n")
         end
         i += 1
     end
-    return Bundle { bd_seen: seen, bd_gets: gets, bd_uses: uses, bd_body: body, bd_left: left, bd_pasted: pasted }
+    return Bundle { bd_seen: seen, bd_gets: gets, bd_uses: uses, bd_tmp: tmp, bd_left: left, bd_pasted: pasted }
 end
 
-;; The flattened text of `entry` (a path), `root` being the library's source directory (`lib/`).
-pub fn flatten(entry: string, root: string) -> Bundle is
-    return paste(entry, root, empty_bundle())
+;; Flattens `entry` (a path), `root` being the library's source directory (`lib/`). The flattened body ends
+;; up in the scratch file `tmp`; the returned Bundle carries everything else (hoisted lines, counters).
+pub fn flatten(entry: string, root: string, tmp: string) -> Bundle is
+    return paste(entry, root, empty_bundle(tmp))
 end
 
-fn render(b: Bundle, entry_label: string) -> string is
+;; Everything that goes in front of the body: the winning `using <…>`, the banner and the hoisted `get <…>`s.
+fn render_header(b: Bundle, entry_label: string) -> string is
     let mut out: string = ""
     if array_len(b.bd_uses) > 0 is out = out + b.bd_uses[0] + "\n" end
     out = out + "!!! bundled by bit from " + entry_label + " (" + to_string(b.bd_pasted) + " include(s) pasted)\n"
@@ -126,7 +134,7 @@ fn render(b: Bundle, entry_label: string) -> string is
         out = out + b.bd_gets[i] + "\n"
         i += 1
     end
-    return out + "\n" + b.bd_body
+    return out + "\n"
 end
 
 ;; Writes the flattened library to `out`. `entry_rel` is relative to `root_dir` (the project root),
@@ -138,9 +146,15 @@ pub fn bundle_to(root_dir: string, entry_rel: string, lib_rel: string, out: stri
         ui::fail("bundle: no such file " + entry)
         return false
     end
-    let b: Bundle = flatten(entry, root_dir + "/" + lib_rel)
     util::mkdir_p(util::dirname(out))
-    file_write(out, render(b, entry_rel))
+    let tmp: string = out + ".body.tmp"
+    util::rm_rf(tmp)
+    file_write(tmp, "")
+    let b: Bundle = flatten(entry, root_dir + "/" + lib_rel, tmp)
+    ;; header first (it needs the hoisted lines, known only now), then the body in ONE read + ONE append
+    file_write(out, render_header(b, entry_rel))
+    fs_append(out, file_read(tmp))
+    util::rm_rf(tmp)
     if array_len(b.bd_uses) > 1 is
         ui::warn("bundle: " + to_string(array_len(b.bd_uses)) + " different `using <…>` lines — kept " + b.bd_uses[0])
     end
