@@ -107,6 +107,22 @@ as `[a, b]`.
 
 Toolchain overrides: `BIT_HSHARP`, `BIT_HL`, `BIT_HACKERC`.
 
+### Compilers are installed only when missing
+
+bit never replaces a compiler that is already installed; it fetches one only when none is found
+(the language chosen in `Bit.hk` decides which):
+
+| Language | Version comes from | Looked for (first hit wins) | Downloaded from, when missing |
+|---|---|---|---|
+| H# | `[edition] -> toolchain => 0.9` | `BIT_HSHARP`, `h#` / `hsharp` on `PATH` | `https://github.com/HackerOS-Linux-System/H-Sharp/releases/download/v<toolchain>/hsharp`, saved as `h#` in `cache/env/hsharp-<toolchain>/h#` |
+| HackerScript | `[package] -> using => 0.4` | `BIT_HACKERC`, `hackerc` on `PATH` | `https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v<using>/hackerc`, saved in `cache/env/hackerc-<using>/hackerc` |
+
+- An installed `hackerc` is used as it is — even when its version differs from `using` (bit only prints a note).
+- An installed `h#` older than `toolchain` is still an error (see `toolchain` above); bit does not overwrite it.
+- Offline (`BIT_OFFLINE=1`) with no compiler installed is an error. Without `toolchain` / `using` there is no
+  version to fetch, so bit just says how to install the compiler.
+- `BIT_HSHARP_RELEASES` / `BIT_HACKERC_RELEASES` replace the release root (mirrors, tests).
+
 ## Where a library comes from — repositories, directories, files
 
 A `target` in `index/repository.json` (also `bit install <spec>` and `git =>` dependencies) is not
