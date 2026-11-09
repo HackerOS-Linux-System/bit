@@ -70,7 +70,7 @@ pub fn tag_paint(tag: string) -> string is
     if tag == ""             is return "" end
     if tag == "H#"           is return paint("1;31", tag) end
     if tag == "Hacker Lang"  is return paint("1;35", tag) end
-    if tag == "HackerScript" is return paint("1;36", tag) end
+    if tag == "HackerScript" is return paint("1;90", tag) end
     if tag == "native"       is return paint("1;33", tag) end
     return paint("1;34", tag)
 end
