@@ -329,6 +329,7 @@ end
 pub fn check_toolchain(p: project::Project) -> int is
     let wanted: int = project::hsharp_toolchain(p)
     if wanted < 0 is return 0 end
+    if ensure_toolchain(p) != 0 is return 1 end
     let tool: string = tool_for("hsharp")
     if tool == "" is
         ui::fail("Bit.hk: [edition] toolchain => " + project::toolchain_raw(p) + " but no H# compiler was found")
@@ -823,12 +824,64 @@ fn build_lang(p: project::Project, o: BuildOpts, lang: string, suffix: string) -
     return 0
 end
 
+;; ── `[edition] -> toolchain => 0.9` : install H# when it is missing ─────────────
+;; An H# compiler that is already installed (BIT_HSHARP, `h#` or `hsharp` on PATH, or the copy bit
+;; fetched earlier) is NEVER touched — bit only installs when there is none. The version comes from
+;; `toolchain`; the binary is downloaded from the H# release
+;;   https://github.com/HackerOS-Linux-System/H-Sharp/releases/download/v<toolchain>/hsharp
+;; and stored as `h#` in <cache>/env/hsharp-<toolchain>/h# (BIT_HSHARP then points at it).
+;; BIT_HSHARP_RELEASES replaces the release root (mirrors, tests).
+
+fn hsharp_release_url(version: string) -> string is
+    let base: string = env_get("BIT_HSHARP_RELEASES")
+    let root: string = if base != "" then base else "https://github.com/HackerOS-Linux-System/H-Sharp/releases/download"
+    return root + "/v" + version + "/hsharp"
+end
+
+;; 0 = an H# compiler is available (already there, or installed now) or nothing was asked for;
+;; 1 = H# is missing and could not be installed.
+pub fn ensure_toolchain(p: project::Project) -> int is
+    if project::hsharp_toolchain(p) < 0 is return 0 end
+    if tool_for("hsharp") != "" is return 0 end
+    let raw: string = project::toolchain_raw(p)
+    let version: string = if string_starts_with(raw, "v") then string_slice(raw, 1, string_len(raw)) else raw
+    let dir: string = project::cache_env(p) + "/hsharp-" + version
+    let bin: string = dir + "/h#"
+    if file_exists(bin) is
+        env_set("BIT_HSHARP", bin)
+        return 0
+    end
+    if net::offline() is
+        ui::fail("toolchain => " + version + ": H# is not installed and bit is offline")
+        return 1
+    end
+    let url: string = hsharp_release_url(version)
+    ui::line(ui::dim("toolchain <" + version + ">  H# not found — fetching it from " + url))
+    util::mkdir_p(dir)
+    if net::run_retry("curl -fsSL --connect-timeout 15 " + util::sq(url) + " -o " + util::sq(bin)) != 0 is
+        util::rm_rf(dir)
+        ui::fail("toolchain => " + version + ": cannot download H# from " + url)
+        ui::note(missing_tool_hint("hsharp"))
+        return 1
+    end
+    util::run("chmod +x " + util::sq(bin))
+    let magic: string = util::capture("head -c 4 " + util::sq(bin) + " | od -An -c | tr -d ' '")
+    if magic != "177ELF" is
+        util::rm_rf(dir)
+        ui::fail("toolchain => " + version + ": the downloaded file is not an executable (is there a release v" + version + "?)")
+        return 1
+    end
+    env_set("BIT_HSHARP", bin)
+    ui::ok("H# " + version + " installed as h#  " + ui::dim(bin))
+    return 0
+end
+
 ;; ── Whole project ────────────────────────────────────────────────────────────
 
 ;; ── `[package] -> using => 0.4` ──────────────────────────────────────────────
-;; Pins the HackerScript compiler: bit uses cache/env/hackerc-<version>/hackerc, downloads it from
-;; the HackerScript release when it is not there yet (like Virus did), and falls back to the
-;; `hackerc` on PATH with a warning when the download is impossible. BIT_HACKERC always wins.
+;; Names the HackerScript compiler version. An already installed hackerc (BIT_HACKERC, or `hackerc` on
+;; PATH) is used as it is — bit installs nothing. Only when there is none, bit downloads
+;; hackerc <version> from the HackerScript release into cache/env/hackerc-<version>/hackerc.
 
 fn hackerc_release_url(version: string) -> string is
     let base: string = env_get("BIT_HACKERC_RELEASES")
@@ -839,34 +892,31 @@ end
 pub fn ensure_using(p: project::Project) -> int is
     let version: string = hk::hk_pkg(p.pj_hk, "using", "")
     if version == "" || env_get("BIT_HACKERC") != "" is return 0 end
+    ;; An installed hackerc is never replaced: bit only installs one when none is found.
+    let on_path: string = util::first_tool(["hackerc"])
+    if on_path != "" is
+        let have: string = util::capture(util::sq(on_path) + " --version 2>&1 | head -1")
+        if !string_contains(have, version) is
+            ui::note("using => " + version + ": using the installed hackerc (" + on_path + ")" +
+                     (if string_trim(have) != "" then " — " + string_trim(have) else ""))
+        end
+        return 0
+    end
     let dir: string = project::cache_env(p) + "/hackerc-" + version
     let bin: string = dir + "/hackerc"
     if file_exists(bin) is
         env_set("BIT_HACKERC", bin)
         return 0
     end
-    let on_path: string = util::first_tool(["hackerc"])
-    if on_path != "" is
-        let have: string = util::capture(util::sq(on_path) + " --version 2>&1 | head -1")
-        if string_contains(have, version) is return 0 end
-    end
     if net::offline() is
-        if on_path != "" is
-            ui::warn("using => " + version + ": offline, using the hackerc on PATH instead")
-            return 0
-        end
-        ui::fail("using => " + version + ": hackerc " + version + " is not installed and bit is offline")
+        ui::fail("using => " + version + ": hackerc is not installed and bit is offline")
         return 1
     end
     let url: string = hackerc_release_url(version)
-    ui::line(ui::dim("using <" + version + ">  fetching hackerc from " + url))
+    ui::line(ui::dim("using <" + version + ">  hackerc not found — fetching " + version + " from " + url))
     util::mkdir_p(dir)
     if net::run_retry("curl -fsSL --connect-timeout 15 " + util::sq(url) + " -o " + util::sq(bin)) != 0 is
         util::rm_rf(dir)
-        if on_path != "" is
-            ui::warn("using => " + version + ": cannot download hackerc " + version + " — using the one on PATH (" + on_path + ")")
-            return 0
-        end
         ui::fail("using => " + version + ": cannot download hackerc from " + url)
         return 1
     end
