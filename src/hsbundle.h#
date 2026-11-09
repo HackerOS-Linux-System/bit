@@ -32,10 +32,11 @@ pub struct Bundle is
     pub bd_tmp: string        ;; scratch file that receives the flattened source (without the hoisted lines)
     pub bd_left: [string]     ;; include targets that are not files of the library (kept as written)
     pub bd_pasted: int        ;; how many files were pasted in place of an include
+    pub bd_self: string       ;; name of the library being bundled ("" = unknown): `get <bit:<self>::x>` means `include <x>`
 end
 
-fn empty_bundle(tmp: string) -> Bundle is
-    return Bundle { bd_seen: [], bd_gets: [], bd_uses: [], bd_tmp: tmp, bd_left: [], bd_pasted: 0 }
+fn empty_bundle(tmp: string, self_name: string) -> Bundle is
+    return Bundle { bd_seen: [], bd_gets: [], bd_uses: [], bd_tmp: tmp, bd_left: [], bd_pasted: 0, bd_self: self_name }
 end
 
 ;; "style" for `include <style>` — "" for every other line.
@@ -48,6 +49,20 @@ pub fn include_target(line: string) -> string is
     ;; `include` must be followed by a space or by `<` directly — not `include_all <x>`
     if string_trim(string_slice(t, 7, lt)) != "" is return "" end
     return string_trim(string_slice(t, lt + 1, gt))
+end
+
+;; "native" for `get <bit:gui::native>` when the library being bundled is `gui` — "" for every other line.
+;; A library must not import its OWN modules through `get <bit:<self>::x>`: while it is being built it is not in
+;; BIT_LIBS, and once it is packed into an .hlib the consumer has no `bit:<self>` either (the line was left in the
+;; archive and made `get <hlib:<self>>` fail). Such a line therefore means exactly `include <x>`.
+fn self_get_target(line: string, self_name: string) -> string is
+    if self_name == "" is return "" end
+    let t: string = string_trim(line)
+    let pre: string = "get <bit:" + self_name + "::"
+    if !string_starts_with(t, pre) is return "" end
+    let gt: int = string_find(t, ">")
+    if gt < pre.len() is return "" end
+    return string_trim(string_slice(t, pre.len(), gt))
 end
 
 fn is_get_line(line: string) -> bool is
@@ -89,15 +104,27 @@ fn paste(file: string, root: string, b: Bundle) -> Bundle is
     let mut i: int = 0
     while i < array_len(lines) is
         let raw: string = lines[i]
-        let tgt: string = include_target(raw)
+        let mut tgt: string = include_target(raw)
+        let mut via_get: bool = false
+        if tgt == "" is
+            tgt = self_get_target(raw, b.bd_self)
+            via_get = tgt != ""
+        end
         if tgt != "" is
             let f: string = find_include(dir, root, tgt)
             if f == "" is
-                fs_append(tmp, raw + "\n")
-                if !util::array_has(left, tgt) is left = array_push(left, tgt) end
+                if via_get is
+                    ;; names no file of this library: keep it as an ordinary (hoisted) `get`
+                    let t: string = string_trim(raw)
+                    if !util::array_has(gets, t) is gets = array_push(gets, t) end
+                else is
+                    fs_append(tmp, raw + "\n")
+                    if !util::array_has(left, tgt) is left = array_push(left, tgt) end
+                end
             else if !util::array_has(seen, f) is
                 let sub: Bundle = paste(f, root, Bundle { bd_seen: seen, bd_gets: gets, bd_uses: uses,
-                                                          bd_tmp: tmp, bd_left: left, bd_pasted: pasted + 1 })
+                                                          bd_tmp: tmp, bd_left: left, bd_pasted: pasted + 1,
+                                                          bd_self: b.bd_self })
                 seen = sub.bd_seen
                 gets = sub.bd_gets
                 uses = sub.bd_uses
@@ -115,13 +142,13 @@ fn paste(file: string, root: string, b: Bundle) -> Bundle is
         end
         i += 1
     end
-    return Bundle { bd_seen: seen, bd_gets: gets, bd_uses: uses, bd_tmp: tmp, bd_left: left, bd_pasted: pasted }
+    return Bundle { bd_seen: seen, bd_gets: gets, bd_uses: uses, bd_tmp: tmp, bd_left: left, bd_pasted: pasted, bd_self: b.bd_self }
 end
 
 ;; Flattens `entry` (a path), `root` being the library's source directory (`lib/`). The flattened body ends
 ;; up in the scratch file `tmp`; the returned Bundle carries everything else (hoisted lines, counters).
-pub fn flatten(entry: string, root: string, tmp: string) -> Bundle is
-    return paste(entry, root, empty_bundle(tmp))
+pub fn flatten(entry: string, root: string, tmp: string, self_name: string) -> Bundle is
+    return paste(entry, root, empty_bundle(tmp, self_name))
 end
 
 ;; Everything that goes in front of the body: the winning `using <…>`, the banner and the hoisted `get <…>`s.
@@ -140,7 +167,7 @@ end
 ;; Writes the flattened library to `out`. `entry_rel` is relative to `root_dir` (the project root),
 ;; `lib_rel` is the library's source directory (`lib`), also relative to it.
 ;; Returns true when `out` was written.
-pub fn bundle_to(root_dir: string, entry_rel: string, lib_rel: string, out: string) -> bool is
+pub fn bundle_to(root_dir: string, entry_rel: string, lib_rel: string, out: string, self_name: string) -> bool is
     let entry: string = root_dir + "/" + entry_rel
     if !file_exists(entry) is
         ui::fail("bundle: no such file " + entry)
@@ -150,7 +177,7 @@ pub fn bundle_to(root_dir: string, entry_rel: string, lib_rel: string, out: stri
     let tmp: string = out + ".body.tmp"
     util::rm_rf(tmp)
     file_write(tmp, "")
-    let b: Bundle = flatten(entry, root_dir + "/" + lib_rel, tmp)
+    let b: Bundle = flatten(entry, root_dir + "/" + lib_rel, tmp, self_name)
     ;; header first (it needs the hoisted lines, known only now), then the body in ONE read + ONE append
     file_write(out, render_header(b, entry_rel))
     fs_append(out, file_read(tmp))
