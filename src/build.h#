@@ -697,7 +697,7 @@ fn build_hs_lib(p: project::Project, o: BuildOpts, entry: string, dir: string, o
         ;; derives the archive's name (and its `ast/<name>.hcs` entry) from the file name — building from
         ;; `mod.hcs` used to produce a library called `mod`, which `get <hlib:name>` could never find.
         let bundled: string = project::cache_root(p) + "/bundle/" + name + ".hcs"
-        let src: string = if hsbundle::bundle_to(project::root_of(p), entry, project::lib_dir(p), bundled) then bundled else entry
+        let src: string = if hsbundle::bundle_to(project::root_of(p), entry, project::lib_dir(p), bundled, project::name_of(p)) then bundled else entry
         let cmd: string = tool_for("hackerscript") + " hlib build " + util::sq(src) + " -o " + util::sq(dir + "/" + name + ".hlib") +
             " --name " + util::sq(name) +
             " --lib-version " + util::sq(project::version_of(p)) +
