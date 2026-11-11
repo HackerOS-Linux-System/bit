@@ -124,5 +124,39 @@ pub fn prepare(p: project::Project, verbose: bool, triple: string) -> int is
     env_set("BIT_NATIVE_LIBPATH", paths)
     env_set("LIBRARY_PATH", if old == "" then paths else paths + ":" + old)
     if verbose is ui::note("LIBRARY_PATH += " + paths) end
+    export_pkgconfig(paths, verbose)
+    return 0
+end
+
+;; Native libs (e.g. silver's libsilvershim.a) ship .pc files next to the archive
+;; (<dir>/pkgconfig-static, <dir>/pkgconfig) listing their system dependencies
+;; (SDL2, harfbuzz, freetype ...). h# resolves them via `pkg-config --libs <lib>`,
+;; so those directories must be on PKG_CONFIG_PATH, otherwise the final link fails
+;; with "undefined reference to SDL_* / hb_* / TTF_*".
+fn export_pkgconfig(paths: string, verbose: bool) -> int is
+    let mut pc: string = ""
+    for d in string_split(paths, ":") is
+        if d == "" is continue end
+        for sub in ["pkgconfig-static", "pkgconfig"] is
+            let dir: string = d + "/" + sub
+            if dir_exists(dir) is pc = add_path(pc, dir) end
+        end
+    end
+    ;; fully static builds (native/build-static-deps.sh) leave the complete list of
+    ;; link flags in <dir>/static-libs.txt - use it when the user did not set any
+    if env_get("HSHARP_LDFLAGS") == "" is
+        for d in string_split(paths, ":") is
+            let f: string = d + "/static-libs.txt"
+            if d != "" && file_exists(f) is
+                env_set("HSHARP_LDFLAGS", string_trim(file_read(f)))
+                if verbose is ui::note("HSHARP_LDFLAGS from " + f) end
+                break
+            end
+        end
+    end
+    if pc == "" is return 0 end
+    let old: string = env_get("PKG_CONFIG_PATH")
+    env_set("PKG_CONFIG_PATH", if old == "" then pc else pc + ":" + old)
+    if verbose is ui::note("PKG_CONFIG_PATH += " + pc) end
     return 0
 end
