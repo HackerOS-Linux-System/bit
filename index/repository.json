@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-10-24",
+  "updated_at": "2026-11-12",
   "libraries": [
     {
       "name": "mold",
@@ -241,13 +241,12 @@
     },
     {
       "name": "libfasttree",
-      "target": "https://github.com/Zenit-Linux/libfasttree",
+      "target": "https://github.com/bit-io/libfasttree",
       "description": "A modern succesor for ostree.",
       "tags": [
         "ostree",
         "fasttree",
         "immuntable",
-        "Zenit-Linux"
       ],
       "author": "Bit Developers"
     },
@@ -288,17 +287,6 @@
         "cranelift",
         "codegen",
         "jit"
-      ],
-      "author": "Bit Developers"
-    },
-    {
-      "name": "tauri",
-      "target": "https://github.com/bit-io/tauri",
-      "description": "Library bindings for tauri (rust library).",
-      "tags": [
-        "webview",
-        "tauri",
-        "rust"
       ],
       "author": "Bit Developers"
     },
