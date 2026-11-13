@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-11-12",
+  "updated_at": "2026-11-13",
   "libraries": [
     {
       "name": "mold",
@@ -334,6 +334,18 @@
       "description": "Webview bindings for bit.io",
       "tags": [
         "webview"
+      ],
+      "author": "Bit Developers"
+    },
+    {
+      "name": "ollama-bindings",
+      "target": "https://github.com/bit-io/ollama-bindings",
+      "description": "Ollama bindings for bit.io",
+      "tags": [
+        "ollama",
+        "ai",
+        "model",
+        "local-model"
       ],
       "author": "Bit Developers"
     }
