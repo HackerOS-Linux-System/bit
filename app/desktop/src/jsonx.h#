@@ -1,0 +1,271 @@
+mod util
+
+;; ── A small JSON reader ──────────────────────────────────────────────────────
+;; Objects and arrays are handled as TEXT: an object is cut into (key, raw value) pairs once, an array
+;; into the raw text of its elements. That is all bit.io needs (index, GitHub API answers) and it
+;; stays fast for the ~300 KB a recursive tree listing can have.
+
+pub struct Pair is
+    pub key: string
+    pub val: string       ;; unquoted when it was a JSON string, raw text otherwise
+    pub quoted: bool
+end
+
+pub struct Obj is
+    pub pairs: [Pair]
+end
+
+fn strip_outer(s: string, open: string, close: string) -> string is
+    let t: string = string_trim(s)
+    if string_len(t) >= 2 && string_starts_with(t, open) && string_ends_with(t, close) is
+        return string_trim(string_slice(t, 1, string_len(t) - 1))
+    end
+    return t
+end
+
+;; Cuts on commas at nesting level 0 (commas inside strings and brackets do not count).
+fn split_top(text: string) -> [string] is
+    let n: int = string_len(text)
+    let mut parts: [string] = []
+    let mut depth: int = 0
+    let mut in_str: bool = false
+    let mut start: int = 0
+    let mut i: int = 0
+    while i < n is
+        let c: string = string_at(text, i)
+        if in_str is
+            if c == "\\" is
+                i += 1
+            else if c == "\"" is
+                in_str = false
+            end
+        else is
+            if c == "\"" is
+                in_str = true
+            else if c == "{" || c == "[" is
+                depth += 1
+            else if c == "}" || c == "]" is
+                depth -= 1
+            else if c == "," && depth == 0 is
+                parts = array_push(parts, string_trim(string_slice(text, start, i)))
+                start = i + 1
+            end
+        end
+        i += 1
+    end
+    let last: string = string_trim(string_slice(text, start, n))
+    if last != "" is parts = array_push(parts, last) end
+    return parts
+end
+
+;; `[ a, b ]` -> raw text of every element.
+pub fn items(json: string) -> [string] is
+    let inner: string = strip_outer(json, "[", "]")
+    if inner == "" is return [] end
+    return split_top(inner)
+end
+
+;; The value of the 4 hex digits of a \uXXXX escape, or -1.
+fn hex4(h: string) -> int is
+    let digits: string = "0123456789abcdef"
+    let lower: string = string_lower(h)
+    let mut v: int = 0
+    let mut i: int = 0
+    while i < 4 is
+        let d: int = string_find(digits, string_at(lower, i))
+        if d < 0 is return -1 end
+        v = v * 16 + d
+        i += 1
+    end
+    return v
+end
+
+const EN_DASH: int = 8211
+const EM_DASH: int = 8212
+const RIGHT_QUOTE: int = 8217
+
+;; Characters of \uXXXX that show up in GitHub texts; the rest become "?".
+fn unicode_char(code: int) -> string is
+    if code == 60 is return "<" end
+    if code == 62 is return ">" end
+    if code == 38 is return "&" end
+    if code == 39 is return "'" end
+    if code == 34 is return "\"" end
+    if code == 47 is return "/" end
+    if code == 32 is return " " end
+    if code == 45 is return "-" end
+    if code == EN_DASH is return "-" end
+    if code == EM_DASH is return "-" end
+    if code == RIGHT_QUOTE is return "'" end
+    return "?"
+end
+
+;; Removes the quotes and undoes JSON escapes (one pass, so `\\n` stays a backslash + n).
+pub fn unquote(s: string) -> string is
+    let t: string = string_trim(s)
+    if string_len(t) < 2 || !string_starts_with(t, "\"") || !string_ends_with(t, "\"") is return t end
+    let inner: string = string_slice(t, 1, string_len(t) - 1)
+    if string_find(inner, "\\") < 0 is return inner end
+    let n: int = string_len(inner)
+    let mut out: string = ""
+    let mut start: int = 0
+    let mut i: int = 0
+    while i < n is
+        if string_at(inner, i) == "\\" && i + 1 < n is
+            out = out + string_slice(inner, start, i)
+            let e: string = string_at(inner, i + 1)
+            if e == "n" is
+                out = out + "\n"
+            else if e == "t" is
+                out = out + "\t"
+            else if e == "r" is
+                out = out + ""
+            else if e == "u" && i + 5 < n + 0 is
+                out = out + unicode_char(hex4(string_slice(inner, i + 2, i + 6)))
+                i += 4
+            else is
+                out = out + e
+            end
+            i += 2
+            start = i
+        else is
+            i += 1
+        end
+    end
+    out = out + string_slice(inner, start, n)
+    return out
+end
+
+fn parse_pair(text: string) -> Pair is
+    let n: int = string_len(text)
+    let mut depth: int = 0
+    let mut in_str: bool = false
+    let mut colon: int = -1
+    let mut i: int = 0
+    while i < n && colon < 0 is
+        let c: string = string_at(text, i)
+        if in_str is
+            if c == "\\" is
+                i += 1
+            else if c == "\"" is
+                in_str = false
+            end
+        else is
+            if c == "\"" is
+                in_str = true
+            else if c == "{" || c == "[" is
+                depth += 1
+            else if c == "}" || c == "]" is
+                depth -= 1
+            else if c == ":" && depth == 0 is
+                colon = i
+            end
+        end
+        i += 1
+    end
+    if colon < 0 is return Pair { key: "", val: "", quoted: false } end
+    let key_raw: string = string_trim(string_slice(text, 0, colon))
+    let val_raw: string = string_trim(string_slice(text, colon + 1, n))
+    let quoted: bool = string_starts_with(val_raw, "\"")
+    let val: string = if quoted then unquote(val_raw) else val_raw
+    return Pair { key: unquote(key_raw), val: val, quoted: quoted }
+end
+
+pub fn parse_object(json: string) -> Obj is
+    let inner: string = strip_outer(json, "{", "}")
+    if inner == "" is return Obj { pairs: [] } end
+    let parts: [string] = split_top(inner)
+    let mut pairs: [Pair] = []
+    let mut i: int = 0
+    while i < array_len(parts) is
+        let p: Pair = parse_pair(parts[i])
+        if p.key != "" is pairs = array_push(pairs, p) end
+        i += 1
+    end
+    return Obj { pairs: pairs }
+end
+
+pub fn get(o: Obj, key: string) -> string is
+    let mut i: int = 0
+    while i < array_len(o.pairs) is
+        if o.pairs[i].key == key is return o.pairs[i].val end
+        i += 1
+    end
+    return ""
+end
+
+pub fn has(o: Obj, key: string) -> bool is
+    let mut i: int = 0
+    while i < array_len(o.pairs) is
+        if o.pairs[i].key == key is return true end
+        i += 1
+    end
+    return false
+end
+
+;; JSON `null` and a missing key both read as "".
+pub fn get_str(o: Obj, key: string) -> string is
+    let v: string = get(o, key)
+    if v == "null" is return "" end
+    return v
+end
+
+pub fn get_int(o: Obj, key: string) -> int is
+    let v: string = get(o, key)
+    if v == "" || v == "null" is return 0 end
+    return str_to_int(v)
+end
+
+pub fn get_bool(o: Obj, key: string) -> bool is
+    return get(o, key) == "true"
+end
+
+pub fn get_obj(o: Obj, key: string) -> Obj is
+    return parse_object(get(o, key))
+end
+
+;; `["a", "b"]` -> ["a", "b"]
+pub fn string_array(raw: string) -> [string] is
+    let parts: [string] = items(raw)
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(parts) is
+        let v: string = unquote(parts[i])
+        if v != "" is out = array_push(out, v) end
+        i += 1
+    end
+    return out
+end
+
+;; The hand-edited index has had trailing commas: remove `,` that is followed by `}` or `]`
+;; (outside strings) before reading it.
+pub fn strip_trailing_commas(text: string) -> string is
+    let n: int = string_len(text)
+    let mut out: string = ""
+    let mut start: int = 0
+    let mut in_str: bool = false
+    let mut i: int = 0
+    while i < n is
+        let c: string = string_at(text, i)
+        if in_str is
+            if c == "\\" is
+                i += 1
+            else if c == "\"" is
+                in_str = false
+            end
+        else is
+            if c == "\"" is
+                in_str = true
+            else if c == "," is
+                let mut j: int = i + 1
+                while j < n && util::is_space(string_at(text, j)) is j += 1 end
+                if j < n && (string_at(text, j) == "}" || string_at(text, j) == "]") is
+                    out = out + string_slice(text, start, i)
+                    start = i + 1
+                end
+            end
+        end
+        i += 1
+    end
+    return out + string_slice(text, start, n)
+end
