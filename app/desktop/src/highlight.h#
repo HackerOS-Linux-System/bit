@@ -1,0 +1,221 @@
+mod util
+
+;; ── Syntax highlighting ──────────────────────────────────────────────────────
+;; A small line tokenizer: comments, strings, numbers, keywords, types, calls. Enough to make the
+;; source browser and README code blocks readable; it does not try to be a parser.
+
+pub fn kind_plain() -> int is return 0 end
+pub fn kind_keyword() -> int is return 1 end
+pub fn kind_string() -> int is return 2 end
+pub fn kind_comment() -> int is return 3 end
+pub fn kind_number() -> int is return 4 end
+pub fn kind_type() -> int is return 5 end
+pub fn kind_call() -> int is return 6 end
+pub fn kind_punct() -> int is return 7 end
+pub fn kind_section() -> int is return 8 end
+
+pub struct Line is
+    pub texts: [string]
+    pub kinds: [int]
+end
+
+;; File extension / fence language -> highlighter family.
+pub fn family(raw: string) -> string is
+    let l: string = string_lower(string_trim(raw))
+    if l == "h#" || l == "hsharp" || l == "hsh" is return "hsharp" end
+    if l == "hcs" || l == "hs" || l == "hackerscript" is return "hackerscript" end
+    if l == "hl" || l == "hackerlang" is return "hackerlang" end
+    if l == "hk" is return "hk" end
+    if l == "rs" || l == "rust" is return "rust" end
+    if l == "c" || l == "h" || l == "cpp" || l == "cc" || l == "hpp" || l == "zig" || l == "go" || l == "java" || l == "js" || l == "ts" || l == "kt" is return "clike" end
+    if l == "json" is return "json" end
+    if l == "sh" || l == "bash" || l == "shell" || l == "zsh" || l == "console" || l == "toml" || l == "yml" || l == "yaml" || l == "py" || l == "python" || l == "cmake" is return "hash" end
+    if l == "lua" is return "lua" end
+    return ""
+end
+
+fn words_of(fam: string) -> string is
+    if fam == "hsharp" is
+        return " fn struct enum impl trait pub mod use is end if else elsif while for in return let mut match const type extern static dynamic true false as break continue async await self new unsafe loop from using "
+    end
+    if fam == "hackerscript" is
+        return " fun struct impl enum if else while for end get include let pub self match return native true false and or not as in break continue "
+    end
+    if fam == "hackerlang" is
+        return " if else elif while for in end fn def let return true false and or not use import "
+    end
+    if fam == "rust" is
+        return " fn let mut pub struct enum impl trait use mod crate self Self if else match while for loop in return break continue const static as ref move where unsafe async await true false type dyn "
+    end
+    if fam == "clike" is
+        return " if else while for do switch case break continue return struct enum union typedef static const extern void int char long unsigned signed float double bool sizeof class public private func fn var let function import package true false null nil new this "
+    end
+    if fam == "json" is return " true false null " end
+    if fam == "hash" is
+        return " if then else elif fi for while do done in case esac function return export local def class import from as with true false True False None echo set "
+    end
+    if fam == "lua" is
+        return " function end if then else elseif while for do in return local break nil true false and or not repeat until "
+    end
+    return ""
+end
+
+fn comment_marker(fam: string) -> string is
+    if fam == "hsharp" is return ";;" end
+    if fam == "hackerscript" is return "!!" end
+    if fam == "hackerlang" is return "!" end
+    if fam == "hk" is return "!" end
+    if fam == "rust" || fam == "clike" is return "//" end
+    if fam == "hash" is return "#" end
+    if fam == "lua" is return "--" end
+    return ""
+end
+
+fn is_punct(c: string) -> bool is
+    return string_find("()" + "\{" + "}" + "[]<>+-*/%=!&|^~?:;,.@", c) >= 0
+end
+
+pub fn empty_line() -> Line is
+    return Line { texts: [], kinds: [] }
+end
+
+;; Appends a token, merging it into the previous one when the kind is the same.
+fn add(l: Line, text: string, kind: int) -> Line is
+    if text == "" is return l end
+    let mut r: Line = l
+    let n: int = array_len(r.kinds)
+    if n > 0 && r.kinds[n - 1] == kind is
+        r.texts[n - 1] = r.texts[n - 1] + text
+    else is
+        r.texts = array_push(r.texts, text)
+        r.kinds = array_push(r.kinds, kind)
+    end
+    return r
+end
+
+;; Position after the closing quote of a string that opens at `i` (or the end of the line).
+fn string_end(s: string, i: int, q: string) -> int is
+    let n: int = string_len(s)
+    let mut k: int = i + 1
+    while k < n is
+        let c: string = string_at(s, k)
+        if c == "\\" is
+            k += 1
+        else if c == q is
+            return k + 1
+        end
+        k += 1
+    end
+    return n
+end
+
+pub fn tokenize_line(line: string, fam: string, in_block: bool) -> Line is
+    let mut out: Line = empty_line()
+    let n: int = string_len(line)
+    if fam == "" is return add(out, line, kind_plain()) end
+    let kw: string = words_of(fam)
+    let cm: string = comment_marker(fam)
+    let block: bool = fam == "rust" || fam == "clike"
+    let mut i: int = 0
+    if fam == "hk" is
+        let t: string = string_trim(line)
+        if string_starts_with(t, "[") && string_ends_with(t, "]") is return add(out, line, kind_section()) end
+        if string_starts_with(t, "!") || string_starts_with(t, ";;") is return add(out, line, kind_comment()) end
+    end
+    if in_block is
+        let close: int = string_find(line, "*/")
+        if close < 0 is return add(out, line, kind_comment()) end
+        out = add(out, string_slice(line, 0, close + 2), kind_comment())
+        i = close + 2
+    end
+    while i < n is
+        let c: string = util::ch(line, i)
+        let rest: string = string_slice(line, i, n)
+        if cm != "" && string_starts_with(rest, cm) is
+            return add(out, rest, kind_comment())
+        end
+        if block && string_starts_with(rest, "/*") is
+            let close: int = string_find(string_slice(rest, 2, string_len(rest)), "*/")
+            if close < 0 is return add(out, rest, kind_comment()) end
+            out = add(out, string_slice(rest, 0, close + 4), kind_comment())
+            i += close + 4
+        else if c == "\"" is
+            let e: int = string_end(line, i, "\"")
+            out = add(out, string_slice(line, i, e), kind_string())
+            i = e
+        else if c == "'" && (fam == "hash" || fam == "lua" || fam == "hsharp" || fam == "hackerscript") is
+            let e: int = string_end(line, i, "'")
+            out = add(out, string_slice(line, i, e), kind_string())
+            i = e
+        else if util::is_digit(c) is
+            let mut k: int = i
+            while k < n && (util::is_alnum(string_at(line, k)) || string_at(line, k) == ".") is k += 1 end
+            out = add(out, string_slice(line, i, k), kind_number())
+            i = k
+        else if util::is_alpha(c) is
+            let mut k: int = i
+            while k < n && util::is_alnum(string_at(line, k)) is k += 1 end
+            let w: string = string_slice(line, i, k)
+            if string_contains(kw, " " + w + " ") is
+                out = add(out, w, kind_keyword())
+            else if string_find("ABCDEFGHIJKLMNOPQRSTUVWXYZ", string_at(w, 0)) >= 0 is
+                out = add(out, w, kind_type())
+            else if k < n && string_at(line, k) == "(" is
+                out = add(out, w, kind_call())
+            else is
+                out = add(out, w, kind_plain())
+            end
+            i = k
+        else if util::is_space(c) is
+            let mut k: int = i
+            while k < n && util::is_space(string_at(line, k)) is k += 1 end
+            out = add(out, string_slice(line, i, k), kind_plain())
+            i = k
+        else if is_punct(c) is
+            out = add(out, c, kind_punct())
+            i += 1
+        else is
+            out = add(out, c, kind_plain())
+            i += 1
+        end
+    end
+    return out
+end
+
+;; Does a block comment stay open at the end of `line`?
+fn opens_block(line: string, fam: string, was_open: bool) -> bool is
+    if fam != "rust" && fam != "clike" is return false end
+    let mut open: bool = was_open
+    let mut i: int = 0
+    let n: int = string_len(line)
+    while i + 1 < n is
+        let two: string = string_slice(line, i, i + 2)
+        if open && two == "*/" is
+            open = false
+            i += 1
+        else if !open && two == "/*" is
+            open = true
+            i += 1
+        else if !open && two == "//" is
+            return false
+        end
+        i += 1
+    end
+    return open
+end
+
+;; A whole text -> lines of tokens (at most `max_lines`, each cut at `max_width` bytes).
+pub fn highlight(src: string, lang: string, max_lines: int, max_width: int) -> [Line] is
+    let fam: string = family(lang)
+    let lines: [string] = util::lines_of(src)
+    let mut out: [Line] = []
+    let mut open: bool = false
+    let mut i: int = 0
+    while i < array_len(lines) && i < max_lines is
+        let text: string = util::cut_plain(string_replace(lines[i], "\t", "    "), max_width)
+        out = array_push(out, tokenize_line(text, fam, open))
+        open = opens_block(text, fam, open)
+        i += 1
+    end
+    return out
+end
