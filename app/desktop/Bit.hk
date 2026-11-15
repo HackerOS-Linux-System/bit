@@ -1,1 +1,41 @@
+[package]
+-> name        => bit-io-desktop
+-> version     => 0.1.0
+-> description => The bit.io package browser for the HackerOS desktop - H# + the gui library (HackerScript) through hlib.
+-> authors     => ["HackerOS Team <hackeros068@gmail.com>"]
+-> license     => Apache-2.0
+-> lang        => h#
 
+[edition]
+-> edition   => 2026
+-> toolchain => 0.9
+
+[layout]
+-> src => src
+
+[default-build]
+-> profile => release
+-> run     => true
+
+[dependencies]
+-> gui => newest
+
+[commands]
+-> check
+--> run => bit check
+--> description => Type-check every module
+-> sync
+--> run => lua5.4 ../../scripts/build-desktop-app.lua sync
+--> description => Copy the index snapshot (index/repository.json) and the icon (images/icon.png) into data/
+-> package
+--> run => lua5.4 ../../scripts/build-desktop-app.lua package
+--> description => Release build + dist/desktop/bit-io-desktop-<version>-linux-<arch>.tar.gz and .deb
+-> install-local
+--> run => lua5.4 ../../scripts/build-desktop-app.lua install --prefix ~/.local
+--> description => Install the release build into ~/.local (binary, data, .desktop entry, icon)
+-> uninstall-local
+--> run => lua5.4 ../../scripts/build-desktop-app.lua uninstall --prefix ~/.local
+--> description => Remove what install-local put into ~/.local
+
+[hooks]
+-> pre-build => cp -f ../../index/repository.json data/repository.json 2>/dev/null; cp -f ../../images/icon.png data/icon.png 2>/dev/null; true
