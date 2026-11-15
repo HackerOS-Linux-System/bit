@@ -1,0 +1,135 @@
+use "hlib -> gui"
+mod util
+mod hk
+mod model
+mod store
+mod markdown
+
+;; ── Application state ────────────────────────────────────────────────────────
+;; One mutable struct (H# structs are references). main.h# changes it in `update`, view.h# only reads it.
+;; Elements that are expensive to build (a README, a source file, release notes) are built once per load
+;; and kept here as gui handles; view.h# clones them into the tree, load.h# frees them when replaced.
+
+pub fn idle() -> int is return 0 end
+pub fn loading() -> int is return 1 end
+pub fn ready() -> int is return 2 end
+pub fn failed() -> int is return 3 end
+
+;; Progress of one remote resource.
+pub struct Res is
+    pub state: int
+    pub stale: bool       ;; answered from the saved copy because the network failed
+    pub err: string
+    pub age: int          ;; seconds since the copy was saved (0 = fresh)
+end
+
+pub fn res_new() -> Res is
+    return Res { state: idle(), stale: false, err: "", age: 0 }
+end
+
+pub struct St is
+    pub screen: string            ;; libs | docs | settings | lib
+    pub dark: bool
+    pub version: string
+    pub busy: int                 ;; requests in flight
+    pub toast: string
+    pub toast_until: int          ;; ms (time_ms) until the toast is shown
+    ;; library index
+    pub idx: model::Index
+    pub idx_res: Res
+    pub query: string
+    pub lang: string              ;; "" = all
+    pub tag: string
+    ;; the library on screen
+    pub sel: string
+    pub gen: int                  ;; bumped when the selection or version changes: answers of older requests are dropped
+    pub ref: string               ;; version being viewed, "" = the default
+    pub tab: int                  ;; 0 overview, 1 source, 2 versions
+    pub mf: hk::Hk
+    pub mf_file: string
+    pub mf_res: Res
+    pub rd_file: string
+    pub rd_res: Res
+    pub rd_text: string
+    pub rd_md: bool
+    pub rd_el: Element
+    pub rd_has: bool
+    pub rd_links: [markdown::Block]
+    pub meta: model::Meta
+    pub meta_res: Res
+    pub rels: [model::Release]
+    pub rel_res: Res
+    pub rel_open: [string]        ;; tags whose notes are expanded
+    pub rel_els: [Element]        ;; built notes, parallel to rel_notes_tag
+    pub rel_els_tag: [string]
+    pub tree: model::Tree
+    pub tree_res: Res
+    pub dir: string
+    pub file_path: string
+    pub file_res: Res
+    pub file_text: string
+    pub file_el: Element
+    pub file_has: bool
+    pub file_lines: int
+    pub file_note: string
+    ;; docs
+    pub docs_el: Element
+    pub docs_has: bool
+    ;; settings
+    pub settings: store::Settings
+    pub token_draft: string
+    pub token_shown: bool
+    pub rate_text: string
+    pub cache_text: string
+end
+
+pub fn st_new(version: string) -> St is
+    return St {
+        screen: "libs", dark: true, version: version, busy: 0, toast: "", toast_until: 0,
+        idx: model::empty_index(), idx_res: res_new(), query: "", lang: "", tag: "",
+        sel: "", gen: 0, ref: "", tab: 0,
+        mf: hk::empty(), mf_file: "", mf_res: res_new(),
+        rd_file: "", rd_res: res_new(), rd_text: "", rd_md: true, rd_el: 0, rd_has: false, rd_links: [],
+        meta: model::parse_meta(""), meta_res: res_new(),
+        rels: [], rel_res: res_new(), rel_open: [], rel_els: [], rel_els_tag: [],
+        tree: model::empty_tree(), tree_res: res_new(), dir: "",
+        file_path: "", file_res: res_new(), file_text: "", file_el: 0, file_has: false, file_lines: 0, file_note: "",
+        docs_el: 0, docs_has: false,
+        settings: store::default_settings(), token_draft: "", token_shown: false, rate_text: "", cache_text: ""
+    }
+end
+
+;; Shows a message in the status bar for a few seconds.
+pub fn say(s: St, text: string) is
+    s.toast = text
+    s.toast_until = time_ms() + TOAST_MS
+end
+
+const TOAST_MS: int = 4000
+
+;; The library on screen, or an empty one when none is selected / the index changed under us.
+pub fn current(s: St) -> model::Lib is
+    let i: int = model::find_lib(s.idx, s.sel)
+    if i < 0 is
+        return model::Lib { name: "", target: "", description: "", tags: [], author: "", lang: "any", rev: "", checksum: "" }
+    end
+    return s.idx.libs[i]
+end
+
+;; Version being viewed: the chosen one, else the library's pinned rev, else the branch of its URL, else HEAD.
+pub fn eff_ref(s: St) -> string is
+    if s.ref != "" is return s.ref end
+    let l: model::Lib = current(s)
+    if l.rev != "" is return l.rev end
+    let g: model::Gh = model::parse_github(l.target)
+    if g.ref != "" is return g.ref end
+    return "HEAD"
+end
+
+pub fn default_ref(s: St) -> string is
+    let l: model::Lib = current(s)
+    if l.rev != "" is return l.rev end
+    let g: model::Gh = model::parse_github(l.target)
+    if g.ref != "" is return g.ref end
+    return "HEAD"
+end
