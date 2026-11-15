@@ -1,0 +1,322 @@
+mod util
+
+;; ── Markdown -> blocks ───────────────────────────────────────────────────────
+;; READMEs, release notes and the docs page are parsed once into blocks; view.h# turns the blocks into
+;; widgets. Inline markup (**bold**, `code`, [text](url), images, HTML tags) is reduced to readable
+;; plain text, because a wrapping paragraph is ONE text widget; the links of a paragraph are kept in
+;; the block, so the UI can offer them as buttons.
+
+pub struct Block is
+    pub kind: string      ;; h1 h2 h3 h4 | p | code | quote | li | rule | table
+    pub text: string      ;; heading/paragraph/quote/list item text, or the body of a code block
+    pub lang: string      ;; code fence language
+    pub level: int        ;; list nesting (0, 1, 2 ...)
+    pub marker: string    ;; list marker: "•", "1.", "☐", "☑"
+    pub rows: [string]    ;; table rows, cells separated by a TAB (row 0 = header)
+    pub urls: [string]    ;; links found in the text
+    pub names: [string]   ;; their visible texts
+end
+
+fn block(kind: string, text: string) -> Block is
+    return Block { kind: kind, text: text, lang: "", level: 0, marker: "", rows: [], urls: [], names: [] }
+end
+
+pub struct Inline is
+    pub text: string
+    pub urls: [string]
+    pub names: [string]
+end
+
+fn entity(name: string) -> string is
+    if name == "nbsp" is return " " end
+    if name == "amp" is return "&" end
+    if name == "lt" is return "<" end
+    if name == "gt" is return ">" end
+    if name == "quot" is return "\"" end
+    if name == "#39" || name == "apos" is return "'" end
+    if name == "copy" is return "©" end
+    if name == "mdash" is return "-" end
+    if name == "ndash" is return "-" end
+    return ""
+end
+
+;; Index of the `close` that ends a span opened at `from` (same line), or -1.
+fn find_from(s: string, needle: string, from: int) -> int is
+    if from >= string_len(s) is return -1 end
+    let rest: string = string_slice(s, from, string_len(s))
+    let p: int = string_find(rest, needle)
+    if p < 0 is return -1 end
+    return from + p
+end
+
+;; Inline markup -> plain text + links.
+pub fn inline(src: string) -> Inline is
+    let n: int = string_len(src)
+    let mut out: string = ""
+    let mut urls: [string] = []
+    let mut names: [string] = []
+    let mut start: int = 0
+    let mut i: int = 0
+    while i < n is
+        let c: string = util::ch(src, i)
+        let mut skip: int = 0           ;; bytes consumed by markup at `i`
+        let mut emit: string = ""       ;; what replaces them
+        if c == "\\" && i + 1 < n && !util::is_alnum(string_at(src, i + 1)) && string_at(src, i + 1) != " " is
+            skip = 2
+            emit = util::ch(src, i + 1)
+        else if c == "`" is
+            skip = 1
+        else if c == "*" || c == "~" is
+            skip = 1
+        else if c == "!" && i + 1 < n && string_at(src, i + 1) == "[" is
+            let close: int = find_from(src, "](", i + 2)
+            let end_url: int = if close >= 0 then find_from(src, ")", close + 2) else -1
+            if close >= 0 && end_url >= 0 is
+                skip = end_url + 1 - i
+                emit = string_slice(src, i + 2, close)
+            end
+        else if c == "[" is
+            let close: int = find_from(src, "](", i + 1)
+            let end_url: int = if close >= 0 then find_from(src, ")", close + 2) else -1
+            if close >= 0 && end_url >= 0 is
+                skip = end_url + 1 - i
+                let label: string = inline_label(string_slice(src, i + 1, close))
+                let url: string = string_trim(string_slice(src, close + 2, end_url))
+                emit = label
+                if (string_starts_with(url, "https://") || string_starts_with(url, "http://")) && !util::has(urls, url) is
+                    urls = array_push(urls, url)
+                    names = array_push(names, if label != "" then label else url)
+                end
+            end
+        else if c == "<" && i + 1 < n is
+            let nx: string = string_at(src, i + 1)
+            if util::is_alpha(nx) || nx == "/" || nx == "!" is
+                let gt: int = find_from(src, ">", i + 1)
+                if gt >= 0 is skip = gt + 1 - i end
+            end
+        else if c == "&" is
+            let semi: int = find_from(src, ";", i + 1)
+            if semi >= 0 && semi - i <= 8 is
+                let e: string = entity(string_slice(src, i + 1, semi))
+                if e != "" is
+                    skip = semi + 1 - i
+                    emit = e
+                end
+            end
+        end
+        if skip > 0 is
+            out = out + string_slice(src, start, i) + emit
+            i += skip
+            start = i
+        else is
+            i += 1
+        end
+    end
+    out = out + string_slice(src, start, n)
+    return Inline { text: string_trim(out), urls: urls, names: names }
+end
+
+;; A link label may hold an image or emphasis: keep only the words.
+fn inline_label(s: string) -> string is
+    let mut t: string = string_replace(string_replace(s, "**", ""), "`", "")
+    if string_starts_with(t, "![") is
+        let close: int = string_find(t, "](")
+        if close > 2 is t = string_slice(t, 2, close) else is t = "" end
+    end
+    return string_trim(t)
+end
+
+fn is_rule(line: string) -> bool is
+    let t: string = string_replace(string_replace(string_trim(line), " ", ""), "\t", "")
+    if string_len(t) < 3 is return false end
+    return string_replace(t, "-", "") == "" || string_replace(t, "*", "") == "" || string_replace(t, "_", "") == ""
+end
+
+fn heading_level(line: string) -> int is
+    let mut n: int = 0
+    while n < 6 && n < string_len(line) && string_at(line, n) == "#" is n += 1 end
+    if n == 0 || n >= string_len(line) is return 0 end
+    if string_at(line, n) != " " is return 0 end
+    return n
+end
+
+;; "- x", "* x", "+ x", "1. x", "1) x" -> marker, "" when it is no list item. (marker, rest) in one string.
+fn list_marker(t: string) -> string is
+    if string_len(t) < 2 is return "" end
+    let c: string = string_at(t, 0)
+    if (c == "-" || c == "*" || c == "+") && string_at(t, 1) == " " is return "•" end
+    let mut i: int = 0
+    while i < string_len(t) && util::is_digit(string_at(t, i)) is i += 1 end
+    if i > 0 && i < 6 && i + 1 < string_len(t) && (string_at(t, i) == "." || string_at(t, i) == ")") && string_at(t, i + 1) == " " is
+        return string_slice(t, 0, i) + "."
+    end
+    return ""
+end
+
+fn list_rest(t: string, marker: string) -> string is
+    if marker == "•" is return string_trim(string_slice(t, 2, string_len(t))) end
+    return string_trim(string_slice(t, string_len(marker) + 1, string_len(t)))
+end
+
+fn indent_of(line: string) -> int is
+    let mut w: int = 0
+    let mut i: int = 0
+    while i < string_len(line) is
+        let c: string = string_at(line, i)
+        if c == " " is
+            w += 1
+        else if c == "\t" is
+            w += 4
+        else is
+            return w
+        end
+        i += 1
+    end
+    return w
+end
+
+fn is_table_sep(line: string) -> bool is
+    let t: string = string_trim(line)
+    if !string_contains(t, "-") || !string_contains(t, "|") is return false end
+    let rest: string = string_replace(string_replace(string_replace(string_replace(t, "|", ""), "-", ""), ":", ""), " ", "")
+    return rest == ""
+end
+
+fn split_cells(line: string) -> string is
+    let mut t: string = string_trim(line)
+    if string_starts_with(t, "|") is t = string_slice(t, 1, string_len(t)) end
+    if string_ends_with(t, "|") is t = string_slice(t, 0, string_len(t) - 1) end
+    let cells: [string] = string_split(t, "|")
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < array_len(cells) is
+        if i > 0 is out = out + "\t" end
+        out = out + inline(string_trim(cells[i])).text
+        i += 1
+    end
+    return out
+end
+
+;; Starts a new block of a kind that interrupts a paragraph?
+fn interrupts(t: string) -> bool is
+    return string_starts_with(t, "```") || string_starts_with(t, "~~~") || heading_level(t) > 0 || string_starts_with(t, ">") || is_rule(t) || list_marker(t) != ""
+end
+
+pub fn parse(src: string, max_blocks: int) -> [Block] is
+    let lines: [string] = util::lines_of(src)
+    let mut out: [Block] = []
+    let mut i: int = 0
+    let total: int = array_len(lines)
+    while i < total && array_len(out) < max_blocks is
+        let raw: string = lines[i]
+        let t: string = string_trim(raw)
+        if t == "" is
+            i += 1
+        else if string_starts_with(t, "```") || string_starts_with(t, "~~~") is
+            let fence: string = string_slice(t, 0, 3)
+            let lang: string = string_lower(string_trim(string_slice(t, 3, string_len(t))))
+            let mut body: string = ""
+            let mut first: bool = true
+            i += 1
+            while i < total && !string_starts_with(string_trim(lines[i]), fence) is
+                if !first is body = body + "\n" end
+                body = body + string_replace(lines[i], "\t", "    ")
+                first = false
+                i += 1
+            end
+            i += 1
+            let mut b: Block = block("code", body)
+            b.lang = lang
+            out = array_push(out, b)
+        else if heading_level(t) > 0 is
+            let lv: int = heading_level(t)
+            let il: Inline = inline(string_slice(t, lv + 1, string_len(t)))
+            let mut b: Block = block("h" + to_string(if lv > 4 then 4 else lv), il.text)
+            b.urls = il.urls
+            b.names = il.names
+            out = array_push(out, b)
+            i += 1
+        else if is_rule(t) is
+            out = array_push(out, block("rule", ""))
+            i += 1
+        else if string_starts_with(t, ">") is
+            let mut parts: [string] = []
+            while i < total && string_starts_with(string_trim(lines[i]), ">") is
+                let q: string = string_trim(lines[i])
+                parts = array_push(parts, string_trim(string_slice(q, 1, string_len(q))))
+                i += 1
+            end
+            let il: Inline = inline(util::join(parts, " "))
+            let mut b: Block = block("quote", il.text)
+            b.urls = il.urls
+            b.names = il.names
+            out = array_push(out, b)
+        else if string_contains(t, "|") && i + 1 < total && is_table_sep(lines[i + 1]) is
+            let mut rows: [string] = [split_cells(t)]
+            i += 2
+            while i < total && string_contains(lines[i], "|") && string_trim(lines[i]) != "" is
+                rows = array_push(rows, split_cells(lines[i]))
+                i += 1
+            end
+            let mut b: Block = block("table", "")
+            b.rows = rows
+            out = array_push(out, b)
+        else if list_marker(t) != "" is
+            let marker: string = list_marker(t)
+            let mut text: string = list_rest(t, marker)
+            let mut shown: string = util::own(marker)
+            if marker == "•" && string_starts_with(text, "[ ] ") is
+                shown = "☐"
+                text = string_slice(text, 4, string_len(text))
+            else if marker == "•" && (string_starts_with(text, "[x] ") || string_starts_with(text, "[X] ")) is
+                shown = "☑"
+                text = string_slice(text, 4, string_len(text))
+            end
+            let il: Inline = inline(text)
+            let mut b: Block = block("li", il.text)
+            b.level = indent_of(raw) / 2
+            if b.level > 4 is b.level = 4 end
+            b.marker = shown
+            b.urls = il.urls
+            b.names = il.names
+            out = array_push(out, b)
+            i += 1
+        else is
+            let mut parts: [string] = []
+            while i < total && string_trim(lines[i]) != "" && (array_len(parts) == 0 || !interrupts(string_trim(lines[i]))) is
+                parts = array_push(parts, string_trim(lines[i]))
+                i += 1
+            end
+            let il: Inline = inline(util::join(parts, " "))
+            if il.text != "" || array_len(il.urls) > 0 is
+                let mut b: Block = block("p", il.text)
+                b.urls = il.urls
+                b.names = il.names
+                out = array_push(out, b)
+            end
+        end
+    end
+    return out
+end
+
+;; Every link of the document, once (for a "Links" list under a README).
+pub fn all_links(blocks: [Block]) -> [Block] is
+    let mut seen: [string] = []
+    let mut out: [Block] = []
+    let mut i: int = 0
+    while i < array_len(blocks) is
+        let b: Block = blocks[i]
+        let mut k: int = 0
+        while k < array_len(b.urls) is
+            if !util::has(seen, b.urls[k]) is
+                seen = array_push(seen, b.urls[k])
+                let mut l: Block = block("link", b.names[k])
+                l.lang = b.urls[k]
+                out = array_push(out, l)
+            end
+            k += 1
+        end
+        i += 1
+    end
+    return out
+end
