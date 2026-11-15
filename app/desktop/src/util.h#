@@ -1,0 +1,255 @@
+fn ascii_chars() -> string is
+    return " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz" + "\{" + "|" + "}" + "~\n\t\r"
+end
+
+;; One character of `s` as its own string. `string_at` hands out a shared one-byte buffer that the next
+;; call overwrites, so a character that is stored (in a token, an array) must come from here.
+pub fn ch(s: string, i: int) -> string is
+    return string_slice(s, i, i + 1)
+end
+
+pub fn is_ascii(c: string) -> bool is
+    if c == "" is return false end
+    return string_find(ascii_chars(), c) >= 0
+end
+
+pub fn is_digit(c: string) -> bool is
+    if c == "" is return false end
+    return string_find("0123456789", c) >= 0
+end
+
+pub fn is_alpha(c: string) -> bool is
+    if c == "" is return false end
+    return string_find("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_", c) >= 0
+end
+
+pub fn is_alnum(c: string) -> bool is
+    return is_alpha(c) || is_digit(c)
+end
+
+pub fn is_space(c: string) -> bool is
+    return c == " " || c == "\t" || c == "\r" || c == "\n"
+end
+
+;; A private copy of a string. The GUI library hands out strings that live in a buffer which the next
+;; call overwrites (hlib API, "Własność i pamięć"): copy them the moment you get them.
+pub fn own(s: string) -> string is
+    return string_slice(s, 0, string_len(s))
+end
+
+;; The first `n` bytes of `s`, shortened to a whole character; adds "…" when something was cut.
+pub fn cut(s: string, n: int) -> string is
+    let len: int = string_len(s)
+    if len <= n is return s end
+    let mut i: int = n
+    let mut guard: int = 0
+    while i > 0 && !is_ascii(string_at(s, i - 1)) && guard < 8 is
+        i -= 1
+        guard += 1
+    end
+    if i <= 0 is return "" end
+    return string_slice(s, 0, i) + "…"
+end
+
+;; Same, without the ellipsis (for text that is split into lines).
+pub fn cut_plain(s: string, n: int) -> string is
+    let len: int = string_len(s)
+    if len <= n is return s end
+    let mut i: int = n
+    let mut guard: int = 0
+    while i > 0 && !is_ascii(string_at(s, i - 1)) && guard < 8 is
+        i -= 1
+        guard += 1
+    end
+    return string_slice(s, 0, i)
+end
+
+pub fn join(items: [string], sep: string) -> string is
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < array_len(items) is
+        if i > 0 is out = out + sep end
+        out = out + items[i]
+        i += 1
+    end
+    return out
+end
+
+pub fn has(items: [string], needle: string) -> bool is
+    let mut i: int = 0
+    while i < array_len(items) is
+        if items[i] == needle is return true end
+        i += 1
+    end
+    return false
+end
+
+pub fn contains_ci(hay: string, needle: string) -> bool is
+    if needle == "" is return true end
+    return string_contains(string_lower(hay), string_lower(needle))
+end
+
+;; POSIX single-quote a value for a shell command line.
+pub fn sq(s: string) -> string is
+    return "'" + string_replace(s, "'", "'\\''") + "'"
+end
+
+pub fn run(cmd: string) -> int is
+    return shell_status(cmd)
+end
+
+fn shell_status(cmd: string) -> int is
+    let out: string = shell("(" + cmd + ") >/dev/null 2>&1; echo $?")
+    return str_to_int(string_trim(out))
+end
+
+pub fn capture(cmd: string) -> string is
+    return string_trim(shell(cmd))
+end
+
+pub fn mkdir_p(dir: string) -> int is
+    return run("mkdir -p " + sq(dir))
+end
+
+pub fn home() -> string is
+    let h: string = env_get("HOME")
+    if h != "" is return h end
+    return "/tmp"
+end
+
+pub fn now_s() -> int is
+    return time_ms() / 1000
+end
+
+;; Colour as the GUI library wants it: 0xRRGGBBAA in one integer.
+pub fn rgb(r: int, g: int, b: int) -> int is
+    return r * 16777216 + g * 65536 + b * 256 + 255
+end
+
+pub fn rgba(r: int, g: int, b: int, a: int) -> int is
+    return r * 16777216 + g * 65536 + b * 256 + a
+end
+
+;; 1234 -> "1.2k", 1500000 -> "1.5M"
+pub fn count_str(n: int) -> string is
+    if n < K1 is return to_string(n) end
+    if n < K100 is
+        let tenth: int = (n % K1) / 100
+        return to_string(n / K1) + "." + to_string(tenth) + "k"
+    end
+    if n < M1 is return to_string(n / K1) + "k" end
+    let tenth: int = (n % M1) / 100000
+    return to_string(n / M1) + "." + to_string(tenth) + "M"
+end
+
+const ONE_HOUR: int = 3600
+const ONE_DAY: int = 86400
+const K1: int = 1000
+const K100: int = 100000
+const M1: int = 1000000
+const KIB: int = 1024
+const MIB: int = 1048576
+
+pub fn bytes_str(n: int) -> string is
+    if n < KIB is return to_string(n) + " B" end
+    if n < MIB is return to_string(n / KIB) + " KB" end
+    let tenth: int = ((n % MIB) * 10) / MIB
+    return to_string(n / MIB) + "." + to_string(tenth) + " MB"
+end
+
+;; "2026-11-13T12:00:00Z" -> "2026-11-13"
+pub fn date_of(iso: string) -> string is
+    if string_len(iso) < 10 is return iso end
+    return string_slice(iso, 0, 10)
+end
+
+pub fn age_str(seconds: int) -> string is
+    if seconds < 60 is return "just now" end
+    if seconds < ONE_HOUR is return to_string(seconds / 60) + " min ago" end
+    if seconds < ONE_DAY is return to_string(seconds / 3600) + " h ago" end
+    return to_string(seconds / 86400) + " d ago"
+end
+
+;; Percent-encodes one URL path segment.
+pub fn url_enc(s: string) -> string is
+    let safe: string = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < string_len(s) is
+        let c: string = string_at(s, i)
+        if string_find(safe, c) >= 0 is
+            out = out + c
+        else is
+            out = out + shell_hex(c)
+        end
+        i += 1
+    end
+    return out
+end
+
+;; "%XX" for one byte, through printf (only reached for characters outside the safe set).
+fn shell_hex(c: string) -> string is
+    if c == " " is return "%20" end
+    if c == "#" is return "%23" end
+    if c == "?" is return "%3F" end
+    if c == "&" is return "%26" end
+    if c == "+" is return "%2B" end
+    if c == "%" is return "%25" end
+    if c == "\"" is return "%22" end
+    if c == "<" is return "%3C" end
+    if c == ">" is return "%3E" end
+    return string_trim(shell("printf '%%%02X' \"'" + c + "\" 2>/dev/null"))
+end
+
+pub fn url_enc_path(p: string) -> string is
+    let parts: [string] = string_split(p, "/")
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < array_len(parts) is
+        if i > 0 is out = out + "/" end
+        out = out + url_enc(parts[i])
+        i += 1
+    end
+    return out
+end
+
+;; "a/b/c.txt" -> "c.txt"      "dir" -> "dir"
+pub fn base(path: string) -> string is
+    let mut cut_at: int = -1
+    let mut i: int = 0
+    while i < string_len(path) is
+        if string_at(path, i) == "/" is cut_at = i end
+        i += 1
+    end
+    if cut_at < 0 is return path end
+    return string_slice(path, cut_at + 1, string_len(path))
+end
+
+;; "a/b/c.txt" -> "a/b"      "c.txt" -> ""
+pub fn parent(path: string) -> string is
+    let mut cut_at: int = -1
+    let mut i: int = 0
+    while i < string_len(path) is
+        if string_at(path, i) == "/" is cut_at = i end
+        i += 1
+    end
+    if cut_at < 0 is return "" end
+    return string_slice(path, 0, cut_at)
+end
+
+pub fn ext_of(path: string) -> string is
+    let name: string = base(path)
+    let mut dot: int = -1
+    let mut i: int = 0
+    while i < string_len(name) is
+        if string_at(name, i) == "." is dot = i end
+        i += 1
+    end
+    if dot < 0 is return "" end
+    return string_lower(string_slice(name, dot + 1, string_len(name)))
+end
+
+;; Lines of a text (\r\n and \n).
+pub fn lines_of(text: string) -> [string] is
+    return string_split(string_replace(text, "\r", ""), "\n")
+end
