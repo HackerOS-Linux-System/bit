@@ -1,0 +1,497 @@
+mod util
+mod jsonx
+mod hk
+
+;; ── The data bit.io shows ────────────────────────────────────────────────────
+;; Mirrors app/phones/android (data/Models.kt): the library index, GitHub repositories, manifests,
+;; releases and file trees.
+
+pub struct Lib is
+    pub name: string
+    pub target: string
+    pub description: string
+    pub tags: [string]
+    pub author: string
+    pub lang: string          ;; hsharp | hackerlang | hackerscript | any
+    pub rev: string
+    pub checksum: string
+end
+
+pub struct Index is
+    pub updated: string
+    pub libs: [Lib]
+end
+
+pub fn empty_index() -> Index is
+    return Index { updated: "", libs: [] }
+end
+
+;; ── Languages ────────────────────────────────────────────────────────────────
+
+pub fn lang_ids() -> [string] is
+    return ["hsharp", "hackerlang", "hackerscript"]
+end
+
+pub fn lang_label(id: string) -> string is
+    if id == "hsharp" is return "H#" end
+    if id == "hackerlang" is return "Hacker Lang" end
+    if id == "hackerscript" is return "HackerScript" end
+    return "any"
+end
+
+;; Accepts every spelling people use: "h#", "H-Sharp", "hl", "Hacker Lang", "hcs", ...
+pub fn lang_normalize(raw: string) -> string is
+    let t: string = string_replace(string_replace(string_lower(string_trim(raw)), " ", ""), "-", "")
+    if t == "h#" || t == "hsharp" || t == "hsh" is return "hsharp" end
+    if t == "hl" || t == "hackerlang" is return "hackerlang" end
+    if t == "hs" || t == "hcs" || t == "hackerscript" is return "hackerscript" end
+    return "any"
+end
+
+fn lang_from_tags(tags: [string]) -> string is
+    let mut i: int = 0
+    while i < array_len(tags) is
+        let l: string = lang_normalize(tags[i])
+        if l != "any" is return l end
+        i += 1
+    end
+    return "any"
+end
+
+;; ── Index ────────────────────────────────────────────────────────────────────
+
+fn lib_from(o: jsonx::Obj) -> Lib is
+    let tags: [string] = jsonx::string_array(jsonx::get(o, "tags"))
+    let explicit: string = lang_normalize(jsonx::get_str(o, "lang"))
+    let mut target: string = jsonx::get_str(o, "target")
+    if target == "" is target = jsonx::get_str(o, "url") end
+    if target == "" is target = jsonx::get_str(o, "git") end
+    return Lib {
+        name: jsonx::get_str(o, "name"),
+        target: target,
+        description: jsonx::get_str(o, "description"),
+        tags: tags,
+        author: jsonx::get_str(o, "author"),
+        lang: if explicit != "any" then explicit else lang_from_tags(tags),
+        rev: jsonx::get_str(o, "rev"),
+        checksum: jsonx::get_str(o, "checksum")
+    }
+end
+
+;; Libraries by name, case-insensitive (insertion sort: the index has a few dozen entries).
+fn sort_libs(libs: [Lib]) -> [Lib] is
+    let mut a: [Lib] = libs
+    let mut i: int = 1
+    while i < array_len(a) is
+        let x: Lib = a[i]
+        let key: string = string_lower(x.name)
+        let mut j: int = i - 1
+        while j >= 0 && string_lower(a[j].name) > key is
+            a[j + 1] = a[j]
+            j -= 1
+        end
+        a[j + 1] = x
+        i += 1
+    end
+    return a
+end
+
+;; Index text -> Index; accepts `{"updated_at": .., "libraries": [..]}` and a bare `[..]`.
+pub fn parse_index(text: string) -> Index is
+    let cleaned: string = string_trim(jsonx::strip_trailing_commas(text))
+    let mut raw_list: string = util::own(cleaned)
+    let mut updated: string = ""
+    if !string_starts_with(cleaned, "[") is
+        let o: jsonx::Obj = jsonx::parse_object(cleaned)
+        raw_list = jsonx::get(o, "libraries")
+        updated = jsonx::get_str(o, "updated_at")
+    end
+    let parts: [string] = jsonx::items(raw_list)
+    let mut libs: [Lib] = []
+    let mut i: int = 0
+    while i < array_len(parts) is
+        let l: Lib = lib_from(jsonx::parse_object(parts[i]))
+        if l.name != "" is libs = array_push(libs, l) end
+        i += 1
+    end
+    return Index { updated: updated, libs: sort_libs(libs) }
+end
+
+pub fn find_lib(idx: Index, name: string) -> int is
+    let mut i: int = 0
+    while i < array_len(idx.libs) is
+        if string_lower(idx.libs[i].name) == string_lower(name) is return i end
+        i += 1
+    end
+    return -1
+end
+
+;; All tags of the index, each once, in the order they first appear.
+pub fn all_tags(idx: Index) -> [string] is
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(idx.libs) is
+        let t: [string] = idx.libs[i].tags
+        let mut k: int = 0
+        while k < array_len(t) is
+            if !util::has(out, t[k]) && lang_normalize(t[k]) == "any" is out = array_push(out, t[k]) end
+            k += 1
+        end
+        i += 1
+    end
+    return out
+end
+
+;; The libraries that match the search text, the language and the tag ("" = no filter).
+pub fn filter(idx: Index, query: string, lang: string, tag: string) -> [Lib] is
+    let mut out: [Lib] = []
+    let q: string = string_trim(query)
+    let mut i: int = 0
+    while i < array_len(idx.libs) is
+        let l: Lib = idx.libs[i]
+        let mut ok: bool = true
+        if lang != "" && l.lang != lang is ok = false end
+        if ok && tag != "" && !util::has(l.tags, tag) is ok = false end
+        if ok && q != "" is
+            let hay: string = l.name + " " + l.description + " " + l.author + " " + util::join(l.tags, " ")
+            if !util::contains_ci(hay, q) is ok = false end
+        end
+        if ok is out = array_push(out, l) end
+        i += 1
+    end
+    return out
+end
+
+;; ── GitHub repositories ──────────────────────────────────────────────────────
+;; `https://github.com/o/r(.git)` or a folder of one (`.../tree/main/libhammer`).
+
+pub struct Gh is
+    pub ok: bool
+    pub owner: string
+    pub repo: string
+    pub ref: string       ;; branch/tag of a /tree/ URL, "" = none
+    pub dir: string       ;; folder inside the repository, "" = the root
+end
+
+pub fn no_gh() -> Gh is
+    return Gh { ok: false, owner: "", repo: "", ref: "", dir: "" }
+end
+
+pub fn parse_github(url: string) -> Gh is
+    let mut u: string = string_trim(url)
+    if string_starts_with(u, "https://github.com/") is
+        u = string_slice(u, 19, string_len(u))
+    else if string_starts_with(u, "http://github.com/") is
+        u = string_slice(u, 18, string_len(u))
+    else is
+        return no_gh()
+    end
+    let h1: int = string_find(u, "#")
+    if h1 >= 0 is u = string_slice(u, 0, h1) end
+    let q1: int = string_find(u, "?")
+    if q1 >= 0 is u = string_slice(u, 0, q1) end
+    let parts: [string] = string_split(u, "/")
+    let mut segs: [string] = []
+    let mut i: int = 0
+    while i < array_len(parts) is
+        if parts[i] != "" is segs = array_push(segs, parts[i]) end
+        i += 1
+    end
+    if array_len(segs) < 2 is return no_gh() end
+    let mut repo: string = segs[1]
+    if string_ends_with(repo, ".git") is repo = string_slice(repo, 0, string_len(repo) - 4) end
+    let mut ref: string = ""
+    let mut dir: string = ""
+    if array_len(segs) >= 4 && segs[2] == "tree" is
+        ref = segs[3]
+        let mut k: int = 4
+        while k < array_len(segs) is
+            if segs[k] == ".." || segs[k] == "." is
+                dir = ""
+                k = array_len(segs)
+            else is
+                if dir != "" is dir = dir + "/" end
+                dir = dir + segs[k]
+            end
+            k += 1
+        end
+    end
+    return Gh { ok: true, owner: segs[0], repo: repo, ref: ref, dir: dir }
+end
+
+;; owner/repo[/dir] - cache keys and display.
+pub fn slug(g: Gh) -> string is
+    if g.dir == "" is return g.owner + "/" + g.repo end
+    return g.owner + "/" + g.repo + "/" + g.dir
+end
+
+;; A path inside the library -> the path inside the repository.
+pub fn repo_path(g: Gh, p: string) -> string is
+    if g.dir == "" is return p end
+    if p == "" is return g.dir end
+    return g.dir + "/" + p
+end
+
+pub fn safe_url(url: string) -> string is
+    let u: string = string_trim(url)
+    if string_starts_with(u, "https://") || string_starts_with(u, "http://") is return u end
+    return ""
+end
+
+;; ── Dependencies and compatibility notes ─────────────────────────────────────
+
+pub struct Dep is
+    pub name: string
+    pub spec: string
+    pub kind: string      ;; index | git | path | unknown
+end
+
+fn dep_kind(name: string, spec: string, idx: Index) -> string is
+    if string_starts_with(spec, "git ") || string_starts_with(spec, "http://") || string_starts_with(spec, "https://") is return "git" end
+    if string_starts_with(spec, "path") is return "path" end
+    if find_lib(idx, name) >= 0 is return "index" end
+    return "unknown"
+end
+
+pub fn deps_of(h: hk::Hk, idx: Index) -> [Dep] is
+    let names: [string] = hk::keys_of(h, "dependencies")
+    let mut out: [Dep] = []
+    let mut i: int = 0
+    while i < array_len(names) is
+        let name: string = names[i]
+        let own: string = hk::get(h, "dependencies", name)
+        let mut spec: string = own
+        if spec == "" is
+            let mut subs: [string] = []
+            let mut k: int = 0
+            while k < array_len(h.keys) is
+                if h.secs[k] == "dependencies" && string_starts_with(h.keys[k], name + ".") is
+                    subs = array_push(subs, string_slice(h.keys[k], string_len(name) + 1, string_len(h.keys[k])) + "=" + h.vals[k])
+                end
+                k += 1
+            end
+            spec = util::join(subs, ", ")
+        end
+        out = array_push(out, Dep { name: name, spec: spec, kind: dep_kind(name, spec, idx) })
+        i += 1
+    end
+    return out
+end
+
+pub struct Note is
+    pub ok: bool
+    pub text: string
+end
+
+;; Things worth knowing before depending on a library, read from its manifest.
+pub fn compat_notes(l: Lib, h: hk::Hk, idx: Index) -> [Note] is
+    let mut notes: [Note] = []
+    let toolchain: string = hk::get(h, "edition", "toolchain")
+    if toolchain != "" is
+        notes = array_push(notes, Note { ok: true, text: "Needs the H# toolchain " + toolchain + " or newer (h# --version)." })
+    end
+    let edition: string = hk::get(h, "edition", "edition")
+    if edition != "" is
+        notes = array_push(notes, Note { ok: true, text: "Edition " + edition + " (files without using \"<year>\" use it)." })
+    end
+    let link: string = hk::get(h, "build", "link")
+    if link != "" && link != "static" is
+        notes = array_push(notes, Note { ok: false, text: "[build] link => " + link + " - bit only links statically and rejects this." })
+    end
+    let platform: string = hk::get(h, "build", "platform")
+    if platform != "" is
+        notes = array_push(notes, Note { ok: true, text: "Cross-compiles for " + platform + "." })
+    end
+    let pkg_name: string = hk::get(h, "package", "name")
+    if pkg_name != "" && string_lower(pkg_name) != string_lower(l.name) is
+        notes = array_push(notes, Note { ok: false, text: "The manifest calls this package \"" + pkg_name + "\", the index calls it \"" + l.name + "\"." })
+    end
+    let deps: [Dep] = deps_of(h, idx)
+    let mut i: int = 0
+    while i < array_len(deps) is
+        if deps[i].kind == "unknown" is
+            notes = array_push(notes, Note { ok: false, text: "Dependency \"" + deps[i].name + "\" is not in the index (and isn't a git/path dependency)." })
+        end
+        i += 1
+    end
+    return notes
+end
+
+;; ── GitHub entities ──────────────────────────────────────────────────────────
+
+pub struct Meta is
+    pub stars: int
+    pub forks: int
+    pub issues: int
+    pub license: string
+    pub pushed: string
+    pub homepage: string
+    pub archived: bool
+end
+
+pub fn parse_meta(json: string) -> Meta is
+    let o: jsonx::Obj = jsonx::parse_object(json)
+    let lic: jsonx::Obj = jsonx::get_obj(o, "license")
+    let mut license: string = jsonx::get_str(lic, "spdx_id")
+    if license == "NOASSERTION" is license = "" end
+    return Meta {
+        stars: jsonx::get_int(o, "stargazers_count"),
+        forks: jsonx::get_int(o, "forks_count"),
+        issues: jsonx::get_int(o, "open_issues_count"),
+        license: license,
+        pushed: jsonx::get_str(o, "pushed_at"),
+        homepage: jsonx::get_str(o, "homepage"),
+        archived: jsonx::get_bool(o, "archived")
+    }
+end
+
+pub struct Asset is
+    pub name: string
+    pub size: int
+    pub downloads: int
+    pub url: string
+end
+
+pub struct Release is
+    pub tag: string
+    pub name: string
+    pub date: string
+    pub prerelease: bool
+    pub url: string
+    pub body: string
+    pub assets: [Asset]
+    pub tag_only: bool
+end
+
+pub fn parse_releases(json: string, g: Gh) -> [Release] is
+    let parts: [string] = jsonx::items(json)
+    let base: string = "https://github.com/" + g.owner + "/" + g.repo + "/releases/tag/"
+    let mut out: [Release] = []
+    let mut i: int = 0
+    while i < array_len(parts) is
+        let o: jsonx::Obj = jsonx::parse_object(parts[i])
+        i += 1
+        let tag: string = jsonx::get_str(o, "tag_name")
+        if tag == "" is continue end
+        if jsonx::get_bool(o, "draft") is continue end
+        let raw_assets: [string] = jsonx::items(jsonx::get(o, "assets"))
+        let mut assets: [Asset] = []
+        let mut k: int = 0
+        while k < array_len(raw_assets) is
+            let a: jsonx::Obj = jsonx::parse_object(raw_assets[k])
+            assets = array_push(assets, Asset {
+                name: jsonx::get_str(a, "name"),
+                size: jsonx::get_int(a, "size"),
+                downloads: jsonx::get_int(a, "download_count"),
+                url: jsonx::get_str(a, "browser_download_url")
+            })
+            k += 1
+        end
+        let published: string = jsonx::get_str(o, "published_at")
+        let mut url: string = jsonx::get_str(o, "html_url")
+        if url == "" is url = base + util::url_enc(tag) end
+        out = array_push(out, Release {
+            tag: tag,
+            name: jsonx::get_str(o, "name"),
+            date: if published != "" then published else jsonx::get_str(o, "created_at"),
+            prerelease: jsonx::get_bool(o, "prerelease"),
+            url: url,
+            body: util::cut_plain(jsonx::get_str(o, "body"), RELEASE_BODY_MAX),
+            assets: assets,
+            tag_only: false
+        })
+    end
+    return out
+end
+
+const RELEASE_BODY_MAX: int = 6000
+
+;; No releases published: `/tags` rows become "tag only" releases.
+pub fn parse_tags(json: string, g: Gh) -> [Release] is
+    let parts: [string] = jsonx::items(json)
+    let base: string = "https://github.com/" + g.owner + "/" + g.repo + "/releases/tag/"
+    let mut out: [Release] = []
+    let mut i: int = 0
+    while i < array_len(parts) is
+        let o: jsonx::Obj = jsonx::parse_object(parts[i])
+        let n: string = jsonx::get_str(o, "name")
+        if n != "" is
+            out = array_push(out, Release { tag: n, name: "", date: "", prerelease: false, url: base + util::url_enc(n), body: "", assets: [], tag_only: true })
+        end
+        i += 1
+    end
+    return out
+end
+
+pub struct Item is
+    pub path: string
+    pub is_dir: bool
+    pub size: int
+end
+
+pub struct Tree is
+    pub items: [Item]
+    pub truncated: bool
+end
+
+pub fn empty_tree() -> Tree is
+    return Tree { items: [], truncated: false }
+end
+
+pub fn parse_tree(json: string, g: Gh) -> Tree is
+    let o: jsonx::Obj = jsonx::parse_object(json)
+    let parts: [string] = jsonx::items(jsonx::get(o, "tree"))
+    let mut items: [Item] = []
+    let mut i: int = 0
+    while i < array_len(parts) is
+        let t: jsonx::Obj = jsonx::parse_object(parts[i])
+        i += 1
+        let kind: string = jsonx::get_str(t, "type")
+        if kind != "blob" && kind != "tree" is continue end
+        let mut path: string = jsonx::get_str(t, "path")
+        if g.dir != "" is
+            if !string_starts_with(path, g.dir + "/") is continue end
+            path = string_slice(path, string_len(g.dir) + 1, string_len(path))
+        end
+        items = array_push(items, Item { path: path, is_dir: kind == "tree", size: jsonx::get_int(t, "size") })
+    end
+    return Tree { items: items, truncated: jsonx::get_bool(o, "truncated") }
+end
+
+;; The direct children of `dir` ("" = root): folders first, then files, each by name.
+pub fn children(t: Tree, dir: string) -> [Item] is
+    let prefix: string = if dir == "" then "" else dir + "/"
+    let mut dirs: [Item] = []
+    let mut files: [Item] = []
+    let mut i: int = 0
+    while i < array_len(t.items) is
+        let it: Item = t.items[i]
+        i += 1
+        if !string_starts_with(it.path, prefix) is continue end
+        let rest: string = string_slice(it.path, string_len(prefix), string_len(it.path))
+        if rest == "" || string_find(rest, "/") >= 0 is continue end
+        if it.is_dir is
+            dirs = array_push(dirs, it)
+        else is
+            files = array_push(files, it)
+        end
+    end
+    return array_concat(sort_items(dirs), sort_items(files))
+end
+
+fn sort_items(items: [Item]) -> [Item] is
+    let mut a: [Item] = items
+    let mut i: int = 1
+    while i < array_len(a) is
+        let x: Item = a[i]
+        let key: string = string_lower(x.path)
+        let mut j: int = i - 1
+        while j >= 0 && string_lower(a[j].path) > key is
+            a[j + 1] = a[j]
+            j -= 1
+        end
+        a[j + 1] = x
+        i += 1
+    end
+    return a
+end
