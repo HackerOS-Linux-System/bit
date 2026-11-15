@@ -1,0 +1,160 @@
+mod util
+mod hk
+
+;; ── Disk: cache, settings, bundled data ──────────────────────────────────────
+;;   cache     $XDG_CACHE_HOME/bit-io  (~/.cache/bit-io)     one file per entry: "<epoch seconds>\n<body>"
+;;   settings  $XDG_CONFIG_HOME/bit-io/settings.hk           Bit.hk-style, the token is kept 0600
+;;   data      repository.json (index snapshot) and docs.md shipped with the app
+
+pub fn cache_dir() -> string is
+    let x: string = env_get("XDG_CACHE_HOME")
+    if x != "" is return x + "/bit-io" end
+    return util::home() + "/.cache/bit-io"
+end
+
+pub fn config_dir() -> string is
+    let x: string = env_get("XDG_CONFIG_HOME")
+    if x != "" is return x + "/bit-io" end
+    return util::home() + "/.config/bit-io"
+end
+
+;; Key -> a safe file name: unusual characters become "_", plus a checksum so two keys that differ
+;; only in such characters still get two files.
+fn file_name(key: string) -> string is
+    let table: string = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz" + "\{" + "|" + "}" + "~"
+    let safe: string = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+    let mut out: string = ""
+    let mut h: int = 5381
+    let mut i: int = 0
+    while i < string_len(key) is
+        let c: string = string_at(key, i)
+        let idx: int = string_find(table, c)
+        h = (h * 33 + idx + 2) % HASH_MOD
+        if string_find(safe, c) >= 0 is
+            out = out + c
+        else is
+            out = out + "_"
+        end
+        i += 1
+    end
+    if string_len(out) > NAME_MAX is out = string_slice(out, 0, NAME_MAX) end
+    return out + "-" + to_string(h)
+end
+
+const HASH_MOD: int = 1000000007
+const NAME_MAX: int = 120
+
+pub struct Cached is
+    pub found: bool
+    pub age: int          ;; seconds since it was saved
+    pub body: string
+end
+
+pub fn none() -> Cached is
+    return Cached { found: false, age: 0, body: "" }
+end
+
+pub fn get(key: string) -> Cached is
+    let path: string = cache_dir() + "/" + file_name(key)
+    if !file_exists(path) is return none() end
+    let raw: string = file_read(path)
+    let nl: int = string_find(raw, "\n")
+    if nl < 0 is return none() end
+    let saved: int = str_to_int(string_slice(raw, 0, nl))
+    if saved <= 0 is return none() end
+    let age: int = util::now_s() - saved
+    if age < 0 is return Cached { found: true, age: 0, body: string_slice(raw, nl + 1, string_len(raw)) } end
+    return Cached { found: true, age: age, body: string_slice(raw, nl + 1, string_len(raw)) }
+end
+
+pub fn put(key: string, body: string) is
+    util::mkdir_p(cache_dir())
+    file_write(cache_dir() + "/" + file_name(key), to_string(util::now_s()) + "\n" + body)
+end
+
+pub fn forget(key: string) is
+    let path: string = cache_dir() + "/" + file_name(key)
+    if file_exists(path) is util::run("rm -f " + util::sq(path)) end
+end
+
+pub fn clear() is
+    let d: string = cache_dir()
+    if d != "" && d != "/" && string_ends_with(d, "bit-io") is
+        util::run("rm -rf " + util::sq(d))
+    end
+end
+
+;; "1.4 MB in 37 files"
+pub fn usage() -> string is
+    let d: string = cache_dir()
+    if !dir_exists(d) is return "empty" end
+    let files: string = util::capture("ls -1 " + util::sq(d) + " 2>/dev/null | wc -l")
+    let kb: string = util::capture("du -sk " + util::sq(d) + " 2>/dev/null | cut -f1")
+    return util::bytes_str(str_to_int(kb) * 1024) + " in " + files + " files"
+end
+
+;; ── Settings ─────────────────────────────────────────────────────────────────
+
+pub struct Settings is
+    pub theme: string     ;; system | light | dark | nord | dracula | tokyo | glass
+    pub token: string     ;; GitHub personal access token ("" = anonymous)
+end
+
+pub fn default_settings() -> Settings is
+    return Settings { theme: "system", token: "" }
+end
+
+fn settings_path() -> string is
+    return config_dir() + "/settings.hk"
+end
+
+pub fn load_settings() -> Settings is
+    let mut s: Settings = default_settings()
+    if !file_exists(settings_path()) is return s end
+    let h: hk::Hk = hk::parse(file_read(settings_path()))
+    let t: string = hk::get(h, "settings", "theme")
+    if t != "" is s.theme = t end
+    s.token = hk::get(h, "settings", "token")
+    return s
+end
+
+pub fn save_settings(s: Settings) is
+    util::mkdir_p(config_dir())
+    let text: string = "! bit.io Desktop settings\n[settings]\n-> theme => " + s.theme + "\n-> token => " + s.token + "\n"
+    file_write(settings_path(), text)
+    util::run("chmod 600 " + util::sq(settings_path()))
+end
+
+;; ── Data shipped with the app ────────────────────────────────────────────────
+
+fn data_dirs() -> [string] is
+    let mut out: [string] = []
+    let own: string = env_get("BIT_IO_DATA")
+    if own != "" is out = array_push(out, own) end
+    let args: [string] = env::args()
+    if array_len(args) > 0 is
+        let exe_dir: string = util::parent(args[0])
+        if exe_dir != "" is
+            out = array_push(out, exe_dir + "/data")
+            out = array_push(out, exe_dir + "/../share/bit-io")
+            out = array_push(out, exe_dir + "/../data")
+        end
+    end
+    out = array_push(out, "data")
+    out = array_push(out, "app/desktop/data")
+    out = array_push(out, "/usr/share/bit-io")
+    out = array_push(out, "/usr/local/share/bit-io")
+    return out
+end
+
+;; Contents of a data file, "" when it is nowhere to be found.
+pub fn read_data(name: string) -> string is
+    let dirs: [string] = data_dirs()
+    let mut i: int = 0
+    while i < array_len(dirs) is
+        let p: string = dirs[i] + "/" + name
+        if file_exists(p) is return file_read(p) end
+        i += 1
+    end
+    return ""
+end
