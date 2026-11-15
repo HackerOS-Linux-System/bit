@@ -1,0 +1,140 @@
+mod util
+
+;; ── Bit.hk reader ────────────────────────────────────────────────────────────
+;; Section -> key -> value, flat. `--> sub => v` entries become "key.sub". Same rules as the
+;; website and the phone apps: `!`/`;;`/`#` lines are comments, `[Default build]`, `[default_build]`
+;; and `[default-build]` are one section.
+
+pub struct Hk is
+    pub secs: [string]
+    pub keys: [string]
+    pub vals: [string]
+end
+
+pub fn empty() -> Hk is
+    return Hk { secs: [], keys: [], vals: [] }
+end
+
+pub fn norm_section(raw: string) -> string is
+    let t: string = string_lower(string_trim(raw))
+    return string_replace(string_replace(t, " ", "-"), "_", "-")
+end
+
+fn unquote(s: string) -> string is
+    let t: string = string_trim(s)
+    if string_len(t) >= 2 && string_starts_with(t, "\"") && string_ends_with(t, "\"") is
+        return string_slice(t, 1, string_len(t) - 1)
+    end
+    return t
+end
+
+;; Cuts a trailing `;; comment` that is not inside quotes.
+fn strip_comment(v: string) -> string is
+    let n: int = string_len(v)
+    let mut in_str: bool = false
+    let mut i: int = 0
+    while i + 1 < n is
+        let c: string = string_at(v, i)
+        if c == "\"" is in_str = !in_str end
+        if !in_str && c == ";" && string_at(v, i + 1) == ";" is
+            return string_trim(string_slice(v, 0, i))
+        end
+        i += 1
+    end
+    return v
+end
+
+pub fn parse(source: string) -> Hk is
+    let mut h: Hk = empty()
+    let lines: [string] = util::lines_of(source)
+    let mut section: string = ""
+    let mut last_key: string = ""
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let line: string = string_trim(lines[i])
+        i += 1
+        if line == "" || string_starts_with(line, ";;") || string_starts_with(line, "!") || string_starts_with(line, "#") is
+            continue
+        end
+        if string_starts_with(line, "[") && string_ends_with(line, "]") && string_len(line) > 2 is
+            section = norm_section(string_slice(line, 1, string_len(line) - 1))
+            last_key = ""
+            continue
+        end
+        if section == "" is continue end
+        let mut body: string = line
+        let mut sub: bool = false
+        if string_starts_with(body, "-->") is
+            body = string_trim(string_slice(body, 3, string_len(body)))
+            sub = true
+        else if string_starts_with(body, "->") is
+            body = string_trim(string_slice(body, 2, string_len(body)))
+        end
+        let arrow: int = string_find(body, "=>")
+        let eq: int = string_find(body, "=")
+        let mut key: string = ""
+        let mut value: string = ""
+        if arrow >= 0 is
+            key = string_slice(body, 0, arrow)
+            value = string_slice(body, arrow + 2, string_len(body))
+        else if eq >= 0 is
+            key = string_slice(body, 0, eq)
+            value = string_slice(body, eq + 1, string_len(body))
+        else is
+            key = util::own(body)
+        end
+        key = unquote(string_trim(key))
+        if key == "" is continue end
+        if sub && last_key != "" is
+            key = last_key + "." + key
+        else if !sub is
+            last_key = key
+        end
+        h.secs = array_push(h.secs, section)
+        h.keys = array_push(h.keys, key)
+        h.vals = array_push(h.vals, unquote(strip_comment(string_trim(value))))
+    end
+    return h
+end
+
+pub fn get(h: Hk, section: string, key: string) -> string is
+    let mut i: int = 0
+    while i < array_len(h.keys) is
+        if h.secs[i] == section && h.keys[i] == key is return h.vals[i] end
+        i += 1
+    end
+    return ""
+end
+
+pub fn has_section(h: Hk, section: string) -> bool is
+    return util::has(h.secs, section)
+end
+
+;; Keys of a section in file order, without `key.sub` entries.
+pub fn keys_of(h: Hk, section: string) -> [string] is
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(h.keys) is
+        if h.secs[i] == section && string_find(h.keys[i], ".") < 0 is out = array_push(out, h.keys[i]) end
+        i += 1
+    end
+    return out
+end
+
+;; `[a, b, "c"]` or `a, b` -> ["a", "b", "c"]
+pub fn list(value: string) -> [string] is
+    let mut t: string = string_trim(value)
+    if t == "" is return [] end
+    if string_starts_with(t, "[") && string_ends_with(t, "]") is
+        t = string_slice(t, 1, string_len(t) - 1)
+    end
+    let parts: [string] = string_split(t, ",")
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(parts) is
+        let v: string = unquote(string_trim(parts[i]))
+        if v != "" is out = array_push(out, v) end
+        i += 1
+    end
+    return out
+end
