@@ -1,0 +1,862 @@
+use "hlib -> gui"
+mod util
+mod hk
+mod model
+mod store
+mod markdown
+mod highlight
+mod state
+mod load
+mod ui
+
+;; ── Screens ──────────────────────────────────────────────────────────────────
+;; `build` turns the state into one Element tree; main.h# calls it again after every state change.
+
+const SIDEBAR_W: f64 = 232.0
+const CARD_W: f64 = 380.0
+const CARD_H: f64 = 128.0
+const PAGE_PAD: f64 = 24.0
+const SIDE_COL_W: f64 = 340.0
+const FILE_LINES: int = 1000
+const DOCS_MAX_W: f64 = 880.0
+const NOTES_BLOCKS: int = 60
+const README_BLOCKS: int = 500
+
+;; ── Cached heavy elements ────────────────────────────────────────────────────
+
+fn free_el(h: Element) is
+    if h != 0 is Element_free(h) end
+end
+
+;; Drops every built README / file / docs / notes element (the theme changed: colours are baked in).
+pub fn invalidate(s: state::St) is
+    free_el(s.rd_el)
+    s.rd_el = 0
+    s.rd_has = false
+    free_el(s.file_el)
+    s.file_el = 0
+    s.file_has = false
+    free_el(s.docs_el)
+    s.docs_el = 0
+    s.docs_has = false
+    let mut i: int = 0
+    while i < array_len(s.rel_els) is
+        free_el(s.rel_els[i])
+        i += 1
+    end
+    s.rel_els = []
+    s.rel_els_tag = []
+end
+
+fn ensure_readme(s: state::St) is
+    if s.rd_res.state != state::ready() || s.rd_has is return end
+    free_el(s.rd_el)
+    s.rd_el = 0
+    if s.rd_text == "" is
+        s.rd_has = true
+        return
+    end
+    if s.rd_md is
+        let blocks: [markdown::Block] = markdown::parse(s.rd_text, README_BLOCKS)
+        s.rd_el = ui::md_view(blocks, s.dark)
+        s.rd_links = markdown::all_links(blocks)
+    else is
+        s.rd_el = ui::code_block(s.rd_text, "", s.dark)
+        s.rd_links = []
+    end
+    s.rd_has = true
+end
+
+fn ensure_file(s: state::St) is
+    if s.file_res.state != state::ready() || s.file_has is return end
+    free_el(s.file_el)
+    s.file_el = ui::file_view(s.file_text, util::ext_of(s.file_path), s.dark, FILE_LINES)
+    s.file_lines = array_len(util::lines_of(s.file_text))
+    s.file_has = true
+end
+
+fn ensure_docs(s: state::St) is
+    if s.docs_has is return end
+    let mut src: string = store::read_data("docs.md")
+    if src == "" is
+        src = "# bit docs\n\nThe docs file was not found next to the app. See https://github.com/HackerOS-Linux-System/bit for the documentation."
+    end
+    s.docs_el = ui::md_view(markdown::parse(src, README_BLOCKS), s.dark)
+    s.docs_has = true
+end
+
+;; Release notes of one tag, built on first use.
+fn notes_for(s: state::St, r: model::Release) -> Element is
+    let mut i: int = 0
+    while i < array_len(s.rel_els_tag) is
+        if s.rel_els_tag[i] == r.tag is return s.rel_els[i] end
+        i += 1
+    end
+    let el: Element = ui::md_view(markdown::parse(r.body, NOTES_BLOCKS), s.dark)
+    s.rel_els = array_push(s.rel_els, el)
+    s.rel_els_tag = array_push(s.rel_els_tag, util::own(r.tag))
+    return el
+end
+
+;; ── Sidebar and chrome ───────────────────────────────────────────────────────
+
+fn nav_item(label: string, icon_name: string, id: string, on: bool) -> Element is
+    let b: Element = ui::btn(label, id, if on then "nav_on" else "nav", icon_name)
+    ui::set_w_fill(b)
+    Style_set_ax(Element_get_st(b), 0)
+    return b
+end
+
+fn sidebar(s: state::St) -> Element is
+    let k: List_Element = List_Element_new()
+    let brand: List_Element = List_Element_new()
+    let logo: Element = icon("layout-grid")
+    ui::set_size(logo, 26.0)
+    ui::set_fg(logo, util::rgb(139, 92, 246))
+    ui::add(brand, logo)
+    ui::add(brand, ui::lbl_size("bit.io", "", 22.0, true))
+    let br: Element = ui::v_row(brand, 10.0)
+    ui::set_align(br, 0, 1)
+    ui::add(k, br)
+    ui::add(k, vspace(14.0))
+    ui::add(k, nav_item("Libraries", "layout-grid", "nav:libs", s.screen == "libs" || s.screen == "lib"))
+    ui::add(k, nav_item("Docs", "file", "nav:docs", s.screen == "docs"))
+    ui::add(k, nav_item("Settings", "settings", "nav:settings", s.screen == "settings"))
+    let grow: Element = space()
+    ui::set_h_fill(grow)
+    ui::add(k, grow)
+    ui::add(k, ui::caption_el("Package index for"))
+    ui::add(k, ui::caption_el("H#  ·  Hacker Lang  ·  HackerScript"))
+    ui::add(k, vspace(6.0))
+    ui::add(k, ui::muted("bit.io Desktop " + s.version))
+    let col: Element = ui::v_col(k, 4.0)
+    let c: Element = container(col)
+    Element_free(col)
+    Element_set_class(c, "side")
+    ui::set_pad(c, 16.0)
+    ui::set_w_px(c, SIDEBAR_W)
+    ui::set_h_fill(c)
+    return c
+end
+
+fn status_bar(s: state::St) -> Element is
+    let k: List_Element = List_Element_new()
+    let mut msg: string = ""
+    if time_ms() < s.toast_until && s.toast != "" is
+        msg = s.toast
+    else if s.busy > 0 is
+        msg = "Loading…  (" + to_string(s.busy) + " request" + (if s.busy == 1 then "" else "s") + ")"
+    else if s.idx_res.stale && s.idx_res.age >= 0 is
+        msg = "Offline copy of the index · saved " + util::age_str(s.idx_res.age)
+    else if s.idx_res.stale is
+        msg = "Using the library list shipped with the app"
+    else is
+        msg = "Up to date"
+    end
+    ui::add(k, ui::caption_el(msg))
+    let grow: Element = space()
+    ui::set_w_fill(grow)
+    ui::add(k, grow)
+    ui::add(k, ui::caption_el("/  search     Esc  back     F5  refresh"))
+    let r: Element = ui::v_row(k, 10.0)
+    let c: Element = container(r)
+    Element_free(r)
+    Element_set_class(c, "bar")
+    ui::set_pad_xy(c, 16.0, 6.0)
+    ui::set_w_fill(c)
+    return c
+end
+
+;; ── Libraries ────────────────────────────────────────────────────────────────
+
+fn chip(label: string, id: string, on: bool) -> Element is
+    return ui::btn(label, id, if on then "chip_on" else "chip", "")
+end
+
+fn lib_card(l: model::Lib) -> Element is
+    let k: List_Element = List_Element_new()
+    let head: List_Element = List_Element_new()
+    let name: Element = ui::lbl_size(l.name, "", 17.0, true)
+    ui::set_w_fill(name)
+    ui::set_no_wrap(name)
+    ui::add(head, name)
+    ui::add(head, ui::lang_pill(l.lang, model::lang_label(l.lang)))
+    let hr: Element = ui::v_row(head, 8.0)
+    ui::set_align(hr, 0, 1)
+    ui::set_w_fill(hr)
+    ui::add(k, hr)
+    let d: Element = ui::para(if l.description == "" then "No description." else l.description, 13.0)
+    Element_set_class(d, "muted")
+    ui::add(k, d)
+    let grow: Element = space()
+    ui::set_h_fill(grow)
+    ui::add(k, grow)
+    let foot: List_Element = List_Element_new()
+    let mut t: int = 0
+    while t < array_len(l.tags) && t < 3 is
+        ui::add(foot, ui::pill(util::cut(l.tags[t], 18), util::rgb(130, 130, 150)))
+        t += 1
+    end
+    let fs: Element = space()
+    ui::set_w_fill(fs)
+    ui::add(foot, fs)
+    if l.author != "" is ui::add(foot, ui::caption_el(util::cut(l.author, 22))) end
+    ui::add(k, ui::v_row(foot, 6.0))
+    let col: Element = ui::v_col(k, 8.0)
+    ui::set_pad(col, 14.0)
+    ui::set_w_fill(col)
+    ui::set_h_fill(col)
+    let b: Element = button_with(col)
+    Element_free(col)
+    Element_set_msg(b, "lib:" + l.name)
+    Element_set_class(b, "libcard")
+    ui::set_w_fill(b)
+    ui::set_h_px(b, CARD_H)
+    ui::set_clip(b)
+    return b
+end
+
+fn libraries(s: state::St) -> Element is
+    let k: List_Element = List_Element_new()
+    let found: [model::Lib] = model::filter(s.idx, s.query, s.lang, s.tag)
+    let total: int = array_len(s.idx.libs)
+
+    let head: List_Element = List_Element_new()
+    ui::add(head, ui::title("Libraries"))
+    let sub: string = if array_len(found) == total then to_string(total) + " in the index" else to_string(array_len(found)) + " of " + to_string(total)
+    ui::add(head, ui::muted(sub))
+    let grow: Element = space()
+    ui::set_w_fill(grow)
+    ui::add(head, grow)
+    if s.idx_res.state == state::loading() is ui::add(head, ui::muted("updating…")) end
+    ui::add(head, ui::icon_btn("refresh-cw", "refresh"))
+    let hr: Element = ui::v_row(head, 12.0)
+    ui::set_align(hr, 0, 1)
+    ui::set_w_fill(hr)
+    ui::add(k, hr)
+
+    let search: Element = text_input("Search libraries, tags, authors…", s.query)
+    Element_set_id(search, "search")
+    Element_set_msg(search, "search")
+    ui::set_w_fill(search)
+    ui::add(k, search)
+
+    let chips: List_Element = List_Element_new()
+    ui::add(chips, chip("All languages", "lang:", s.lang == ""))
+    let ids: [string] = model::lang_ids()
+    let mut i: int = 0
+    while i < array_len(ids) is
+        ui::add(chips, chip(model::lang_label(ids[i]), "lang:" + ids[i], s.lang == ids[i]))
+        i += 1
+    end
+    let tags: [string] = model::all_tags(s.idx)
+    if s.tag != "" is ui::add(chips, chip("tag: " + s.tag + "  ✕", "tag:", true)) end
+    let mut t: int = 0
+    while t < array_len(tags) && t < 14 is
+        if tags[t] != s.tag is ui::add(chips, chip(tags[t], "tag:" + tags[t], false)) end
+        t += 1
+    end
+    let cr: Element = ui::v_row(chips, 8.0)
+    let cs: Element = scrollable_x(cr)
+    Element_free(cr)
+    Element_set_id(cs, "chips")
+    ui::set_w_fill(cs)
+    ui::add(k, cs)
+
+    if s.idx_res.state == state::failed() is
+        ui::add(k, ui::note(s.idx_res.err, ui::c_bad()))
+    end
+
+    if array_len(found) == 0 is
+        let e: List_Element = List_Element_new()
+        let ic: Element = icon("search")
+        ui::set_size(ic, 40.0)
+        Element_set_class(ic, "muted")
+        ui::add(e, ic)
+        ui::add(e, ui::lbl_size(if total == 0 then "The index is empty" else "No library matches", "", 18.0, true))
+        ui::add(e, ui::muted(if total == 0 then "Try refreshing once you are online." else "Try another search, language or tag."))
+        if s.query != "" || s.lang != "" || s.tag != "" is ui::add(e, ui::btn("Clear filters", "clear", "primary", "x")) end
+        let ec: Element = ui::v_col(e, 8.0)
+        ui::set_align(ec, 1, 1)
+        ui::set_w_fill(ec)
+        ui::set_h_fill(ec)
+        ui::add(k, ec)
+    else is
+        let items: List_Element = List_Element_new()
+        let mut n: int = 0
+        while n < array_len(found) is
+            ui::add(items, lib_card(found[n]))
+            n += 1
+        end
+        let grid: Element = virtual_grid(array_len(found), CARD_W, CARD_H, items)
+        List_Element_free(items)
+        Element_set_id(grid, "libs_grid")
+        Style_set_gap(Element_get_st(grid), 14.0)
+        ui::set_w_fill(grid)
+        ui::set_h_fill(grid)
+        ui::add(k, grid)
+    end
+    let col: Element = ui::v_col(k, 14.0)
+    ui::set_pad(col, PAGE_PAD)
+    ui::set_w_fill(col)
+    ui::set_h_fill(col)
+    return col
+end
+
+;; ── One library ──────────────────────────────────────────────────────────────
+
+fn res_note(r: state::Res, what: string) -> Element is
+    if r.state == state::failed() is return ui::note(r.err, ui::c_bad()) end
+    return ui::muted("Loading " + what + "…")
+end
+
+fn stale_note(r: state::Res) -> Element is
+    return ui::note("Saved copy (offline" + (if r.age > 0 then ", " + util::age_str(r.age) else "") + ").", ui::c_warn())
+end
+
+;; "bit install x" + a copy button.
+fn command_row(cmd: string, id: string) -> Element is
+    let r: List_Element = List_Element_new()
+    let t: Element = text(cmd)
+    ui::set_size(t, 13.0)
+    ui::set_w_fill(t)
+    ui::add(r, t)
+    ui::add(r, ui::icon_btn("copy", id))
+    let row_el: Element = ui::v_row(r, 6.0)
+    ui::set_align(row_el, 0, 1)
+    let c: Element = container(row_el)
+    Element_free(row_el)
+    Element_set_class(c, "code")
+    ui::set_pad_xy(c, 12.0, 6.0)
+    ui::set_w_fill(c)
+    return c
+end
+
+fn install_panel(l: model::Lib) -> Element is
+    let k: List_Element = List_Element_new()
+    ui::add(k, command_row("bit install " + l.name, "copy:install"))
+    ui::add(k, command_row("bit add " + l.name, "copy:add"))
+    ui::add(k, ui::caption_el("add also writes it to [dependencies] in Bit.hk."))
+    return ui::panel("Install", ui::v_col(k, 8.0))
+end
+
+fn stat(value: string, label: string) -> Element is
+    let k: List_Element = List_Element_new()
+    ui::add(k, ui::lbl_size(value, "", 17.0, true))
+    ui::add(k, ui::caption_el(label))
+    let c: Element = ui::v_col(k, 0.0)
+    ui::set_w_portion(c, 1.0)
+    return c
+end
+
+fn repo_panel(s: state::St) -> Element is
+    let k: List_Element = List_Element_new()
+    if s.meta_res.state == state::ready() is
+        let m: model::Meta = s.meta
+        let r: List_Element = List_Element_new()
+        ui::add(r, stat(util::count_str(m.stars), "stars"))
+        ui::add(r, stat(util::count_str(m.forks), "forks"))
+        ui::add(r, stat(util::count_str(m.issues), "issues"))
+        ui::add(k, ui::v_row(r, 8.0))
+        if m.license != "" is ui::add(k, ui::kv("License", m.license)) end
+        if m.pushed != "" is ui::add(k, ui::kv("Last push", util::date_of(m.pushed))) end
+        if m.archived is ui::add(k, ui::note("This repository is archived.", ui::c_warn())) end
+        if s.meta_res.stale is ui::add(k, stale_note(s.meta_res)) end
+    else is
+        ui::add(k, res_note(s.meta_res, "repository stats"))
+    end
+    return ui::panel("Repository", ui::v_col(k, 8.0))
+end
+
+fn manifest_panel(s: state::St, l: model::Lib) -> Element is
+    let k: List_Element = List_Element_new()
+    if s.mf_res.state == state::ready() && s.mf_file != "" is
+        let h: hk::Hk = s.mf
+        let name: string = hk::get(h, "package", "name")
+        let ver: string = hk::get(h, "package", "version")
+        if name != "" is ui::add(k, ui::kv("Package", name + (if ver != "" then "  " + ver else ""))) end
+        let lang: string = hk::get(h, "package", "lang")
+        if lang != "" is ui::add(k, ui::kv("Language", lang)) end
+        let lic: string = hk::get(h, "package", "license")
+        if lic != "" is ui::add(k, ui::kv("License", lic)) end
+        let authors: string = hk::get(h, "package", "authors")
+        if authors != "" is ui::add(k, ui::kv("Authors", util::join(hk::list(authors), ", "))) end
+        let notes: [model::Note] = model::compat_notes(l, h, s.idx)
+        let mut i: int = 0
+        while i < array_len(notes) is
+            ui::add(k, ui::note((if notes[i].ok then "✓  " else "✗  ") + notes[i].text, if notes[i].ok then ui::c_ok() else ui::c_bad()))
+            i += 1
+        end
+        if s.mf_res.stale is ui::add(k, stale_note(s.mf_res)) end
+    else if s.mf_res.state == state::ready() is
+        ui::add(k, ui::muted("This repository has no Bit.hk."))
+    else is
+        ui::add(k, res_note(s.mf_res, "Bit.hk"))
+    end
+    return ui::panel("Manifest" + (if s.mf_file != "" then "  ·  " + s.mf_file else ""), ui::v_col(k, 8.0))
+end
+
+fn deps_panel(s: state::St) -> Element is
+    let deps: [model::Dep] = model::deps_of(s.mf, s.idx)
+    let k: List_Element = List_Element_new()
+    let mut i: int = 0
+    while i < array_len(deps) is
+        let d: model::Dep = deps[i]
+        let r: List_Element = List_Element_new()
+        let kind: string = if d.kind == "index" then "index" else if d.kind == "git" then "git" else if d.kind == "path" then "path" else "?"
+        ui::add(r, ui::lbl_size(d.name, "", 13.0, true))
+        let sp: Element = space()
+        ui::set_w_fill(sp)
+        ui::add(r, sp)
+        ui::add(r, ui::caption_el(util::cut(if d.spec == "" then kind else d.spec, 24)))
+        let line: Element = ui::v_row(r, 8.0)
+        ui::set_w_fill(line)
+        if d.kind == "index" is
+            let b: Element = button_with(line)
+            Element_free(line)
+            Element_set_msg(b, "dep:" + d.name)
+            Element_set_class(b, "row")
+            ui::set_w_fill(b)
+            ui::add(k, b)
+        else is
+            ui::add(k, line)
+        end
+        i += 1
+    end
+    return ui::panel("Dependencies  ·  " + to_string(array_len(deps)), ui::v_col(k, 2.0))
+end
+
+fn pin_panel(l: model::Lib) -> Element is
+    let k: List_Element = List_Element_new()
+    if l.rev != "" is ui::add(k, ui::kv("Pinned rev", l.rev)) end
+    if l.checksum != "" is
+        ui::add(k, ui::caption_el("sha256 (checked by `bit verify`)"))
+        let c: Element = text(util::cut(l.checksum, 72))
+        ui::set_size(c, 11.0)
+        ui::set_w_fill(c)
+        ui::add(k, c)
+    end
+    ui::add(k, ui::kv("Source", util::cut(l.target, 60)))
+    return ui::panel("Index entry", ui::v_col(k, 6.0))
+end
+
+fn overview(s: state::St, l: model::Lib) -> Element is
+    ensure_readme(s)
+    let left: List_Element = List_Element_new()
+    ui::add(left, ui::lbl_size("README" + (if s.rd_file != "" then "  ·  " + s.rd_file else ""), "", 15.0, true))
+    if s.rd_res.state == state::ready() is
+        if s.rd_res.stale is ui::add(left, stale_note(s.rd_res)) end
+        if s.rd_el != 0 is
+            List_Element_push(left, s.rd_el)
+            if array_len(s.rd_links) > 0 is
+                ui::add(left, rule())
+                ui::add(left, ui::lbl_size("Links", "", 15.0, true))
+                ui::add(left, ui::links_view(s.rd_links))
+            end
+        else is
+            ui::add(left, ui::muted("This repository has no README."))
+            let g: model::Gh = model::parse_github(l.target)
+            if g.ok is ui::add(left, ui::btn("Open on GitHub", "open:" + l.target, "", "external-link")) end
+        end
+    else is
+        ui::add(left, res_note(s.rd_res, "README"))
+    end
+    let lcol: Element = ui::v_col(left, 12.0)
+    ui::set_pad(lcol, 4.0)
+    ui::set_w_fill(lcol)
+    let lsc: Element = scrollable(lcol)
+    Element_free(lcol)
+    Element_set_id(lsc, "ov_left")
+    ui::set_w_fill(lsc)
+    ui::set_h_fill(lsc)
+
+    let right: List_Element = List_Element_new()
+    ui::add(right, install_panel(l))
+    ui::add(right, repo_panel(s))
+    ui::add(right, manifest_panel(s, l))
+    if array_len(model::deps_of(s.mf, s.idx)) > 0 is ui::add(right, deps_panel(s)) end
+    ui::add(right, pin_panel(l))
+    let rcol: Element = ui::v_col(right, 12.0)
+    ui::set_w_fill(rcol)
+    let rsc: Element = scrollable(rcol)
+    Element_free(rcol)
+    Element_set_id(rsc, "ov_right")
+    ui::set_w_px(rsc, SIDE_COL_W)
+    ui::set_h_fill(rsc)
+
+    let both: List_Element = List_Element_new()
+    ui::add(both, lsc)
+    ui::add(both, rsc)
+    let r: Element = ui::v_row(both, 18.0)
+    ui::set_w_fill(r)
+    ui::set_h_fill(r)
+    return r
+end
+
+fn size_text(n: int) -> string is
+    return util::bytes_str(n)
+end
+
+fn file_row(it: model::Item, shown: string) -> Element is
+    let r: List_Element = List_Element_new()
+    let ic: Element = icon(if it.is_dir then "folder" else "file")
+    ui::set_size(ic, 16.0)
+    ui::add(r, ic)
+    let nm: Element = text(util::base(it.path))
+    ui::set_size(nm, 13.0)
+    ui::set_w_fill(nm)
+    ui::set_no_wrap(nm)
+    ui::add(r, nm)
+    if !it.is_dir is ui::add(r, ui::caption_el(size_text(it.size))) end
+    let line: Element = ui::v_row(r, 8.0)
+    ui::set_align(line, 0, 1)
+    ui::set_w_fill(line)
+    let b: Element = button_with(line)
+    Element_free(line)
+    Element_set_msg(b, (if it.is_dir then "dir:" else "file:") + it.path)
+    Element_set_class(b, if it.path == shown then "row_on" else "row")
+    ui::set_w_fill(b)
+    return b
+end
+
+fn source_list(s: state::St) -> Element is
+    let k: List_Element = List_Element_new()
+    let top: List_Element = List_Element_new()
+    if s.dir != "" is ui::add(top, ui::icon_btn("arrow-up", "up")) end
+    let path: Element = ui::lbl_size(if s.dir == "" then "/" else "/" + s.dir, "", 13.0, true)
+    ui::set_w_fill(path)
+    ui::set_no_wrap(path)
+    ui::add(top, path)
+    let tr: Element = ui::v_row(top, 6.0)
+    ui::set_align(tr, 0, 1)
+    ui::set_w_fill(tr)
+    ui::add(k, tr)
+    if s.tree_res.state == state::ready() is
+        if s.tree.truncated is ui::add(k, ui::note("The repository is large: GitHub truncated the file list.", ui::c_warn())) end
+        if s.tree_res.stale is ui::add(k, stale_note(s.tree_res)) end
+        let items: [model::Item] = model::children(s.tree, s.dir)
+        if array_len(items) == 0 is ui::add(k, ui::muted("This folder is empty.")) end
+        let mut i: int = 0
+        while i < array_len(items) is
+            ui::add(k, file_row(items[i], s.file_path))
+            i += 1
+        end
+    else is
+        ui::add(k, res_note(s.tree_res, "file list"))
+    end
+    let col: Element = ui::v_col(k, 2.0)
+    ui::set_w_fill(col)
+    let sc: Element = scrollable(col)
+    Element_free(col)
+    Element_set_id(sc, "src_list")
+    ui::set_w_px(sc, 320.0)
+    ui::set_h_fill(sc)
+    return sc
+end
+
+fn source_viewer(s: state::St, l: model::Lib) -> Element is
+    ensure_file(s)
+    let k: List_Element = List_Element_new()
+    if s.file_path == "" is
+        let ic: Element = icon("file")
+        ui::set_size(ic, 36.0)
+        Element_set_class(ic, "muted")
+        ui::add(k, ic)
+        ui::add(k, ui::muted("Pick a file to read it here."))
+        let c: Element = ui::v_col(k, 8.0)
+        ui::set_align(c, 1, 1)
+        ui::set_w_fill(c)
+        ui::set_h_fill(c)
+        return c
+    end
+    let head: List_Element = List_Element_new()
+    let p: Element = ui::lbl_size(s.file_path, "", 13.0, true)
+    ui::set_w_fill(p)
+    ui::set_no_wrap(p)
+    ui::add(head, p)
+    if s.file_res.state == state::ready() is
+        ui::add(head, ui::caption_el(to_string(s.file_lines) + " lines"))
+        ui::add(head, ui::icon_btn("copy", "copy:file"))
+    end
+    let g: model::Gh = model::parse_github(l.target)
+    if g.ok is
+        let url: string = "https://github.com/" + g.owner + "/" + g.repo + "/blob/" + state::eff_ref(s) + "/" + model::repo_path(g, s.file_path)
+        ui::add(head, ui::icon_btn("external-link", "open:" + url))
+    end
+    let hr: Element = ui::v_row(head, 8.0)
+    ui::set_align(hr, 0, 1)
+    ui::set_w_fill(hr)
+    ui::add(k, hr)
+    if s.file_res.state == state::ready() is
+        if s.file_note != "" is ui::add(k, ui::note(s.file_note, ui::c_warn())) end
+        if s.file_lines > FILE_LINES is ui::add(k, ui::note("Showing the first " + to_string(FILE_LINES) + " of " + to_string(s.file_lines) + " lines.", ui::c_warn())) end
+        if s.file_res.stale is ui::add(k, stale_note(s.file_res)) end
+        List_Element_push(k, s.file_el)
+    else is
+        ui::add(k, res_note(s.file_res, "file"))
+    end
+    let col: Element = ui::v_col(k, 8.0)
+    ui::set_w_fill(col)
+    ui::set_h_fill(col)
+    return col
+end
+
+fn source_tab(s: state::St, l: model::Lib) -> Element is
+    let k: List_Element = List_Element_new()
+    ui::add(k, source_list(s))
+    ui::add(k, source_viewer(s, l))
+    let r: Element = ui::v_row(k, 18.0)
+    ui::set_w_fill(r)
+    ui::set_h_fill(r)
+    return r
+end
+
+fn release_card(s: state::St, r: model::Release, current: string) -> Element is
+    let k: List_Element = List_Element_new()
+    let head: List_Element = List_Element_new()
+    ui::add(head, ui::lbl_size(r.tag, "", 16.0, true))
+    if r.prerelease is ui::add(head, ui::pill("pre-release", ui::c_warn())) end
+    if r.tag == current is ui::add(head, ui::pill("viewing", ui::c_ok())) end
+    let sp: Element = space()
+    ui::set_w_fill(sp)
+    ui::add(head, sp)
+    if r.date != "" is ui::add(head, ui::caption_el(util::date_of(r.date))) end
+    let hr: Element = ui::v_row(head, 8.0)
+    ui::set_align(hr, 0, 1)
+    ui::set_w_fill(hr)
+    ui::add(k, hr)
+    if r.name != "" && r.name != r.tag is ui::add(k, ui::muted(r.name)) end
+    if r.tag_only is ui::add(k, ui::caption_el("Tag only - no release was published.")) end
+    let open: bool = util::has(s.rel_open, r.tag)
+    if open && r.body != "" is
+        List_Element_push(k, notes_for(s, r))
+    end
+    let mut a: int = 0
+    while a < array_len(r.assets) && a < 8 is
+        let asset: model::Asset = r.assets[a]
+        let ar: List_Element = List_Element_new()
+        let nm: Element = text(asset.name)
+        ui::set_size(nm, 12.0)
+        ui::set_w_fill(nm)
+        ui::add(ar, nm)
+        ui::add(ar, ui::caption_el(size_text(asset.size)))
+        let line: Element = ui::v_row(ar, 8.0)
+        ui::set_align(line, 0, 1)
+        ui::set_w_fill(line)
+        let b: Element = button_with(line)
+        Element_free(line)
+        Element_set_msg(b, "open:" + asset.url)
+        Element_set_class(b, "row")
+        ui::set_w_fill(b)
+        ui::add(k, b)
+        a += 1
+    end
+    let acts: List_Element = List_Element_new()
+    if r.tag != current is ui::add(acts, ui::btn("View this version", "ver:" + r.tag, "primary", "")) end
+    if r.body != "" is ui::add(acts, ui::btn(if open then "Hide notes" else "Release notes", "notes:" + r.tag, "", "")) end
+    ui::add(acts, ui::btn("GitHub", "open:" + r.url, "ghost", "external-link"))
+    ui::add(k, ui::v_row(acts, 8.0))
+    let col: Element = ui::v_col(k, 8.0)
+    ui::set_w_fill(col)
+    let c: Element = container(col)
+    Element_free(col)
+    Element_set_class(c, "card")
+    ui::set_w_fill(c)
+    return c
+end
+
+fn versions_tab(s: state::St) -> Element is
+    let k: List_Element = List_Element_new()
+    if s.ref != "" is
+        let r: List_Element = List_Element_new()
+        ui::add(r, ui::note("Viewing version " + s.ref + ".", ui::c_warn()))
+        ui::add(r, ui::btn("Back to default", "ver:", "", "arrow-left"))
+        ui::add(k, ui::v_row(r, 10.0))
+    end
+    if s.rel_res.state == state::ready() is
+        if s.rel_res.stale is ui::add(k, stale_note(s.rel_res)) end
+        if array_len(s.rels) == 0 is ui::add(k, ui::muted("No releases or tags yet.")) end
+        let cur: string = state::eff_ref(s)
+        let mut i: int = 0
+        while i < array_len(s.rels) is
+            ui::add(k, release_card(s, s.rels[i], cur))
+            i += 1
+        end
+    else is
+        ui::add(k, res_note(s.rel_res, "releases"))
+    end
+    let col: Element = ui::v_col(k, 12.0)
+    ui::set_w_fill(col)
+    ui::set_max_w(col, 900.0)
+    let sc: Element = scrollable(col)
+    Element_free(col)
+    Element_set_id(sc, "versions")
+    ui::set_w_fill(sc)
+    ui::set_h_fill(sc)
+    return sc
+end
+
+fn library(s: state::St) -> Element is
+    let l: model::Lib = state::current(s)
+    let k: List_Element = List_Element_new()
+    if l.name == "" is
+        ui::add(k, ui::note("This library is not in the index (any more).", ui::c_bad()))
+        ui::add(k, ui::btn("Browse the index", "back", "primary", "arrow-left"))
+        let c: Element = ui::v_col(k, 12.0)
+        ui::set_pad(c, PAGE_PAD)
+        return c
+    end
+    let head: List_Element = List_Element_new()
+    ui::add(head, ui::icon_btn("arrow-left", "back"))
+    ui::add(head, ui::title(l.name))
+    ui::add(head, ui::lang_pill(l.lang, model::lang_label(l.lang)))
+    if s.ref != "" is ui::add(head, ui::pill("version " + s.ref, ui::c_warn())) end
+    let sp: Element = space()
+    ui::set_w_fill(sp)
+    ui::add(head, sp)
+    if s.meta_res.state == state::loading() || s.mf_res.state == state::loading() || s.rd_res.state == state::loading() is
+        ui::add(head, ui::muted("loading…"))
+    end
+    ui::add(head, ui::btn("Copy install command", "copy:install", "", "copy"))
+    let url: string = model::safe_url(l.target)
+    if url != "" is ui::add(head, ui::btn("GitHub", "open:" + url, "primary", "external-link")) end
+    ui::add(head, ui::icon_btn("refresh-cw", "refresh"))
+    let hr: Element = ui::v_row(head, 10.0)
+    ui::set_align(hr, 0, 1)
+    ui::set_w_fill(hr)
+    ui::add(k, hr)
+    if l.description != "" is
+        let d: Element = ui::para(l.description, 14.0)
+        Element_set_class(d, "muted")
+        ui::add(k, d)
+    end
+    let names: List_Str = List_Str_new()
+    List_Str_push(names, "Overview")
+    List_Str_push(names, "Source")
+    List_Str_push(names, "Versions")
+    let tb: Element = tabs(names, s.tab)
+    List_Str_free(names)
+    Element_set_msg(tb, "tab")
+    Element_set_id(tb, "tabs")
+    ui::add(k, tb)
+    if s.tab == 0 is
+        ui::add(k, overview(s, l))
+    else if s.tab == 1 is
+        ui::add(k, source_tab(s, l))
+    else is
+        ui::add(k, versions_tab(s))
+    end
+    let col: Element = ui::v_col(k, 12.0)
+    ui::set_pad(col, PAGE_PAD)
+    ui::set_w_fill(col)
+    ui::set_h_fill(col)
+    return col
+end
+
+;; ── Docs ─────────────────────────────────────────────────────────────────────
+
+fn docs(s: state::St) -> Element is
+    ensure_docs(s)
+    let k: List_Element = List_Element_new()
+    ui::add(k, ui::title("Docs"))
+    List_Element_push(k, s.docs_el)
+    let col: Element = ui::v_col(k, 14.0)
+    ui::set_w_fill(col)
+    ui::set_max_w(col, DOCS_MAX_W)
+    ui::set_pad(col, PAGE_PAD)
+    let sc: Element = scrollable(col)
+    Element_free(col)
+    Element_set_id(sc, "docs")
+    ui::set_w_fill(sc)
+    ui::set_h_fill(sc)
+    return sc
+end
+
+;; ── Settings ─────────────────────────────────────────────────────────────────
+
+fn settings(s: state::St) -> Element is
+    let k: List_Element = List_Element_new()
+    ui::add(k, ui::title("Settings"))
+    ui::add(k, ui::muted("Everything here is stored only on this computer (" + store::config_dir() + ")."))
+
+    let a: List_Element = List_Element_new()
+    let themes: List_Str = List_Str_new()
+    List_Str_push(themes, "system")
+    List_Str_push(themes, "dark")
+    List_Str_push(themes, "light")
+    List_Str_push(themes, "nord")
+    List_Str_push(themes, "dracula")
+    List_Str_push(themes, "tokyo")
+    List_Str_push(themes, "glass")
+    let pick: Element = pick_list(themes, s.settings.theme)
+    List_Str_free(themes)
+    Element_set_msg(pick, "theme")
+    Element_set_id(pick, "theme")
+    ui::set_w_px(pick, 220.0)
+    ui::add(a, pick)
+    ui::add(a, ui::caption_el("\"system\" follows the desktop's light/dark setting (GNOME / KDE)."))
+    ui::add(k, ui::panel("Appearance", ui::v_col(a, 8.0)))
+
+    let g: List_Element = List_Element_new()
+    ui::add(g, ui::muted("Without a token GitHub allows 60 requests per hour; with one, 5000. The token is only ever sent to api.github.com (README, Bit.hk and files come from raw.githubusercontent.com)."))
+    let tok: Element = text_input("ghp_… or github_pat_…", s.token_draft)
+    Element_set_id(tok, "token")
+    Element_set_msg(tok, "token_input")
+    if !s.token_shown is Element_set_secret(tok, true) end
+    ui::set_w_fill(tok)
+    ui::add(g, tok)
+    ui::add(g, toggler("Show token", s.token_shown))
+    let br: List_Element = List_Element_new()
+    ui::add(br, ui::btn("Save", "token_save", "primary", "check"))
+    ui::add(br, ui::btn("Test", "token_test", "", "wifi"))
+    ui::add(br, ui::btn("Remove", "token_remove", "ghost", "trash"))
+    ui::add(g, ui::v_row(br, 8.0))
+    if s.settings.token != "" is ui::add(g, ui::note("A token is saved.", ui::c_ok())) end
+    if s.rate_text != "" is ui::add(g, ui::kv("GitHub limit", s.rate_text)) end
+    ui::add(k, ui::panel("GitHub access", ui::v_col(g, 8.0)))
+
+    let d: List_Element = List_Element_new()
+    ui::add(d, ui::kv("Index", to_string(array_len(s.idx.libs)) + " libraries" + (if s.idx.updated != "" then ", updated " + util::date_of(s.idx.updated) else "")))
+    ui::add(d, ui::kv("Source", if s.idx_res.stale then (if s.idx_res.age >= 0 then "saved copy" else "shipped with the app") else "network, just now"))
+    ui::add(d, ui::kv("Saved data", s.cache_text))
+    ui::add(d, ui::btn("Clear saved data", "cache_clear", "", "trash"))
+    ui::add(k, ui::panel("Data", ui::v_col(d, 8.0)))
+
+    let ab: List_Element = List_Element_new()
+    ui::add(ab, ui::kv("Version", "bit.io Desktop " + s.version))
+    ui::add(ab, ui::caption_el("The desktop edition of bit.io: written in H#, the interface comes from the gui library (HackerScript) through hlib."))
+    ui::add(ab, ui::btn("bit on GitHub", "open:https://github.com/HackerOS-Linux-System/bit", "", "external-link"))
+    ui::add(k, ui::panel("About", ui::v_col(ab, 8.0)))
+
+    let col: Element = ui::v_col(k, 16.0)
+    ui::set_w_fill(col)
+    ui::set_max_w(col, 760.0)
+    ui::set_pad(col, PAGE_PAD)
+    let sc: Element = scrollable(col)
+    Element_free(col)
+    Element_set_id(sc, "settings")
+    ui::set_w_fill(sc)
+    ui::set_h_fill(sc)
+    return sc
+end
+
+;; ── Root ─────────────────────────────────────────────────────────────────────
+
+pub fn build(s: state::St) -> Element is
+    let body: Element = if s.screen == "docs" then docs(s) else if s.screen == "settings" then settings(s) else if s.screen == "lib" then library(s) else libraries(s)
+    ui::set_w_fill(body)
+    ui::set_h_fill(body)
+    let main_col: List_Element = List_Element_new()
+    ui::add(main_col, body)
+    ui::add(main_col, status_bar(s))
+    let mc: Element = ui::v_col(main_col, 0.0)
+    ui::set_w_fill(mc)
+    ui::set_h_fill(mc)
+    let all: List_Element = List_Element_new()
+    ui::add(all, sidebar(s))
+    ui::add(all, mc)
+    let root: Element = ui::v_row(all, 0.0)
+    ui::set_w_fill(root)
+    ui::set_h_fill(root)
+    return root
+end
