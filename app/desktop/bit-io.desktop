@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=bit.io
+GenericName=Package index
+Comment=Browse the bit package index for H#, Hacker Lang and HackerScript
+Comment[pl]=Przeglądaj indeks pakietów bit dla H#, Hacker Lang i HackerScript
+Exec=bit-io-desktop
+Icon=bit-io
+Terminal=false
+Categories=Development;Utility;
+Keywords=bit;hackeros;packages;libraries;h#;hackerscript;hacker lang;
+StartupWMClass=bit.io
