@@ -1,1 +1,290 @@
+use "hlib -> gui"
+mod util
+mod hk
+mod model
+mod store
+mod markdown
+mod highlight
+mod state
+mod load
+mod ui
+mod screens
 
+;; ── bit.io Desktop ───────────────────────────────────────────────────────────
+;; The desktop edition of the bit.io app (the phone editions live in app/phones). Written in H#; the
+;; interface is the `gui` library (HackerScript) used through hlib: `use "hlib -> gui"` brings its API in
+;; as plain functions (`app_new`, `App_frame1`, `Element_...`), with no module prefix.
+;;
+;; The loop is the one the hlib API describes: build the tree, hand it to App_frame1 (which draws when
+;; needed, waits for events and returns the messages), react to the messages, and build a new tree only
+;; when something changed.
+
+const VERSION: string = "0.1.0"
+const WIN_W: int = 1180
+const WIN_H: int = 780
+const TICK_MS: int = 500
+
+;; ── Theme ────────────────────────────────────────────────────────────────────
+
+;; Light or dark desktop? GNOME/GTK first, then KDE; dark when nothing says otherwise.
+fn system_dark() -> bool is
+    let g: string = util::capture("gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null")
+    if g != "" is return string_contains(g, "dark") end
+    let gtk: string = string_lower(env_get("GTK_THEME"))
+    if gtk != "" is return string_contains(gtk, "dark") end
+    let kde: string = util::capture("kreadconfig6 --group General --key ColorScheme 2>/dev/null || kreadconfig5 --group General --key ColorScheme 2>/dev/null")
+    if kde != "" is return string_contains(string_lower(kde), "dark") end
+    return true
+end
+
+fn apply_theme(app: App, s: state::St) is
+    let name: string = s.settings.theme
+    let mut dark: bool = true
+    let mut t: Theme = theme_dark()
+    if name == "system" is
+        dark = system_dark()
+        if !dark is
+            Theme_free(t)
+            t = theme_light()
+        end
+    else if name == "light" is
+        dark = false
+        Theme_free(t)
+        t = theme_light()
+    else if name != "dark" is
+        Theme_free(t)
+        t = theme_by_name(name)
+    end
+    App_set_theme(app, t)
+    Theme_free(t)
+    s.dark = dark
+    screens::invalidate(s)
+end
+
+;; ── Desktop helpers ──────────────────────────────────────────────────────────
+
+fn open_url(s: state::St, url: string) is
+    let u: string = model::safe_url(url)
+    if u == "" is
+        state::say(s, "Only http(s) links are opened.")
+        return
+    end
+    util::run("xdg-open " + util::sq(u) + " &")
+    state::say(s, "Opened " + util::cut(u, 70))
+end
+
+;; Copies through whichever clipboard tool the session has (Wayland, then X11).
+fn copy_text(s: state::St, value: string, what: string) is
+    let q: string = util::sq(value)
+    let cmd: string = "(command -v wl-copy >/dev/null 2>&1 && printf '%s' " + q + " | wl-copy) || (command -v xclip >/dev/null 2>&1 && printf '%s' " + q + " | xclip -selection clipboard) || (command -v xsel >/dev/null 2>&1 && printf '%s' " + q + " | xsel -b)"
+    if util::run(cmd) == 0 is
+        state::say(s, "Copied " + what + ".")
+    else is
+        state::say(s, "No clipboard tool found - install wl-clipboard (Wayland) or xclip (X11).")
+    end
+end
+
+fn reset_scroll(app: App) is
+    let win: int = App_get_main(app)
+    App_scroll_set(app, win, "ov_left", 0.0)
+    App_scroll_set(app, win, "ov_right", 0.0)
+    App_scroll_set(app, win, "src_list", 0.0)
+    App_scroll_set(app, win, "versions", 0.0)
+end
+
+fn go_back(s: state::St) is
+    if s.screen == "lib" is
+        s.screen = "libs"
+    else if s.screen != "libs" is
+        s.screen = "libs"
+    end
+end
+
+fn focus_search(app: App, s: state::St) is
+    s.screen = "libs"
+    App_focus_id(app, App_get_main(app), "search")
+end
+
+fn open_lib(app: App, s: state::St, name: string) is
+    load::open_library(app, s, name)
+    reset_scroll(app)
+end
+
+;; ── Messages ─────────────────────────────────────────────────────────────────
+
+;; Window-level keys. `name` is the key, `typed` the text it produced, `mods` a bit set (1 shift, 2 ctrl).
+fn on_key(app: App, s: state::St, name: string, typed: string, mods: int) -> bool is
+    let ctrl: bool = (mods / 2) % 2 == 1
+    if name == "Escape" is
+        go_back(s)
+        return true
+    end
+    if name == "F5" || (ctrl && string_lower(name) == "r") is
+        if s.screen == "lib" is load::refresh_library(app, s) else is load::load_index(app, s) end
+        state::say(s, "Refreshing…")
+        return true
+    end
+    if typed == "/" || name == "Slash" || (ctrl && string_lower(name) == "k") || (ctrl && string_lower(name) == "f") is
+        focus_search(app, s)
+        return true
+    end
+    if ctrl && string_lower(name) == "q" is
+        App_quit(app)
+        return false
+    end
+    return false
+end
+
+fn toggle_notes(s: state::St, tag: string) is
+    if util::has(s.rel_open, tag) is
+        let mut keep: [string] = []
+        let mut i: int = 0
+        while i < array_len(s.rel_open) is
+            if s.rel_open[i] != tag is keep = array_push(keep, s.rel_open[i]) end
+            i += 1
+        end
+        s.rel_open = keep
+    else is
+        s.rel_open = array_push(s.rel_open, util::own(tag))
+    end
+end
+
+fn save_token(s: state::St, value: string) is
+    s.settings.token = string_trim(value)
+    store::save_settings(s.settings)
+end
+
+;; Reacts to one message; true when the tree has to be rebuilt.
+fn update(app: App, s: state::St, id: string, text: string, text2: string, idx: int, flag: bool) -> bool is
+    if string_starts_with(id, "net|") is
+        load::on_net(app, s, id, text, text2, idx)
+        return true
+    end
+    if id == "key" is return on_key(app, s, text, text2, idx) end
+    if id == "focus" is return false end
+
+    if id == "nav:libs" is
+        s.screen = "libs"
+    else if id == "nav:docs" is
+        s.screen = "docs"
+    else if id == "nav:settings" is
+        s.screen = "settings"
+        s.cache_text = store::usage()
+    else if id == "back" is
+        s.screen = "libs"
+    else if id == "refresh" is
+        if s.screen == "lib" is load::refresh_library(app, s) else is load::load_index(app, s) end
+        state::say(s, "Refreshing…")
+    else if id == "search" is
+        s.query = text
+    else if id == "clear" is
+        s.query = ""
+        s.lang = ""
+        s.tag = ""
+    else if string_starts_with(id, "lang:") is
+        s.lang = string_slice(id, 5, string_len(id))
+    else if string_starts_with(id, "tag:") is
+        s.tag = string_slice(id, 4, string_len(id))
+    else if string_starts_with(id, "lib:") is
+        open_lib(app, s, string_slice(id, 4, string_len(id)))
+    else if string_starts_with(id, "dep:") is
+        open_lib(app, s, string_slice(id, 4, string_len(id)))
+    else if id == "tab" is
+        s.tab = idx
+        load::ensure_tab(app, s)
+    else if id == "copy:install" is
+        copy_text(s, "bit install " + s.sel, "the install command")
+    else if id == "copy:add" is
+        copy_text(s, "bit add " + s.sel, "the add command")
+    else if id == "copy:file" is
+        copy_text(s, s.file_text, s.file_path)
+    else if string_starts_with(id, "open:") is
+        open_url(s, string_slice(id, 5, string_len(id)))
+    else if string_starts_with(id, "dir:") is
+        s.dir = string_slice(id, 4, string_len(id))
+        App_scroll_set(app, App_get_main(app), "src_list", 0.0)
+    else if id == "up" is
+        s.dir = util::parent(s.dir)
+    else if string_starts_with(id, "file:") is
+        load::load_file(app, s, string_slice(id, 5, string_len(id)))
+    else if string_starts_with(id, "ver:") is
+        load::set_ref(app, s, string_slice(id, 4, string_len(id)))
+        reset_scroll(app)
+        state::say(s, if s.ref == "" then "Showing the default version." else "Showing version " + s.ref + ".")
+    else if string_starts_with(id, "notes:") is
+        toggle_notes(s, string_slice(id, 6, string_len(id)))
+    else if id == "theme" is
+        s.settings.theme = text
+        store::save_settings(s.settings)
+        apply_theme(app, s)
+    else if id == "token_input" is
+        s.token_draft = text
+    else if id == "token_show" is
+        s.token_shown = flag
+    else if id == "token_save" is
+        save_token(s, s.token_draft)
+        state::say(s, if s.settings.token == "" then "Token removed." else "Token saved.")
+    else if id == "token_remove" is
+        s.token_draft = ""
+        save_token(s, "")
+        s.rate_text = ""
+        state::say(s, "Token removed.")
+    else if id == "token_test" is
+        s.settings.token = string_trim(s.token_draft)
+        load::check_rate(app, s)
+    else if id == "cache_clear" is
+        store::clear()
+        s.cache_text = store::usage()
+        state::say(s, "Saved data cleared.")
+    else is
+        return false
+    end
+    return true
+end
+
+;; ── Main ─────────────────────────────────────────────────────────────────────
+
+fn main() is
+    let s: state::St = state::st_new(VERSION)
+    s.settings = store::load_settings()
+    s.token_draft = s.settings.token
+
+    let app: App = app_new("bit.io", WIN_W, WIN_H)
+    App_set_css(app, ui::css())
+    App_set_tick(app, TICK_MS)
+    apply_theme(app, s)
+
+    load::peek_index(s)
+    load::load_index(app, s)
+    s.cache_text = store::usage()
+
+    let mut root: Element = screens::build(s)
+    while App_running(app) is
+        let ms: List_Message = App_frame1(app, root)
+        let n: int = List_Message_len(ms)
+        let mut changed: bool = false
+        let mut i: int = 0
+        while i < n is
+            let m: Message = List_Message_get(ms, i)
+            let id: string = util::own(Message_get_id(m))
+            let text: string = util::own(Message_get_text(m))
+            let text2: string = util::own(Message_get_text2(m))
+            let idx: int = Message_get_idx(m)
+            let flag: bool = Message_get_flag(m)
+            Message_free(m)
+            if update(app, s, id, text, text2, idx, flag) is changed = true end
+            i += 1
+        end
+        List_Message_free(ms)
+        if s.toast != "" && time_ms() >= s.toast_until is
+            s.toast = ""
+            changed = true
+        end
+        if changed is
+            let fresh: Element = screens::build(s)
+            Element_free(root)
+            root = fresh
+        end
+    end
+    Element_free(root)
+end
