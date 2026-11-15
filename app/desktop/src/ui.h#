@@ -1,0 +1,521 @@
+use "hlib -> gui"
+mod util
+mod markdown
+mod highlight
+
+;; ── Building blocks of the interface ─────────────────────────────────────────
+;; Everything here calls the gui library through the hlib API directly (`text`, `row`, `Element_set_class`,
+;; `Style_set_*` ...). The one thing the API asks of its caller is ownership: a call that takes a value
+;; clones it, so the handle you passed stays yours and must be freed (hlib API, "Własność i pamięć").
+;; The tree is rebuilt whenever the state changes, so `add` / `v_row` / `v_col` free what they consumed and
+;; the styles are set IN PLACE through the Style accessors instead of the chaining methods, which would
+;; return a new handle (and leave the old one behind) on every call.
+
+;; ── Colours ──────────────────────────────────────────────────────────────────
+
+pub fn lang_color(id: string) -> int is
+    if id == "hsharp" is return util::rgb(139, 92, 246) end
+    if id == "hackerlang" is return util::rgb(16, 185, 129) end
+    if id == "hackerscript" is return util::rgb(245, 158, 11) end
+    return util::rgb(100, 116, 139)
+end
+
+pub fn c_ok() -> int is
+    return util::rgb(34, 160, 90)
+end
+
+pub fn c_warn() -> int is
+    return util::rgb(217, 119, 6)
+end
+
+pub fn c_bad() -> int is
+    return util::rgb(220, 60, 60)
+end
+
+pub fn token_color(kind: int, dark: bool) -> int is
+    if dark is
+        if kind == highlight::kind_keyword() is return util::rgb(203, 166, 247) end
+        if kind == highlight::kind_string() is return util::rgb(166, 227, 161) end
+        if kind == highlight::kind_comment() is return util::rgb(127, 132, 156) end
+        if kind == highlight::kind_number() is return util::rgb(250, 179, 135) end
+        if kind == highlight::kind_type() is return util::rgb(249, 226, 175) end
+        if kind == highlight::kind_call() is return util::rgb(137, 180, 250) end
+        if kind == highlight::kind_punct() is return util::rgb(148, 226, 213) end
+        if kind == highlight::kind_section() is return util::rgb(245, 194, 231) end
+        return util::rgb(205, 214, 244)
+    end
+    if kind == highlight::kind_keyword() is return util::rgb(136, 57, 239) end
+    if kind == highlight::kind_string() is return util::rgb(64, 160, 43) end
+    if kind == highlight::kind_comment() is return util::rgb(140, 143, 161) end
+    if kind == highlight::kind_number() is return util::rgb(254, 100, 11) end
+    if kind == highlight::kind_type() is return util::rgb(223, 142, 29) end
+    if kind == highlight::kind_call() is return util::rgb(30, 102, 245) end
+    if kind == highlight::kind_punct() is return util::rgb(23, 146, 153) end
+    if kind == highlight::kind_section() is return util::rgb(234, 118, 203) end
+    return util::rgb(76, 79, 105)
+end
+
+;; ── CSS (set once on the App) ────────────────────────────────────────────────
+
+fn css_rule(sel: string, body: string) -> string is
+    return sel + " " + "\{" + " " + body + " " + "}" + "\n"
+end
+
+pub fn css() -> string is
+    let mut c: string = ""
+    c = c + css_rule("button.primary", "background: linear-gradient(90deg, #8b5cf6, #ec4899); border-radius: 10px;")
+    c = c + css_rule("button.nav", "background: rgba(0,0,0,0); border-width: 0px; border-radius: 10px; padding: 10px 14px; box-shadow: 0 0 0 rgba(0,0,0,0);")
+    c = c + css_rule("button.nav_on", "background: rgba(139,92,246,0.22); border-width: 0px; border-radius: 10px; padding: 10px 14px; box-shadow: 0 0 0 rgba(0,0,0,0);")
+    c = c + css_rule("button.chip", "border-radius: 999px; padding: 5px 13px; font-size: 13px; box-shadow: 0 0 0 rgba(0,0,0,0);")
+    c = c + css_rule("button.chip_on", "background: linear-gradient(90deg, #8b5cf6, #ec4899); color: #ffffff; border-width: 0px; border-radius: 999px; padding: 5px 13px; font-size: 13px; box-shadow: 0 0 0 rgba(0,0,0,0);")
+    c = c + css_rule("button.libcard", "border-radius: 14px; padding: 0px; background: rgba(127,127,127,0.10); border-width: 1px; box-shadow: 0 2px 8px rgba(0,0,0,0.12);")
+    c = c + css_rule("button.libcard:hover", "background: rgba(139,92,246,0.18); box-shadow: 0 8px 22px rgba(0,0,0,0.28);")
+    c = c + css_rule("button.row", "border-radius: 8px; padding: 6px 10px; background: rgba(0,0,0,0); border-width: 0px; box-shadow: 0 0 0 rgba(0,0,0,0); font-weight: 400;")
+    c = c + css_rule("button.row:hover", "background: rgba(139,92,246,0.16);")
+    c = c + css_rule("button.row_on", "border-radius: 8px; padding: 6px 10px; background: rgba(139,92,246,0.26); border-width: 0px; box-shadow: 0 0 0 rgba(0,0,0,0);")
+    c = c + css_rule("container.card", "border-radius: 14px;")
+    c = c + css_rule("container.code", "background: rgba(127,127,127,0.14); border-radius: 10px; padding: 12px;")
+    c = c + css_rule("container.quote", "background: rgba(139,92,246,0.10); border-radius: 8px; padding: 10px 14px;")
+    c = c + css_rule("container.side", "background: rgba(127,127,127,0.09);")
+    c = c + css_rule("container.pill", "border-radius: 999px; padding: 2px 10px;")
+    c = c + css_rule("container.bar", "background: rgba(127,127,127,0.10);")
+    return c
+end
+
+;; ── Ownership helpers ────────────────────────────────────────────────────────
+
+;; Pushes a clone of `e` into `kids` and frees `e`.
+pub fn add(kids: List_Element, e: Element) is
+    List_Element_push(kids, e)
+    Element_free(e)
+end
+
+fn gap_of(e: Element, g: f64) is
+    if g > 0.0 is Style_set_gap(Element_get_st(e), g) end
+end
+
+;; row / column from a list of children; the list is freed.
+pub fn v_row(kids: List_Element, gap: f64) -> Element is
+    let e: Element = row(kids)
+    List_Element_free(kids)
+    gap_of(e, gap)
+    return e
+end
+
+pub fn v_col(kids: List_Element, gap: f64) -> Element is
+    let e: Element = column(kids)
+    List_Element_free(kids)
+    gap_of(e, gap)
+    return e
+end
+
+pub fn v_stack(kids: List_Element) -> Element is
+    let e: Element = stack(kids)
+    List_Element_free(kids)
+    return e
+end
+
+;; ── In-place style (Style accessors of the element's own Style) ──────────────
+
+pub fn set_pad(e: Element, p: f64) is
+    let st: Style = Element_get_st(e)
+    Style_set_pt(st, p)
+    Style_set_pr(st, p)
+    Style_set_pb(st, p)
+    Style_set_pl(st, p)
+end
+
+pub fn set_pad_xy(e: Element, x: f64, y: f64) is
+    let st: Style = Element_get_st(e)
+    Style_set_pt(st, y)
+    Style_set_pb(st, y)
+    Style_set_pl(st, x)
+    Style_set_pr(st, x)
+end
+
+pub fn set_pad4(e: Element, t: f64, r: f64, b: f64, l: f64) is
+    let st: Style = Element_get_st(e)
+    Style_set_pt(st, t)
+    Style_set_pr(st, r)
+    Style_set_pb(st, b)
+    Style_set_pl(st, l)
+end
+
+pub fn set_w_fill(e: Element) is
+    let l: Length = fill()
+    Style_set_w(Element_get_st(e), l)
+    Length_free(l)
+end
+
+pub fn set_h_fill(e: Element) is
+    let l: Length = fill()
+    Style_set_h(Element_get_st(e), l)
+    Length_free(l)
+end
+
+pub fn set_w_px(e: Element, w: f64) is
+    let l: Length = fixed(w)
+    Style_set_w(Element_get_st(e), l)
+    Length_free(l)
+end
+
+pub fn set_h_px(e: Element, h: f64) is
+    let l: Length = fixed(h)
+    Style_set_h(Element_get_st(e), l)
+    Length_free(l)
+end
+
+pub fn set_w_portion(e: Element, n: f64) is
+    let l: Length = portion(n)
+    Style_set_w(Element_get_st(e), l)
+    Length_free(l)
+end
+
+pub fn set_max_w(e: Element, w: f64) is
+    Style_set_max_w(Element_get_st(e), w)
+end
+
+pub fn set_bg(e: Element, c: int) is
+    Style_set_bg(Element_get_st(e), c)
+end
+
+pub fn set_fg(e: Element, c: int) is
+    Style_set_fg(Element_get_st(e), c)
+end
+
+pub fn set_size(e: Element, s: f64) is
+    Style_set_size(Element_get_st(e), s)
+end
+
+pub fn set_bold(e: Element) is
+    Style_set_weight(Element_get_st(e), 1)
+end
+
+pub fn set_radius(e: Element, r: f64) is
+    Style_set_radius(Element_get_st(e), r)
+end
+
+pub fn set_border(e: Element, w: f64, c: int) is
+    let st: Style = Element_get_st(e)
+    Style_set_bw(st, w)
+    Style_set_bc(st, c)
+end
+
+;; ax / ay: 0 start, 1 centre, 2 end
+pub fn set_align(e: Element, ax: int, ay: int) is
+    let st: Style = Element_get_st(e)
+    Style_set_ax(st, ax)
+    Style_set_ay(st, ay)
+end
+
+pub fn set_no_wrap(e: Element) is
+    Style_set_wrap(Element_get_st(e), 0)
+end
+
+pub fn set_clip(e: Element) is
+    Style_set_clip(Element_get_st(e), 1)
+end
+
+;; ── Text ─────────────────────────────────────────────────────────────────────
+
+pub fn lbl(s: string, class: string) -> Element is
+    let e: Element = text(s)
+    if class != "" is Element_set_class(e, class) end
+    return e
+end
+
+pub fn lbl_size(s: string, class: string, size: f64, bold: bool) -> Element is
+    let e: Element = lbl(s, class)
+    set_size(e, size)
+    if bold is set_bold(e) end
+    return e
+end
+
+pub fn title(s: string) -> Element is
+    return lbl(s, "heading")
+end
+
+pub fn muted(s: string) -> Element is
+    return lbl(s, "muted")
+end
+
+pub fn caption_el(s: string) -> Element is
+    return lbl(s, "caption")
+end
+
+;; Wrapping text that fills the width it is given.
+pub fn para(s: string, size: f64) -> Element is
+    let e: Element = text(s)
+    set_size(e, size)
+    set_w_fill(e)
+    return e
+end
+
+;; ── Small components ─────────────────────────────────────────────────────────
+
+pub fn pill(label: string, color: int) -> Element is
+    let t: Element = text(label)
+    set_size(t, 12.0)
+    set_bold(t)
+    set_fg(t, color)
+    set_no_wrap(t)
+    let c: Element = container(t)
+    Element_free(t)
+    Element_set_class(c, "pill")
+    set_bg(c, util::rgba(127, 127, 127, 40))
+    return c
+end
+
+pub fn lang_pill(id: string, label: string) -> Element is
+    let c: int = lang_color(id)
+    let t: Element = text(label)
+    set_size(t, 12.0)
+    set_bold(t)
+    set_fg(t, c)
+    set_no_wrap(t)
+    let w: Element = container(t)
+    Element_free(t)
+    Element_set_class(w, "pill")
+    set_bg(w, (c / 256) * 256 + 46)
+    return w
+end
+
+;; A text button: message `id`, style class (primary | ghost | chip | chip_on | nav | nav_on | ""), optional icon.
+pub fn btn(label: string, id: string, class: string, icon_name: string) -> Element is
+    let b: Element = button(label)
+    Element_set_msg(b, id)
+    if class != "" is Element_set_class(b, class) end
+    if icon_name != "" is Element_set_text2(b, icon_name) end
+    return b
+end
+
+pub fn icon_btn(icon_name: string, id: string) -> Element is
+    let b: Element = button("")
+    Element_set_msg(b, id)
+    Element_set_class(b, "ghost icon")
+    Element_set_text2(b, icon_name)
+    return b
+end
+
+;; Label + value on one line (value muted).
+pub fn kv(label: string, value: string) -> Element is
+    let r: List_Element = List_Element_new()
+    let a: Element = muted(label)
+    set_w_px(a, 96.0)
+    add(r, a)
+    let b: Element = text(value)
+    set_w_fill(b)
+    add(r, b)
+    return v_row(r, 8.0)
+end
+
+;; A framed block with a heading.
+pub fn panel(heading_text: string, body: Element) -> Element is
+    let k: List_Element = List_Element_new()
+    let h: Element = lbl_size(heading_text, "", 15.0, true)
+    add(k, h)
+    add(k, body)
+    let col: Element = v_col(k, 10.0)
+    let c: Element = container(col)
+    Element_free(col)
+    Element_set_class(c, "card")
+    set_w_fill(c)
+    return c
+end
+
+;; A message box: a coloured line of text on a tinted background.
+pub fn note(s: string, color: int) -> Element is
+    let t: Element = text(s)
+    set_size(t, 13.0)
+    set_fg(t, color)
+    set_w_fill(t)
+    let c: Element = container(t)
+    Element_free(t)
+    set_bg(c, (color / 256) * 256 + 28)
+    set_radius(c, 8.0)
+    set_pad_xy(c, 12.0, 8.0)
+    set_w_fill(c)
+    return c
+end
+
+;; ── Markdown ─────────────────────────────────────────────────────────────────
+
+fn code_line(l: highlight::Line, dark: bool) -> Element is
+    let r: List_Element = List_Element_new()
+    let n: int = array_len(l.texts)
+    if n == 0 is
+        let sp: Element = text(" ")
+        set_size(sp, 13.0)
+        add(r, sp)
+    end
+    let mut i: int = 0
+    while i < n is
+        let t: Element = text(l.texts[i])
+        set_size(t, 13.0)
+        set_no_wrap(t)
+        if l.kinds[i] != highlight::kind_plain() is set_fg(t, token_color(l.kinds[i], dark)) end
+        add(r, t)
+        i += 1
+    end
+    return v_row(r, 0.0)
+end
+
+;; A code block (README, release notes): highlighted lines in a framed, horizontally scrollable box.
+pub fn code_block(src: string, lang: string, dark: bool) -> Element is
+    let lines: [highlight::Line] = highlight::highlight(src, lang, MD_CODE_LINES, MD_CODE_WIDTH)
+    let k: List_Element = List_Element_new()
+    let mut i: int = 0
+    while i < array_len(lines) is
+        add(k, code_line(lines[i], dark))
+        i += 1
+    end
+    let col: Element = v_col(k, 1.0)
+    let sc: Element = scrollable_x(col)
+    Element_free(col)
+    let c: Element = container(sc)
+    Element_free(sc)
+    Element_set_class(c, "code")
+    set_w_fill(c)
+    return c
+end
+
+const MD_CODE_LINES: int = 80
+const MD_CODE_WIDTH: int = 160
+
+fn heading_el(text_s: string, level: int) -> Element is
+    let size: f64 = if level == 1 then 26.0 else if level == 2 then 21.0 else if level == 3 then 17.0 else 15.0
+    let e: Element = lbl_size(text_s, "", size, true)
+    set_w_fill(e)
+    return e
+end
+
+fn table_el(rows: [string]) -> Element is
+    let k: List_Element = List_Element_new()
+    let mut i: int = 0
+    while i < array_len(rows) is
+        let cells: [string] = string_split(rows[i], "\t")
+        let r: List_Element = List_Element_new()
+        let mut c: int = 0
+        while c < array_len(cells) is
+            let t: Element = text(cells[c])
+            set_size(t, 13.0)
+            if i == 0 is set_bold(t) end
+            set_w_portion(t, 1.0)
+            add(r, t)
+            c += 1
+        end
+        let line: Element = v_row(r, 12.0)
+        let wrap: Element = container(line)
+        Element_free(line)
+        set_pad_xy(wrap, 10.0, 6.0)
+        set_w_fill(wrap)
+        if i == 0 is
+            set_bg(wrap, util::rgba(139, 92, 246, 40))
+        else if i % 2 == 0 is
+            set_bg(wrap, util::rgba(127, 127, 127, 22))
+        end
+        set_radius(wrap, 6.0)
+        add(k, wrap)
+        i += 1
+    end
+    return v_col(k, 2.0)
+end
+
+fn list_item_el(b: markdown::Block) -> Element is
+    let r: List_Element = List_Element_new()
+    let ind: f64 = 18.0 * 1.0 + 0.0
+    if b.level > 0 is
+        add(r, hspace(ind * (b.level + 0.0)))
+    end
+    let m: Element = text(b.marker)
+    set_w_px(m, 24.0)
+    set_size(m, 14.0)
+    Element_set_class(m, "muted")
+    add(r, m)
+    add(r, para(b.text, 14.0))
+    return v_row(r, 4.0)
+end
+
+;; Blocks -> one column. `max_blocks` of them at most.
+pub fn md_view(blocks: [markdown::Block], dark: bool) -> Element is
+    let k: List_Element = List_Element_new()
+    let mut i: int = 0
+    while i < array_len(blocks) is
+        let b: markdown::Block = blocks[i]
+        i += 1
+        if b.kind == "h1" is
+            add(k, heading_el(b.text, 1))
+        else if b.kind == "h2" is
+            add(k, heading_el(b.text, 2))
+        else if b.kind == "h3" is
+            add(k, heading_el(b.text, 3))
+        else if b.kind == "h4" is
+            add(k, heading_el(b.text, 4))
+        else if b.kind == "p" is
+            add(k, para(b.text, 14.0))
+        else if b.kind == "li" is
+            add(k, list_item_el(b))
+        else if b.kind == "quote" is
+            let q: Element = para(b.text, 14.0)
+            Element_set_class(q, "muted")
+            let c: Element = container(q)
+            Element_free(q)
+            Element_set_class(c, "quote")
+            set_w_fill(c)
+            add(k, c)
+        else if b.kind == "code" is
+            add(k, code_block(b.text, b.lang, dark))
+        else if b.kind == "table" is
+            add(k, table_el(b.rows))
+        else if b.kind == "rule" is
+            add(k, rule())
+        end
+    end
+    return v_col(k, 10.0)
+end
+
+;; The Links list under a README / docs page: one ghost button per link.
+pub fn links_view(links: [markdown::Block]) -> Element is
+    let k: List_Element = List_Element_new()
+    let mut i: int = 0
+    while i < array_len(links) && i < LINKS_MAX is
+        let l: markdown::Block = links[i]
+        let label: string = util::cut(if l.text != "" then l.text else l.lang, 60)
+        let b: Element = btn(label, "open:" + l.lang, "ghost", "external-link")
+        Style_set_ax(Element_get_st(b), 0)
+        add(k, b)
+        i += 1
+    end
+    return v_col(k, 0.0)
+end
+
+const LINKS_MAX: int = 12
+
+;; ── Source files ─────────────────────────────────────────────────────────────
+
+;; Line numbers + highlighted code for a whole file, as a virtual list (only visible rows are laid out).
+pub fn file_view(src: string, lang: string, dark: bool, max_lines: int) -> Element is
+    let lines: [highlight::Line] = highlight::highlight(src, lang, max_lines, FILE_WIDTH)
+    let items: List_Element = List_Element_new()
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let r: List_Element = List_Element_new()
+        let num: Element = text(to_string(i + 1))
+        set_size(num, 12.0)
+        set_w_px(num, 48.0)
+        Element_set_class(num, "muted")
+        Style_set_tx(Element_get_st(num), 2)
+        add(r, num)
+        add(r, code_line(lines[i], dark))
+        add(items, v_row(r, 14.0))
+        i += 1
+    end
+    let v: Element = virtual_scrollable(array_len(lines), 18.0, items)
+    List_Element_free(items)
+    Element_set_id(v, "file_view")
+    set_w_fill(v)
+    set_h_fill(v)
+    return v
+end
+
+const FILE_WIDTH: int = 220
