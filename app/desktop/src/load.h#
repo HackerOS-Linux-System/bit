@@ -1,0 +1,642 @@
+use "hlib -> gui"
+mod util
+mod hk
+mod model
+mod store
+mod markdown
+mod state
+
+;; ── Loading: index, manifest, README, stats, releases, tree, files ───────────
+;; Everything goes through `curl` run by the GUI library's background tasks (App_task_run), so the window
+;; never blocks. Answers come back as messages with an id of the form
+;;     net|<purpose>|<generation>|<attempt>|<cache key>
+;; and are dropped when the generation is no longer current (the user moved on). Every answer that is
+;; usable is saved in the disk cache; when the network fails the saved copy is used ("stale").
+
+const HTTP_OK: int = 200
+const HTTP_UNAUTHORIZED: int = 401
+const HTTP_FORBIDDEN: int = 403
+const HTTP_NOT_FOUND: int = 404
+const HTTP_TOO_MANY: int = 429
+;; (literals of 128 and more in an `if` condition are mis-compiled by some H# 0.9 builds: every threshold
+;; and status code in this program is a named constant)
+const TTL_MANIFEST: int = 21600
+const TTL_README: int = 21600
+const TTL_META: int = 3600
+const TTL_RELEASES: int = 3600
+const TTL_TREE: int = 21600
+const TTL_FILE: int = 86400
+const TIMEOUT: string = "25"
+const MAX_README: int = 200000
+const MAX_MANIFEST: int = 100000
+const MAX_FILE: int = 300000
+const INDEX_URL: string = "https://raw.githubusercontent.com/HackerOS-Linux-System/bit/main/index/repository.json"
+
+fn manifest_names() -> [string] is
+    return ["Bit.hk", "bit.hk"]
+end
+
+fn readme_names() -> [string] is
+    return ["README.md", "Readme.md", "readme.md", "README.markdown", "README.MD", "README", "README.txt", "README.rst"]
+end
+
+fn free_el(h: Element) is
+    if h != 0 is Element_free(h) end
+end
+
+;; ── Requests ─────────────────────────────────────────────────────────────────
+
+fn api_headers(a: List_Str, token: string) is
+    List_Str_push(a, "-H")
+    List_Str_push(a, "Accept: application/vnd.github+json")
+    List_Str_push(a, "-H")
+    List_Str_push(a, "X-GitHub-Api-Version: 2022-11-28")
+    if token != "" is
+        List_Str_push(a, "-H")
+        List_Str_push(a, "Authorization: Bearer " + token)
+    end
+end
+
+;; Starts `curl url` as a background task. The HTTP status is appended to the output after a newline.
+fn spawn(app: App, s: state::St, id: string, url: string, api: bool, fresh: bool) is
+    let a: List_Str = List_Str_new()
+    List_Str_push(a, "-sS")
+    List_Str_push(a, "-L")
+    List_Str_push(a, "--max-time")
+    List_Str_push(a, TIMEOUT)
+    List_Str_push(a, "-A")
+    List_Str_push(a, "bit-io-desktop/" + s.version)
+    List_Str_push(a, "-w")
+    List_Str_push(a, "\n%" + "\{" + "http_code" + "}")
+    if fresh is
+        List_Str_push(a, "-H")
+        List_Str_push(a, "Cache-Control: no-cache")
+    end
+    if api is api_headers(a, s.settings.token) end
+    List_Str_push(a, url)
+    App_task_run(app, id, "curl", a)
+    List_Str_free(a)
+    s.busy += 1
+end
+
+fn make_id(purpose: string, gen: int, n: int, key: string) -> string is
+    return "net|" + purpose + "|" + to_string(gen) + "|" + to_string(n) + "|" + string_replace(key, "|", "_")
+end
+
+;; Cache first (while fresh), otherwise the network. `fresh_ok` = ttl > 0 means a young saved copy is used.
+;; Returns the saved body when it was used directly (the caller then handles it as a 200), or "" + false.
+pub struct Hit is
+    pub used: bool
+    pub body: string
+    pub age: int
+end
+
+fn lookup(key: string, ttl: int) -> Hit is
+    if ttl <= 0 is return Hit { used: false, body: "", age: 0 } end
+    let c: store::Cached = store::get(key)
+    if c.found && c.age < ttl is return Hit { used: true, body: c.body, age: c.age } end
+    return Hit { used: false, body: "", age: 0 }
+end
+
+fn raw_url(g: model::Gh, ref: string, path: string) -> string is
+    return "https://raw.githubusercontent.com/" + g.owner + "/" + g.repo + "/" + util::url_enc_path(ref) + "/" + util::url_enc_path(model::repo_path(g, path))
+end
+
+fn api_url(g: model::Gh, rest: string) -> string is
+    return "https://api.github.com/repos/" + util::url_enc(g.owner) + "/" + util::url_enc(g.repo) + rest
+end
+
+;; ── The library index ────────────────────────────────────────────────────────
+
+;; First paint: the saved copy, else the snapshot shipped with the app.
+pub fn peek_index(s: state::St) is
+    let c: store::Cached = store::get("index")
+    if c.found is
+        let idx: model::Index = model::parse_index(c.body)
+        if array_len(idx.libs) > 0 is
+            s.idx = idx
+            s.idx_res.stale = true
+            s.idx_res.age = c.age
+            return
+        end
+    end
+    let seed: string = store::read_data("repository.json")
+    if seed != "" is
+        let idx: model::Index = model::parse_index(seed)
+        s.idx = idx
+        s.idx_res.stale = true
+        s.idx_res.age = -1
+    end
+end
+
+pub fn load_index(app: App, s: state::St) is
+    s.idx_res.state = state::loading()
+    s.idx_res.err = ""
+    spawn(app, s, make_id("index", 0, 0, "index"), INDEX_URL, false, true)
+end
+
+;; ── One library ──────────────────────────────────────────────────────────────
+
+fn drop_notes(s: state::St) is
+    let mut i: int = 0
+    while i < array_len(s.rel_els) is
+        free_el(s.rel_els[i])
+        i += 1
+    end
+    s.rel_els = []
+    s.rel_els_tag = []
+end
+
+fn reset_resources(s: state::St, keep_rels: bool) is
+    s.mf = hk::empty()
+    s.mf_file = ""
+    s.mf_res = state::res_new()
+    s.rd_text = ""
+    s.rd_file = ""
+    s.rd_res = state::res_new()
+    free_el(s.rd_el)
+    s.rd_el = 0
+    s.rd_has = false
+    s.rd_links = []
+    s.meta_res = state::res_new()
+    if !keep_rels is
+        s.rels = []
+        s.rel_res = state::res_new()
+    end
+    s.rel_open = []
+    drop_notes(s)
+    s.tree = model::empty_tree()
+    s.tree_res = state::res_new()
+    s.dir = ""
+    s.file_path = ""
+    s.file_res = state::res_new()
+    s.file_text = ""
+    free_el(s.file_el)
+    s.file_el = 0
+    s.file_has = false
+    s.file_lines = 0
+    s.file_note = ""
+end
+
+fn fail_all(s: state::St, why: string) is
+    s.mf_res.state = state::failed()
+    s.mf_res.err = why
+    s.rd_res.state = state::failed()
+    s.rd_res.err = why
+    s.meta_res.state = state::failed()
+    s.meta_res.err = why
+end
+
+pub fn load_manifest(app: App, s: state::St, n: int) is
+    let g: model::Gh = model::parse_github(state::current(s).target)
+    if !g.ok is
+        s.mf_res.state = state::failed()
+        s.mf_res.err = "This library's source is not on GitHub."
+        return
+    end
+    let names: [string] = manifest_names()
+    let ref: string = state::eff_ref(s)
+    let key: string = "manifest:" + model::slug(g) + "@" + ref + ":" + names[n]
+    s.mf_res.state = state::loading()
+    let hit: Hit = lookup(key, TTL_MANIFEST)
+    if hit.used is
+        got_manifest(app, s, n, 200, hit.body, false, hit.age)
+        return
+    end
+    spawn(app, s, make_id("manifest", s.gen, n, key), raw_url(g, ref, names[n]), false, false)
+end
+
+pub fn load_readme(app: App, s: state::St, n: int) is
+    let g: model::Gh = model::parse_github(state::current(s).target)
+    if !g.ok is
+        s.rd_res.state = state::failed()
+        s.rd_res.err = "This library's source is not on GitHub."
+        return
+    end
+    let names: [string] = readme_names()
+    let ref: string = state::eff_ref(s)
+    let key: string = "readme:" + model::slug(g) + "@" + ref + ":" + names[n]
+    s.rd_res.state = state::loading()
+    let hit: Hit = lookup(key, TTL_README)
+    if hit.used is
+        got_readme(app, s, n, 200, hit.body, false, hit.age)
+        return
+    end
+    spawn(app, s, make_id("readme", s.gen, n, key), raw_url(g, ref, names[n]), false, false)
+end
+
+pub fn load_meta(app: App, s: state::St) is
+    let g: model::Gh = model::parse_github(state::current(s).target)
+    if !g.ok is
+        s.meta_res.state = state::failed()
+        s.meta_res.err = "This library's source is not on GitHub."
+        return
+    end
+    let key: string = "meta:" + g.owner + "/" + g.repo
+    s.meta_res.state = state::loading()
+    let hit: Hit = lookup(key, TTL_META)
+    if hit.used is
+        got_meta(s, 200, hit.body, false, hit.age)
+        return
+    end
+    spawn(app, s, make_id("meta", s.gen, 0, key), api_url(g, ""), true, false)
+end
+
+pub fn load_releases(app: App, s: state::St) is
+    let g: model::Gh = model::parse_github(state::current(s).target)
+    if !g.ok is
+        s.rel_res.state = state::failed()
+        s.rel_res.err = "This library's source is not on GitHub."
+        return
+    end
+    let key: string = "rels:" + g.owner + "/" + g.repo
+    s.rel_res.state = state::loading()
+    let hit: Hit = lookup(key, TTL_RELEASES)
+    if hit.used is
+        got_releases(app, s, 200, hit.body, false, hit.age)
+        return
+    end
+    spawn(app, s, make_id("rels", s.gen, 0, key), api_url(g, "/releases?per_page=30"), true, false)
+end
+
+fn load_tags(app: App, s: state::St) is
+    let g: model::Gh = model::parse_github(state::current(s).target)
+    let key: string = "tags:" + g.owner + "/" + g.repo
+    let hit: Hit = lookup(key, TTL_RELEASES)
+    if hit.used is
+        got_tags(s, 200, hit.body, false, hit.age)
+        return
+    end
+    spawn(app, s, make_id("tags", s.gen, 0, key), api_url(g, "/tags?per_page=30"), true, false)
+end
+
+pub fn load_tree(app: App, s: state::St) is
+    let g: model::Gh = model::parse_github(state::current(s).target)
+    if !g.ok is
+        s.tree_res.state = state::failed()
+        s.tree_res.err = "This library's source is not on GitHub."
+        return
+    end
+    let ref: string = state::eff_ref(s)
+    let key: string = "tree:" + model::slug(g) + "@" + ref
+    s.tree_res.state = state::loading()
+    let hit: Hit = lookup(key, TTL_TREE)
+    if hit.used is
+        got_tree(s, 200, hit.body, false, hit.age)
+        return
+    end
+    spawn(app, s, make_id("tree", s.gen, 0, key), api_url(g, "/git/trees/" + util::url_enc_path(ref) + "?recursive=1"), true, false)
+end
+
+pub fn file_key(s: state::St, path: string) -> string is
+    let g: model::Gh = model::parse_github(state::current(s).target)
+    return "src:" + model::slug(g) + "@" + state::eff_ref(s) + ":" + path
+end
+
+pub fn load_file(app: App, s: state::St, path: string) is
+    let g: model::Gh = model::parse_github(state::current(s).target)
+    free_el(s.file_el)
+    s.file_el = 0
+    s.file_has = false
+    s.file_path = path
+    s.file_text = ""
+    s.file_note = ""
+    s.file_res = state::res_new()
+    if !g.ok is
+        s.file_res.state = state::failed()
+        s.file_res.err = "This library's source is not on GitHub."
+        return
+    end
+    let key: string = file_key(s, path)
+    s.file_res.state = state::loading()
+    let hit: Hit = lookup(key, TTL_FILE)
+    if hit.used is
+        got_file(s, path, 200, hit.body, false, hit.age)
+        return
+    end
+    spawn(app, s, make_id("file", s.gen, 0, key), raw_url(g, state::eff_ref(s), path), false, false)
+end
+
+;; Opens a library: new generation, everything cleared, the three things the overview needs are requested.
+pub fn open_library(app: App, s: state::St, name: string) is
+    s.sel = name
+    s.gen += 1
+    s.ref = ""
+    s.tab = 0
+    s.screen = "lib"
+    reset_resources(s, false)
+    load_manifest(app, s, 0)
+    load_readme(app, s, 0)
+    load_meta(app, s)
+end
+
+;; Switches to another version (tag/branch) of the same library.
+pub fn set_ref(app: App, s: state::St, ref: string) is
+    s.ref = if ref == state::default_ref(s) then "" else ref
+    s.gen += 1
+    reset_resources(s, true)
+    load_manifest(app, s, 0)
+    load_readme(app, s, 0)
+    load_meta(app, s)
+    s.tab = 0
+end
+
+;; Loads what a tab needs the first time it is shown.
+pub fn ensure_tab(app: App, s: state::St) is
+    if s.tab == 1 && s.tree_res.state == state::idle() is load_tree(app, s) end
+    if s.tab == 2 && s.rel_res.state == state::idle() is load_releases(app, s) end
+end
+
+pub fn refresh_library(app: App, s: state::St) is
+    let name: string = s.sel
+    let ref: string = util::own(s.ref)
+    let tab: int = s.tab
+    let g: model::Gh = model::parse_github(state::current(s).target)
+    if g.ok is
+        let slug: string = model::slug(g)
+        let r: string = state::eff_ref(s)
+        store::forget("manifest:" + slug + "@" + r + ":Bit.hk")
+        store::forget("manifest:" + slug + "@" + r + ":bit.hk")
+        let names: [string] = readme_names()
+        let mut i: int = 0
+        while i < array_len(names) is
+            store::forget("readme:" + slug + "@" + r + ":" + names[i])
+            i += 1
+        end
+        store::forget("meta:" + g.owner + "/" + g.repo)
+        store::forget("rels:" + g.owner + "/" + g.repo)
+        store::forget("tags:" + g.owner + "/" + g.repo)
+        store::forget("tree:" + slug + "@" + r)
+    end
+    open_library(app, s, name)
+    s.ref = ref
+    s.tab = tab
+    ensure_tab(app, s)
+end
+
+pub fn check_rate(app: App, s: state::St) is
+    s.rate_text = "checking…"
+    spawn(app, s, make_id("rate", 0, 0, "rate"), "https://api.github.com/rate_limit", true, true)
+end
+
+;; ── Answers ──────────────────────────────────────────────────────────────────
+
+fn github_error(s: state::St, code: int, body: string) -> string is
+    if code == HTTP_UNAUTHORIZED is return "GitHub rejected the saved token (401). Check it in Settings." end
+    if (code == HTTP_FORBIDDEN || code == HTTP_TOO_MANY) && (string_contains(string_lower(body), "rate limit")) is
+        if s.settings.token == "" is return "GitHub's anonymous limit (60 requests/hour) is used up. Add a token in Settings." end
+        return "GitHub's hourly limit is used up. Try again later."
+    end
+    if code == HTTP_NOT_FOUND is return "Not found on GitHub." end
+    if code == 0 is return "No network connection." end
+    return "GitHub: HTTP " + to_string(code)
+end
+
+;; Completes a resource: 200 -> `body`; anything else -> the saved copy if there is one, else an error.
+;; Returns "" and sets `err` when there is nothing to show.
+struct Outcome is
+    ok: bool
+    body: string
+    stale: bool
+    age: int
+    err: string
+    code: int
+end
+
+fn settle(s: state::St, key: string, code: int, body: string, net_err: string) -> Outcome is
+    if code == HTTP_OK is
+        store::put(key, body)
+        return Outcome { ok: true, body: body, stale: false, age: 0, err: "", code: code }
+    end
+    if code == HTTP_NOT_FOUND is
+        return Outcome { ok: false, body: "", stale: false, age: 0, err: github_error(s, code, body), code: code }
+    end
+    let c: store::Cached = store::get(key)
+    if c.found is
+        return Outcome { ok: true, body: c.body, stale: true, age: c.age, err: "", code: code }
+    end
+    let why: string = if net_err != "" && code == 0 then "No network connection." else github_error(s, code, body)
+    return Outcome { ok: false, body: "", stale: false, age: 0, err: why, code: code }
+end
+
+fn got_manifest(app: App, s: state::St, n: int, code: int, body: string, stale: bool, age: int) is
+    if code == HTTP_OK is
+        s.mf = hk::parse(util::cut_plain(body, MAX_MANIFEST))
+        s.mf_file = manifest_names()[n]
+        s.mf_res.state = state::ready()
+        s.mf_res.stale = stale
+        s.mf_res.age = age
+        return
+    end
+    if code == HTTP_NOT_FOUND && n + 1 < array_len(manifest_names()) is
+        load_manifest(app, s, n + 1)
+        return
+    end
+    if code == HTTP_NOT_FOUND is
+        s.mf = hk::empty()
+        s.mf_file = ""
+        s.mf_res.state = state::ready()
+        s.mf_res.err = "This repository has no Bit.hk."
+        return
+    end
+end
+
+fn got_readme(app: App, s: state::St, n: int, code: int, body: string, stale: bool, age: int) is
+    if code == HTTP_OK is
+        let file: string = readme_names()[n]
+        s.rd_file = file
+        s.rd_text = util::cut_plain(body, MAX_README)
+        let low: string = string_lower(file)
+        s.rd_md = string_ends_with(low, ".md") || string_ends_with(low, ".markdown")
+        s.rd_res.state = state::ready()
+        s.rd_res.stale = stale
+        s.rd_res.age = age
+        s.rd_has = false
+        return
+    end
+    if code == HTTP_NOT_FOUND && n + 1 < array_len(readme_names()) is
+        load_readme(app, s, n + 1)
+        return
+    end
+    if code == HTTP_NOT_FOUND is
+        s.rd_text = ""
+        s.rd_res.state = state::ready()
+        s.rd_res.err = "This repository has no README."
+    end
+end
+
+fn got_meta(s: state::St, code: int, body: string, stale: bool, age: int) is
+    s.meta = model::parse_meta(body)
+    s.meta_res.state = state::ready()
+    s.meta_res.stale = stale
+    s.meta_res.age = age
+end
+
+fn got_releases(app: App, s: state::St, code: int, body: string, stale: bool, age: int) is
+    let g: model::Gh = model::parse_github(state::current(s).target)
+    let rels: [model::Release] = model::parse_releases(body, g)
+    s.rel_res.stale = stale
+    s.rel_res.age = age
+    if array_len(rels) == 0 && !stale is
+        load_tags(app, s)
+        return
+    end
+    s.rels = rels
+    s.rel_res.state = state::ready()
+end
+
+fn got_tags(s: state::St, code: int, body: string, stale: bool, age: int) is
+    let g: model::Gh = model::parse_github(state::current(s).target)
+    s.rels = model::parse_tags(body, g)
+    s.rel_res.state = state::ready()
+    s.rel_res.stale = stale
+    s.rel_res.age = age
+end
+
+fn got_tree(s: state::St, code: int, body: string, stale: bool, age: int) is
+    let g: model::Gh = model::parse_github(state::current(s).target)
+    s.tree = model::parse_tree(body, g)
+    s.tree_res.state = state::ready()
+    s.tree_res.stale = stale
+    s.tree_res.age = age
+end
+
+fn got_file(s: state::St, path: string, code: int, body: string, stale: bool, age: int) is
+    if path != s.file_path is return end
+    s.file_text = util::cut_plain(body, MAX_FILE)
+    s.file_note = if string_len(body) > MAX_FILE then "Large file: only the first 300 KB are shown." else ""
+    s.file_res.state = state::ready()
+    s.file_res.stale = stale
+    s.file_res.age = age
+    s.file_has = false
+end
+
+fn rate_from(body: string) -> string is
+    let at: int = string_find(body, "\"core\"")
+    if at < 0 is return "unknown" end
+    let part: string = string_slice(body, at, string_len(body))
+    let l: int = string_find(part, "\"limit\":")
+    let r: int = string_find(part, "\"remaining\":")
+    if l < 0 || r < 0 is return "unknown" end
+    let lim: int = str_to_int(string_trim(num_after(part, l + 8)))
+    let rem: int = str_to_int(string_trim(num_after(part, r + 12)))
+    return to_string(rem) + " of " + to_string(lim) + " requests left this hour"
+end
+
+fn num_after(s: string, from: int) -> string is
+    let mut e: int = from
+    while e < string_len(s) && (util::is_digit(string_at(s, e)) || string_at(s, e) == " ") is e += 1 end
+    return string_slice(s, from, e)
+end
+
+;; Handles the answer of a "net|..." task. `out` = curl's stdout (body + "\n" + status), `net_err` = its stderr,
+;; `exit_code` = curl's exit code.
+pub fn on_net(app: App, s: state::St, id: string, out: string, net_err: string, exit_code: int) is
+    if s.busy > 0 is s.busy -= 1 end
+    let parts: [string] = string_split(id, "|")
+    if array_len(parts) < 5 is return end
+    let purpose: string = parts[1]
+    let gen: int = str_to_int(parts[2])
+    let n: int = str_to_int(parts[3])
+    let mut key: string = parts[4]
+    let mut k: int = 5
+    while k < array_len(parts) is
+        key = key + "|" + parts[k]
+        k += 1
+    end
+
+    ;; split the status off the body
+    let len: int = string_len(out)
+    let mut code: int = 0
+    let mut body: string = ""
+    if exit_code == 0 && len >= 4 && string_at(out, len - 4) == "\n" is
+        code = str_to_int(string_slice(out, len - 3, len))
+        body = string_slice(out, 0, len - 4)
+    else is
+        body = string_slice(out, 0, len)
+    end
+
+    if purpose == "index" is
+        if code == HTTP_OK is
+            let idx: model::Index = model::parse_index(body)
+            if array_len(idx.libs) > 0 is
+                store::put("index", body)
+                s.idx = idx
+                s.idx_res.state = state::ready()
+                s.idx_res.stale = false
+                s.idx_res.age = 0
+                s.idx_res.err = ""
+                return
+            end
+        end
+        s.idx_res.state = state::ready()
+        s.idx_res.stale = true
+        if array_len(s.idx.libs) == 0 is
+            s.idx_res.state = state::failed()
+            s.idx_res.err = if exit_code != 0 then "No network connection - and no saved copy of the index." else "Could not read the library index (HTTP " + to_string(code) + ")."
+        end
+        return
+    end
+    if purpose == "rate" is
+        s.rate_text = if code == HTTP_OK then rate_from(body) else github_error(s, code, body)
+        return
+    end
+
+    if gen != s.gen is return end
+    let o: Outcome = settle(s, key, code, body, net_err)
+    if purpose == "manifest" is
+        if o.ok is
+            got_manifest(app, s, n, 200, o.body, o.stale, o.age)
+        else if o.code == HTTP_NOT_FOUND is
+            got_manifest(app, s, n, 404, "", false, 0)
+        else is
+            s.mf_res.state = state::failed()
+            s.mf_res.err = o.err
+        end
+    else if purpose == "readme" is
+        if o.ok is
+            got_readme(app, s, n, 200, o.body, o.stale, o.age)
+        else if o.code == HTTP_NOT_FOUND is
+            got_readme(app, s, n, 404, "", false, 0)
+        else is
+            s.rd_res.state = state::failed()
+            s.rd_res.err = o.err
+        end
+    else if purpose == "meta" is
+        if o.ok is
+            got_meta(s, 200, o.body, o.stale, o.age)
+        else is
+            s.meta_res.state = state::failed()
+            s.meta_res.err = o.err
+        end
+    else if purpose == "rels" is
+        if o.ok is
+            got_releases(app, s, 200, o.body, o.stale, o.age)
+        else is
+            s.rel_res.state = state::failed()
+            s.rel_res.err = o.err
+        end
+    else if purpose == "tags" is
+        if o.ok is
+            got_tags(s, 200, o.body, o.stale, o.age)
+        else is
+            s.rel_res.state = state::ready()
+            s.rels = []
+        end
+    else if purpose == "tree" is
+        if o.ok is
+            got_tree(s, 200, o.body, o.stale, o.age)
+        else is
+            s.tree_res.state = state::failed()
+            s.tree_res.err = o.err
+        end
+    else if purpose == "file" is
+        if key != file_key(s, s.file_path) is return end
+        if o.ok is
+            got_file(s, s.file_path, 200, o.body, o.stale, o.age)
+        else is
+            s.file_res.state = state::failed()
+            s.file_res.err = o.err
+        end
+    end
+end
