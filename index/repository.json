@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-11-13",
+  "updated_at": "2026-11-15",
   "libraries": [
     {
       "name": "mold",
@@ -142,16 +142,6 @@
       "author": "Bit Developers"
     },
     {
-      "name": "qt",
-      "target": "https://github.com/bit-io/qt",
-      "description": "QT library bindings for bit.io.",
-      "tags": [
-        "qt",
-        "qt6"
-      ],
-      "author": "Bit Developers"
-    },
-    {
       "name": "scopeguard",
       "target": "https://github.com/bit-io/scopeguard",
       "description": "Scopeguard library bindings for bit.io.",
@@ -287,15 +277,6 @@
         "cranelift",
         "codegen",
         "jit"
-      ],
-      "author": "Bit Developers"
-    },
-    {
-      "name": "BetterUI",
-      "target": "https://github.com/bit-io/BetterUI",
-      "description": "Modern UI library for bit.io. Written in HackerScript.",
-      "tags": [
-        "skia"
       ],
       "author": "Bit Developers"
     },
