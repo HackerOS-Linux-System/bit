@@ -265,13 +265,14 @@ fn main() is
         let mut changed: bool = false
         let mut i: int = 0
         while i < n is
+            ;; List_Message_get hands out a BORROWED pointer into the list (the facade's `get_mut`), so
+            ;; `m` is never freed on its own - List_Message_free(ms) below releases all of them.
             let m: Message = List_Message_get(ms, i)
-            let id: string = util::own(Message_get_id(m))
-            let text: string = util::own(Message_get_text(m))
-            let text2: string = util::own(Message_get_text2(m))
+            let id: string = string_slice(Message_get_id(m), 0, string_len(Message_get_id(m)))
+            let text: string = string_slice(Message_get_text(m), 0, string_len(Message_get_text(m)))
+            let text2: string = string_slice(Message_get_text2(m), 0, string_len(Message_get_text2(m)))
             let idx: int = Message_get_idx(m)
             let flag: bool = Message_get_flag(m)
-            Message_free(m)
             if update(app, s, id, text, text2, idx, flag) is changed = true end
             i += 1
         end
