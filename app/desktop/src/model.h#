@@ -80,7 +80,12 @@ end
 
 ;; Libraries by name, case-insensitive (insertion sort: the index has a few dozen entries).
 fn sort_libs(libs: [Lib]) -> [Lib] is
-    let mut a: [Lib] = libs
+    let mut a: [Lib] = []
+    let mut c: int = 0
+    while c < array_len(libs) is
+        a = array_push(a, libs[c])
+        c += 1
+    end
     let mut i: int = 1
     while i < array_len(a) is
         let x: Lib = a[i]
@@ -480,7 +485,12 @@ pub fn children(t: Tree, dir: string) -> [Item] is
 end
 
 fn sort_items(items: [Item]) -> [Item] is
-    let mut a: [Item] = items
+    let mut a: [Item] = []
+    let mut c: int = 0
+    while c < array_len(items) is
+        a = array_push(a, items[c])
+        c += 1
+    end
     let mut i: int = 1
     while i < array_len(a) is
         let x: Item = a[i]
