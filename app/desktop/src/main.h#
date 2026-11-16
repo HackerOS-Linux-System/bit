@@ -8,6 +8,9 @@ mod highlight
 mod state
 mod load
 mod ui
+mod langs
+mod apidoc
+mod diff
 mod screens
 
 ;; ── bit.io Desktop ───────────────────────────────────────────────────────────
@@ -22,7 +25,14 @@ mod screens
 const VERSION: string = "0.1.0"
 const WIN_W: int = 1180
 const WIN_H: int = 780
-const TICK_MS: int = 500
+const TICK_SLOW: int = 500
+const TICK_FAST: int = 80
+const API_BATCH: int = 6
+const PAGE_STEP: f64 = 520.0
+const LINE_STEP: f64 = 60.0
+const FAR: f64 = 1000000.0
+const ROW_PX: f64 = 18.0
+const GOTO_CONTEXT: int = 3
 
 ;; ── Theme ────────────────────────────────────────────────────────────────────
 
@@ -86,10 +96,39 @@ end
 
 fn reset_scroll(app: App) is
     let win: int = App_get_main(app)
-    App_scroll_set(app, win, "ov_left", 0.0)
-    App_scroll_set(app, win, "ov_right", 0.0)
+    App_scroll_set(app, win, "ov", 0.0)
+    App_scroll_set(app, win, "api", 0.0)
     App_scroll_set(app, win, "src_list", 0.0)
     App_scroll_set(app, win, "versions", 0.0)
+    App_scroll_set(app, win, "file_view", 0.0)
+    App_scroll_set(app, win, "file_md", 0.0)
+end
+
+;; PageUp / PageDown / arrows / Home / End move the scroll area of the current screen.
+fn scroll_key(app: App, s: state::St, name: string) -> bool is
+    let id: string = screens::scroll_target(s)
+    if id == "" is return false end
+    let win: int = App_get_main(app)
+    let cur: f64 = App_scroll_offset(app, win, id)
+    let mut next: f64 = cur
+    if name == "PageDown" is
+        next = cur + PAGE_STEP
+    else if name == "PageUp" is
+        next = cur - PAGE_STEP
+    else if name == "ArrowDown" is
+        next = cur + LINE_STEP
+    else if name == "ArrowUp" is
+        next = cur - LINE_STEP
+    else if name == "Home" is
+        next = 0.0
+    else if name == "End" is
+        next = cur + FAR
+    else is
+        return false
+    end
+    if next < 0.0 is next = 0.0 end
+    App_scroll_set(app, win, id, next)
+    return true
 end
 
 fn go_back(s: state::St) is
@@ -132,7 +171,43 @@ fn on_key(app: App, s: state::St, name: string, typed: string, mods: int) -> boo
         App_quit(app)
         return false
     end
-    return false
+    return scroll_key(app, s, name)
+end
+
+fn toggle_in(items: [string], tag: string) -> [string] is
+    if util::has(items, tag) is
+        let mut keep: [string] = []
+        let mut i: int = 0
+        while i < array_len(items) is
+            if items[i] != tag is keep = array_push(keep, items[i]) end
+            i += 1
+        end
+        return keep
+    end
+    return array_push(items, util::own(tag))
+end
+
+;; Shows a file of the library in the Source tab (from a search hit, the API tab or the examples).
+fn show_file(app: App, s: state::St, path: string, line: int, as_source: bool) is
+    s.tab = 2
+    s.src_filter = ""
+    s.dir = util::parent(path)
+    load::load_file(app, s, path)
+    if as_source is s.file_md = false end
+    s.goto_line = line
+    load::ensure_tab(app, s)
+end
+
+;; "path:123" -> (path, 123)
+fn split_at_line(spec: string) -> state::Hit is
+    let mut at: int = -1
+    let mut i: int = 0
+    while i < string_len(spec) is
+        if string_at(spec, i) == ":" is at = i end
+        i += 1
+    end
+    if at < 0 is return state::Hit { path: spec, line: 0, text: "" } end
+    return state::Hit { path: string_slice(spec, 0, at), line: str_to_int(string_slice(spec, at + 1, string_len(spec))), text: "" }
 end
 
 fn toggle_notes(s: state::St, tag: string) is
@@ -192,6 +267,66 @@ fn update(app: App, s: state::St, id: string, text: string, text2: string, idx: 
     else if id == "tab" is
         s.tab = idx
         load::ensure_tab(app, s)
+    else if id == "rdraw" is
+        s.rd_raw = !s.rd_raw
+        screens::reset_readme(s)
+    else if id == "rdmore" is
+        s.rd_limit += 60
+        screens::reset_readme(s)
+    else if id == "apiq" is
+        s.api_q = text
+        s.api_shown = state::api_step()
+    else if string_starts_with(id, "apik:") is
+        s.api_kind = string_slice(id, 5, string_len(id))
+        s.api_shown = state::api_step()
+    else if id == "apimore" is
+        s.api_shown += state::api_step()
+    else if id == "srcf" is
+        s.src_filter = text
+        s.src_mode = 0
+    else if id == "srcqin" is
+        s.src_query = text
+    else if id == "srcsearch" is
+        load::code_search(s, s.src_query)
+        if s.snap_dir == "" is state::say(s, "Code search needs the downloaded sources - still loading, or offline.") end
+    else if id == "srcclear" is
+        s.src_mode = 0
+        s.src_hits = []
+        s.src_query = ""
+    else if string_starts_with(id, "hit:") is
+        let h: state::Hit = split_at_line(string_slice(id, 4, string_len(id)))
+        show_file(app, s, h.path, h.line, true)
+    else if string_starts_with(id, "goto:") is
+        let h: state::Hit = split_at_line(string_slice(id, 5, string_len(id)))
+        show_file(app, s, h.path, h.line, true)
+    else if string_starts_with(id, "ex:") is
+        show_file(app, s, string_slice(id, 3, string_len(id)), 0, false)
+    else if id == "mdtoggle" is
+        s.file_md = !s.file_md
+        screens::reset_file(s)
+    else if id == "verify" is
+        load::start_verify(app, s)
+    else if id == "tagpick" is
+        s.tag = if text == "All tags" then "" else text
+    else if string_starts_with(id, "tagto:") is
+        s.tag = string_slice(id, 6, string_len(id))
+        s.query = ""
+        s.lang = ""
+        s.screen = "libs"
+    else if id == "pickver" is
+        let target: string = if text == "(default)" then state::default_ref(s) else text
+        load::set_ref(app, s, target)
+        reset_scroll(app)
+    else if string_starts_with(id, "diff:") is
+        let tag: string = string_slice(id, 5, string_len(id))
+        s.diff_open = toggle_in(s.diff_open, tag)
+        if util::has(s.diff_open, tag) is
+            load::request_mf(app, s, tag)
+            let prev: string = state::prev_tag(s, tag)
+            if prev != "" is load::request_mf(app, s, prev) end
+        end
+    else if string_starts_with(id, "cp:") is
+        copy_text(s, string_slice(id, 3, string_len(id)), "to the clipboard")
     else if id == "copy:install" is
         copy_text(s, "bit install " + s.sel, "the install command")
     else if id == "copy:add" is
@@ -202,11 +337,15 @@ fn update(app: App, s: state::St, id: string, text: string, text2: string, idx: 
         open_url(s, string_slice(id, 5, string_len(id)))
     else if string_starts_with(id, "dir:") is
         s.dir = string_slice(id, 4, string_len(id))
+        s.src_filter = ""
+        s.src_mode = 0
         App_scroll_set(app, App_get_main(app), "src_list", 0.0)
     else if id == "up" is
         s.dir = util::parent(s.dir)
     else if string_starts_with(id, "file:") is
-        load::load_file(app, s, string_slice(id, 5, string_len(id)))
+        let fpath: string = string_slice(id, 5, string_len(id))
+        s.goto_line = 0
+        load::load_file(app, s, fpath)
     else if string_starts_with(id, "ver:") is
         load::set_ref(app, s, string_slice(id, 4, string_len(id)))
         reset_scroll(app)
@@ -251,14 +390,16 @@ fn main() is
 
     let app: App = app_new("bit.io", WIN_W, WIN_H)
     App_set_css(app, ui::css())
-    App_set_tick(app, TICK_MS)
+    let mut tick: int = TICK_SLOW
+    App_set_tick(app, tick)
     apply_theme(app, s)
 
     load::peek_index(s)
     load::load_index(app, s)
-    s.cache_text = store::usage()
+    ;; downloaded sources not touched for three weeks are removed (in the background)
+    util::run("find " + util::sq(store::cache_dir() + "/snap") + " -mindepth 1 -maxdepth 1 -mtime +21 -exec rm -rf {} + &")
 
-    let mut root: Element = screens::build(s)
+    let mut root: Element = screens::build(app, s)
     while App_running(app) is
         let ms: List_Message = App_frame1(app, root)
         let n: int = List_Message_len(ms)
@@ -281,8 +422,26 @@ fn main() is
             s.toast = ""
             changed = true
         end
+        ;; the API tab is read a few files at a time so the window stays responsive
+        if load::api_step(s, API_BATCH) is changed = true end
+        ;; scrolled a virtual list out of the window that was built?
+        if screens::needs_rebuild(app, s) is changed = true end
+        ;; jump to a line (search hit, API "Source" button) once its file is on screen
+        if s.goto_line > 0 && s.file_has && !s.file_md && s.screen == "lib" && s.tab == 2 is
+            let rows: f64 = (s.goto_line - GOTO_CONTEXT) + 0.0
+            let mut off: f64 = rows * ROW_PX
+            if off < 0.0 is off = 0.0 end
+            App_scroll_set(app, App_get_main(app), "file_view", off)
+            s.goto_line = 0
+            changed = true
+        end
+        let want: int = if screens::wants_fast_tick(s) then TICK_FAST else TICK_SLOW
+        if want != tick is
+            tick = want
+            App_set_tick(app, tick)
+        end
         if changed is
-            let fresh: Element = screens::build(s)
+            let fresh: Element = screens::build(app, s)
             Element_free(root)
             root = fresh
         end
