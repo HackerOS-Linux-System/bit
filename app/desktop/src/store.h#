@@ -72,6 +72,11 @@ pub fn put(key: string, body: string) is
     file_write(cache_dir() + "/" + file_name(key), to_string(util::now_s()) + "\n" + body)
 end
 
+;; Folder of one downloaded repository archive (see load.h# ensure_snapshot).
+pub fn snap_dir(key: string) -> string is
+    return cache_dir() + "/snap/" + file_name(key)
+end
+
 pub fn forget(key: string) is
     let path: string = cache_dir() + "/" + file_name(key)
     if file_exists(path) is util::run("rm -f " + util::sq(path)) end
