@@ -1,0 +1,116 @@
+mod util
+mod model
+
+;; ── Languages of a repository (the "linguist" bar) ───────────────────────────
+;; Same extension table and colours as website/src/langcolors.ts and the phone apps. Share of BYTES per
+;; language; md / json / yml and the like are not counted.
+
+fn ext_table() -> string is
+    return ";h#:H#;h#i:H# Interface;hk:hk;hcs:HackerScript;hl:Hacker Lang;js:JavaScript;jsx:JavaScript;mjs:JavaScript;cjs:JavaScript;ts:TypeScript;tsx:TypeScript;py:Python;pyw:Python;java:Java;c:C;h:C;cpp:C++;cc:C++;cxx:C++;hpp:C++;hh:C++;hxx:C++;cs:C#;go:Go;rs:Rust;rb:Ruby;php:PHP;swift:Swift;kt:Kotlin;kts:Kotlin;dart:Dart;html:HTML;htm:HTML;css:CSS;sh:Shell;bash:Shell;zsh:Shell;ps1:PowerShell;psm1:PowerShell;scala:Scala;sc:Scala;hs:Haskell;lhs:Haskell;lua:Lua;pl:Perl;pm:Perl;r:R;m:Objective-C;mm:Objective-C;ex:Elixir;exs:Elixir;clj:Clojure;cljs:Clojure;cljc:Clojure;zig:Zig;ml:OCaml;mli:OCaml;erl:Erlang;hrl:Erlang;jl:Julia;vim:Vim script;vue:Vue;svelte:Svelte;asm:Assembly;s:Assembly;cr:Crystal;nim:Nim;sol:Solidity;"
+end
+
+fn color_table() -> string is
+    return ";H#:9C1120;H# Interface:C23B4E;hk:FFFFFF;HackerScript:4B4B55;Hacker Lang:8250DF;JavaScript:F1E05A;TypeScript:3178C6;Python:3572A5;Java:B07219;C:555555;C++:F34B7D;C#:178600;Go:00ADD8;Rust:DEA584;Ruby:701516;PHP:4F5D95;Swift:F05138;Kotlin:A97BFF;Dart:00B4AB;HTML:E34C26;CSS:563D7C;Shell:89E051;PowerShell:012456;Scala:C22D40;Haskell:5E5086;Lua:000080;Perl:0298C3;R:198CE7;Objective-C:438EFF;Elixir:6E4A7E;Clojure:DB5855;Zig:EC915C;OCaml:3BE133;Erlang:B83998;Julia:A270BA;Vim script:199F4B;Vue:41B883;Svelte:FF3E00;Assembly:6E4C13;Crystal:000100;Nim:FFC200;Solidity:AA6746;"
+end
+
+;; The value after ";key:" in a table, "" when absent.
+fn lookup(table: string, key: string) -> string is
+    let needle: string = ";" + key + ":"
+    let at: int = string_find(table, needle)
+    if at < 0 is return "" end
+    let from: int = at + string_len(needle)
+    let rest: string = string_slice(table, from, string_len(table))
+    let end_at: int = string_find(rest, ";")
+    if end_at < 0 is return rest end
+    return string_slice(rest, 0, end_at)
+end
+
+pub fn language_of(path: string) -> string is
+    let ext: string = util::ext_of(path)
+    if ext == "" is return "" end
+    return lookup(ext_table(), ext)
+end
+
+fn hex_value(h: string) -> int is
+    let digits: string = "0123456789ABCDEF"
+    let mut v: int = 0
+    let mut i: int = 0
+    while i < string_len(h) is
+        let d: int = string_find(digits, string_upper(util::ch(h, i)))
+        if d < 0 is return 0 end
+        v = v * 16 + d
+        i += 1
+    end
+    return v
+end
+
+;; 0xRRGGBBAA for a language name; grey when unknown.
+pub fn color_of(name: string) -> int is
+    let hex: string = lookup(color_table(), name)
+    if hex == "" is return util::rgb(143, 143, 163) end
+    return hex_value(hex) * 256 + 255
+end
+
+;; GitHub's own swatches are white (hk) or dark grey (HackerScript): they get an outline in the bar.
+pub fn needs_outline(name: string) -> bool is
+    return name == "hk" || name == "HackerScript"
+end
+
+pub struct Share is
+    pub name: string
+    pub tenths: int       ;; share in tenths of a percent (532 = 53.2 %)
+    pub weight: int
+end
+
+;; Languages by share of bytes, biggest first.
+pub fn breakdown(t: model::Tree) -> [Share] is
+    let mut names: [string] = []
+    let mut sums: [int] = []
+    let mut total: int = 0
+    let mut i: int = 0
+    while i < array_len(t.items) is
+        let it: model::Item = t.items[i]
+        i += 1
+        if it.is_dir is continue end
+        let lang: string = language_of(it.path)
+        if lang == "" is continue end
+        let mut at: int = -1
+        let mut k: int = 0
+        while k < array_len(names) is
+            if names[k] == lang is at = k end
+            k += 1
+        end
+        if at < 0 is
+            names = array_push(names, util::own(lang))
+            sums = array_push(sums, it.size)
+        else is
+            sums[at] = sums[at] + it.size
+        end
+        total += it.size
+    end
+    if total <= 0 is return [] end
+    let mut a: [Share] = []
+    let mut n: int = 0
+    while n < array_len(names) is
+        a = array_push(a, Share { name: names[n], tenths: (sums[n] * 1000) / total, weight: sums[n] })
+        n += 1
+    end
+    ;; insertion sort, biggest first
+    let mut x: int = 1
+    while x < array_len(a) is
+        let cur: Share = a[x]
+        let mut j: int = x - 1
+        while j >= 0 && a[j].weight < cur.weight is
+            a[j + 1] = a[j]
+            j -= 1
+        end
+        a[j + 1] = cur
+        x += 1
+    end
+    return a
+end
+
+;; "53.2"
+pub fn pct_str(tenths: int) -> string is
+    return to_string(tenths / 10) + "." + to_string(tenths % 10)
+end
