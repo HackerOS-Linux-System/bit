@@ -85,7 +85,8 @@ pub fn inline(src: string) -> Inline is
                 emit = label
                 if (string_starts_with(url, "https://") || string_starts_with(url, "http://")) && !util::has(urls, url) is
                     urls = array_push(urls, url)
-                    names = array_push(names, if label != "" then label else url)
+                    let shown: string = if label != "" then label else url
+                    names = array_push(names, shown)
                 end
             end
         else if c == "<" && i + 1 < n is
