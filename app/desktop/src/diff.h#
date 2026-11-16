@@ -1,0 +1,161 @@
+mod util
+mod hk
+mod model
+
+;; ── What changed in Bit.hk between two versions ──────────────────────────────
+;; Line diff by longest common subsequence (port of website/src/diff.ts) plus a summary of version and
+;; dependency changes.
+
+pub struct Diff is
+    pub kinds: [string]       ;; per line: "+" added, "-" removed, " " context, "…" gap
+    pub texts: [string]
+    pub summary: [string]
+    pub same: bool            ;; no line changed
+    pub too_big: bool         ;; the files were too large to compare
+end
+
+pub fn no_diff() -> Diff is
+    return Diff { kinds: [], texts: [], summary: [], same: true, too_big: false }
+end
+
+const MAX_LINES: int = 500
+
+;; Longest-common-subsequence diff, unchanged lines trimmed to `ctx` around each change.
+pub fn diff_lines(a: [string], b: [string], ctx: int) -> Diff is
+    let n: int = array_len(a)
+    let m: int = array_len(b)
+    if n > MAX_LINES || m > MAX_LINES is
+        return Diff { kinds: [], texts: [], summary: [], same: false, too_big: true }
+    end
+    let w: int = m + 1
+    let mut lcs: [int] = []
+    let mut z: int = 0
+    while z < (n + 1) * w is
+        lcs = array_push(lcs, 0)
+        z += 1
+    end
+    let mut i: int = n - 1
+    while i >= 0 is
+        let mut j: int = m - 1
+        while j >= 0 is
+            if a[i] == b[j] is
+                lcs[i * w + j] = lcs[(i + 1) * w + j + 1] + 1
+            else is
+                let down: int = lcs[(i + 1) * w + j]
+                let right: int = lcs[i * w + j + 1]
+                lcs[i * w + j] = if down >= right then down else right
+            end
+            j -= 1
+        end
+        i -= 1
+    end
+    let mut kinds: [string] = []
+    let mut texts: [string] = []
+    let mut p: int = 0
+    let mut q: int = 0
+    while p < n && q < m is
+        if a[p] == b[q] is
+            kinds = array_push(kinds, " ")
+            texts = array_push(texts, a[p])
+            p += 1
+            q += 1
+        else if lcs[(p + 1) * w + q] >= lcs[p * w + q + 1] is
+            kinds = array_push(kinds, "-")
+            texts = array_push(texts, a[p])
+            p += 1
+        else is
+            kinds = array_push(kinds, "+")
+            texts = array_push(texts, b[q])
+            q += 1
+        end
+    end
+    while p < n is
+        kinds = array_push(kinds, "-")
+        texts = array_push(texts, a[p])
+        p += 1
+    end
+    while q < m is
+        kinds = array_push(kinds, "+")
+        texts = array_push(texts, b[q])
+        q += 1
+    end
+    ;; keep the changed lines and `ctx` lines around them
+    let total: int = array_len(kinds)
+    let mut keep: [bool] = []
+    let mut k: int = 0
+    while k < total is
+        keep = array_push(keep, false)
+        k += 1
+    end
+    let mut changed: bool = false
+    let mut x: int = 0
+    while x < total is
+        if kinds[x] != " " is
+            changed = true
+            let mut y: int = x - ctx
+            while y <= x + ctx is
+                if y >= 0 && y < total is keep[y] = true end
+                y += 1
+            end
+        end
+        x += 1
+    end
+    let mut out_kinds: [string] = []
+    let mut out_texts: [string] = []
+    let mut last_gap: bool = false
+    let mut r: int = 0
+    while r < total is
+        if keep[r] is
+            out_kinds = array_push(out_kinds, kinds[r])
+            out_texts = array_push(out_texts, texts[r])
+            last_gap = false
+        else if !last_gap && array_len(out_kinds) > 0 is
+            out_kinds = array_push(out_kinds, "…")
+            out_texts = array_push(out_texts, "")
+            last_gap = true
+        end
+        r += 1
+    end
+    return Diff { kinds: out_kinds, texts: out_texts, summary: [], same: !changed, too_big: false }
+end
+
+;; "version 1.0 → 1.1", "+ dependency x newest", "~ dependency y: a → b", "- dependency z"
+pub fn manifest_changes(older: hk::Hk, newer: hk::Hk, idx: model::Index) -> [string] is
+    let mut out: [string] = []
+    let va: string = hk::get(older, "package", "version")
+    let vb: string = hk::get(newer, "package", "version")
+    if va != vb is
+        let from_v: string = if va == "" then "-" else va
+        let to_v: string = if vb == "" then "-" else vb
+        out = array_push(out, "version " + from_v + " → " + to_v)
+    end
+    let da: [model::Dep] = model::deps_of(older, idx)
+    let db: [model::Dep] = model::deps_of(newer, idx)
+    let mut i: int = 0
+    while i < array_len(db) is
+        let mut found: int = -1
+        let mut k: int = 0
+        while k < array_len(da) is
+            if da[k].name == db[i].name is found = k end
+            k += 1
+        end
+        if found < 0 is
+            out = array_push(out, "+ dependency " + db[i].name + " " + db[i].spec)
+        else if da[found].spec != db[i].spec is
+            out = array_push(out, "~ dependency " + db[i].name + ": " + da[found].spec + " → " + db[i].spec)
+        end
+        i += 1
+    end
+    let mut j: int = 0
+    while j < array_len(da) is
+        let mut still: bool = false
+        let mut k2: int = 0
+        while k2 < array_len(db) is
+            if db[k2].name == da[j].name is still = true end
+            k2 += 1
+        end
+        if !still is out = array_push(out, "- dependency " + da[j].name) end
+        j += 1
+    end
+    return out
+end
