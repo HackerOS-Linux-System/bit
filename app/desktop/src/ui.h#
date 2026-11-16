@@ -2,6 +2,7 @@ use "hlib -> gui"
 mod util
 mod markdown
 mod highlight
+mod langs
 
 ;; ── Building blocks of the interface ─────────────────────────────────────────
 ;; Everything here calls the gui library through the hlib API directly (`text`, `row`, `Element_set_class`,
@@ -62,17 +63,20 @@ fn css_rule(sel: string, body: string) -> string is
 end
 
 pub fn css() -> string is
+    ;; No box-shadow anywhere: the gui draws in software and a blurred shadow is repainted on every hover.
     let mut c: string = ""
     c = c + css_rule("button.primary", "background: linear-gradient(90deg, #8b5cf6, #ec4899); border-radius: 10px;")
-    c = c + css_rule("button.nav", "background: rgba(0,0,0,0); border-width: 0px; border-radius: 10px; padding: 10px 14px; box-shadow: 0 0 0 rgba(0,0,0,0);")
-    c = c + css_rule("button.nav_on", "background: rgba(139,92,246,0.22); border-width: 0px; border-radius: 10px; padding: 10px 14px; box-shadow: 0 0 0 rgba(0,0,0,0);")
-    c = c + css_rule("button.chip", "border-radius: 999px; padding: 5px 13px; font-size: 13px; box-shadow: 0 0 0 rgba(0,0,0,0);")
-    c = c + css_rule("button.chip_on", "background: linear-gradient(90deg, #8b5cf6, #ec4899); color: #ffffff; border-width: 0px; border-radius: 999px; padding: 5px 13px; font-size: 13px; box-shadow: 0 0 0 rgba(0,0,0,0);")
-    c = c + css_rule("button.libcard", "border-radius: 14px; padding: 0px; background: rgba(127,127,127,0.10); border-width: 1px; box-shadow: 0 2px 8px rgba(0,0,0,0.12);")
-    c = c + css_rule("button.libcard:hover", "background: rgba(139,92,246,0.18); box-shadow: 0 8px 22px rgba(0,0,0,0.28);")
-    c = c + css_rule("button.row", "border-radius: 8px; padding: 6px 10px; background: rgba(0,0,0,0); border-width: 0px; box-shadow: 0 0 0 rgba(0,0,0,0); font-weight: 400;")
+    c = c + css_rule("button.nav", "background: rgba(0,0,0,0); border-width: 0px; border-radius: 10px; padding: 10px 14px;")
+    c = c + css_rule("button.nav_on", "background: rgba(139,92,246,0.22); border-width: 0px; border-radius: 10px; padding: 10px 14px;")
+    c = c + css_rule("button.chip", "border-radius: 999px; padding: 5px 13px; font-size: 13px;")
+    c = c + css_rule("button.chip_on", "background: linear-gradient(90deg, #8b5cf6, #ec4899); color: #ffffff; border-width: 0px; border-radius: 999px; padding: 5px 13px; font-size: 13px;")
+    c = c + css_rule("button.libcard", "border-radius: 14px; padding: 0px; background: rgba(127,127,127,0.10); border: 1px solid rgba(127,127,127,0.22);")
+    c = c + css_rule("button.libcard:hover", "background: rgba(139,92,246,0.18); border: 1px solid rgba(139,92,246,0.55);")
+    c = c + css_rule("button.row", "border-radius: 8px; padding: 6px 10px; background: rgba(0,0,0,0); border-width: 0px; font-weight: 400;")
     c = c + css_rule("button.row:hover", "background: rgba(139,92,246,0.16);")
-    c = c + css_rule("button.row_on", "border-radius: 8px; padding: 6px 10px; background: rgba(139,92,246,0.26); border-width: 0px; box-shadow: 0 0 0 rgba(0,0,0,0);")
+    c = c + css_rule("button.row_on", "border-radius: 8px; padding: 6px 10px; background: rgba(139,92,246,0.26); border-width: 0px;")
+    c = c + css_rule("button.tag", "border-radius: 999px; padding: 2px 10px; font-size: 12px; background: rgba(127,127,127,0.16); border-width: 0px;")
+    c = c + css_rule("button.tag:hover", "background: rgba(139,92,246,0.30);")
     c = c + css_rule("container.card", "border-radius: 14px;")
     c = c + css_rule("container.code", "background: rgba(127,127,127,0.14); border-radius: 10px; padding: 12px;")
     c = c + css_rule("container.quote", "background: rgba(139,92,246,0.10); border-radius: 8px; padding: 10px 14px;")
@@ -360,26 +364,44 @@ fn code_line(l: highlight::Line, dark: bool) -> Element is
     return v_row(r, 0.0)
 end
 
-;; A code block (README, release notes): highlighted lines in a framed, horizontally scrollable box.
+;; A code block (README, release notes) in a framed box. Short blocks are highlighted token by token; long ones
+;; are ONE text widget (a widget per token for hundreds of lines is what makes a window sluggish).
 pub fn code_block(src: string, lang: string, dark: bool) -> Element is
-    let lines: [highlight::Line] = highlight::highlight(src, lang, MD_CODE_LINES, MD_CODE_WIDTH)
+    let lines: [string] = util::lines_of(src)
     let k: List_Element = List_Element_new()
-    let mut i: int = 0
-    while i < array_len(lines) is
-        add(k, code_line(lines[i], dark))
-        i += 1
+    if array_len(lines) <= MD_CODE_HIGHLIGHT is
+        let hl: [highlight::Line] = highlight::highlight(src, lang, MD_CODE_HIGHLIGHT, MD_CODE_WIDTH)
+        let mut i: int = 0
+        while i < array_len(hl) is
+            add(k, code_line(hl[i], dark))
+            i += 1
+        end
+    else is
+        let mut shown: string = ""
+        let mut i: int = 0
+        while i < array_len(lines) && i < MD_CODE_PLAIN is
+            if i > 0 is shown = shown + "\n" end
+            shown = shown + util::cut_plain(lines[i], MD_CODE_WIDTH)
+            i += 1
+        end
+        let t: Element = text(shown)
+        set_size(t, 13.0)
+        add(k, t)
+        if array_len(lines) > MD_CODE_PLAIN is
+            add(k, muted("… " + to_string(array_len(lines) - MD_CODE_PLAIN) + " more lines"))
+        end
     end
     let col: Element = v_col(k, 1.0)
-    let sc: Element = scrollable_x(col)
+    let c: Element = container(col)
     Element_free(col)
-    let c: Element = container(sc)
-    Element_free(sc)
     Element_set_class(c, "code")
     set_w_fill(c)
+    set_clip(c)
     return c
 end
 
-const MD_CODE_LINES: int = 80
+const MD_CODE_HIGHLIGHT: int = 14
+const MD_CODE_PLAIN: int = 60
 const MD_CODE_WIDTH: int = 160
 
 fn heading_el(text_s: string, level: int) -> Element is
@@ -437,10 +459,10 @@ fn list_item_el(b: markdown::Block) -> Element is
 end
 
 ;; Blocks -> one column. `max_blocks` of them at most.
-pub fn md_view(blocks: [markdown::Block], dark: bool) -> Element is
+pub fn md_view(blocks: [markdown::Block], dark: bool, limit: int) -> Element is
     let k: List_Element = List_Element_new()
     let mut i: int = 0
-    while i < array_len(blocks) is
+    while i < array_len(blocks) && i < limit is
         let b: markdown::Block = blocks[i]
         i += 1
         if b.kind == "h1" is
@@ -491,14 +513,34 @@ end
 
 const LINKS_MAX: int = 12
 
+;; A text shown as it is: ONE widget for up to `max_lines` lines.
+pub fn raw_text(src: string, max_lines: int) -> Element is
+    let lines: [string] = util::lines_of(src)
+    let mut shown: string = ""
+    let mut i: int = 0
+    while i < array_len(lines) && i < max_lines is
+        if i > 0 is shown = shown + "\n" end
+        shown = shown + util::cut_plain(lines[i], 240)
+        i += 1
+    end
+    let t: Element = text(shown)
+    set_size(t, 13.0)
+    set_w_fill(t)
+    let c: Element = container(t)
+    Element_free(t)
+    Element_set_class(c, "code")
+    set_w_fill(c)
+    return c
+end
+
 ;; ── Source files ─────────────────────────────────────────────────────────────
 
-;; Line numbers + highlighted code for a whole file, as a virtual list (only visible rows are laid out).
-pub fn file_view(src: string, lang: string, dark: bool, max_lines: int) -> Element is
-    let lines: [highlight::Line] = highlight::highlight(src, lang, max_lines, FILE_WIDTH)
+;; Line numbers + highlighted code as a virtual list that only holds the rows from `first` to `last`
+;; (the window around what is visible); `count` is the real number of lines, so the scroll bar is right.
+pub fn file_rows(tokens: [highlight::Line], first: int, last: int, dark: bool) -> Element is
     let items: List_Element = List_Element_new()
-    let mut i: int = 0
-    while i < array_len(lines) is
+    let mut i: int = first
+    while i < last && i < array_len(tokens) is
         let r: List_Element = List_Element_new()
         let num: Element = text(to_string(i + 1))
         set_size(num, 12.0)
@@ -506,16 +548,58 @@ pub fn file_view(src: string, lang: string, dark: bool, max_lines: int) -> Eleme
         Element_set_class(num, "muted")
         Style_set_tx(Element_get_st(num), 2)
         add(r, num)
-        add(r, code_line(lines[i], dark))
+        add(r, code_line(tokens[i], dark))
         add(items, v_row(r, 14.0))
         i += 1
     end
-    let v: Element = virtual_scrollable(array_len(lines), 18.0, items)
+    let v: Element = virtual_scrollable(array_len(tokens), 18.0, items)
     List_Element_free(items)
+    Element_set_first(v, first)
     Element_set_id(v, "file_view")
     set_w_fill(v)
     set_h_fill(v)
     return v
 end
 
-const FILE_WIDTH: int = 220
+;; ── Language bar ─────────────────────────────────────────────────────────────
+
+;; The stacked bar and legend of the "linguist" card.
+pub fn lang_bar(shares: [langs::Share]) -> Element is
+    let bar: List_Element = List_Element_new()
+    let mut i: int = 0
+    while i < array_len(shares) && i < 8 is
+        let seg: Element = space()
+        set_w_portion(seg, shares[i].tenths + 0.0)
+        set_h_px(seg, 10.0)
+        set_bg(seg, langs::color_of(shares[i].name))
+        if langs::needs_outline(shares[i].name) is set_border(seg, 1.0, util::rgba(130, 130, 150, 160)) end
+        add(bar, seg)
+        i += 1
+    end
+    let k: List_Element = List_Element_new()
+    let br: Element = v_row(bar, 0.0)
+    set_w_fill(br)
+    set_radius(br, 5.0)
+    set_clip(br)
+    add(k, br)
+    let mut n: int = 0
+    while n < array_len(shares) && n < 6 is
+        let r: List_Element = List_Element_new()
+        let dot: Element = space()
+        set_w_px(dot, 10.0)
+        set_h_px(dot, 10.0)
+        set_radius(dot, 5.0)
+        set_bg(dot, langs::color_of(shares[n].name))
+        add(r, dot)
+        let nm: Element = text(shares[n].name)
+        set_size(nm, 13.0)
+        set_w_fill(nm)
+        add(r, nm)
+        add(r, caption_el(langs::pct_str(shares[n].tenths) + "%"))
+        let line: Element = v_row(r, 8.0)
+        set_align(line, 0, 1)
+        add(k, line)
+        n += 1
+    end
+    return v_col(k, 8.0)
+end
