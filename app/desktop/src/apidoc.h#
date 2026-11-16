@@ -1,0 +1,509 @@
+mod util
+
+;; ── API of a library, read from its sources ──────────────────────────────────
+;; Port of website/src/apidoc.ts: the public functions, types and constants of .h# / .h#i (H#), .hcs
+;; (HackerScript) and .hl (Hacker Lang) files, with the doc comments above them. No parser, just the
+;; line shapes those languages use for declarations.
+
+pub struct Item is
+    pub kind: string      ;; fn | struct | enum | const
+    pub name: string
+    pub sig: string
+    pub doc: string
+    pub line: int
+    pub file: string
+    pub members: [string]
+    pub owner: string     ;; `impl X` the item belongs to, or ""
+end
+
+fn make(kind: string, name: string, sig: string, doc: string, line: int, file: string, members: [string], owner: string) -> Item is
+    return Item { kind: kind, name: name, sig: sig, doc: doc, line: line, file: file, members: members, owner: owner }
+end
+
+;; ── string helpers ───────────────────────────────────────────────────────────
+
+fn skip_ws(s: string, from: int) -> int is
+    let mut i: int = from
+    while i < string_len(s) && (string_at(s, i) == " " || string_at(s, i) == "\t") is i += 1 end
+    return i
+end
+
+fn ltrim(s: string) -> string is
+    return string_slice(s, skip_ws(s, 0), string_len(s))
+end
+
+fn word_end(s: string, from: int) -> int is
+    let mut i: int = from
+    while i < string_len(s) && util::is_alnum(util::ch(s, i)) is i += 1 end
+    return i
+end
+
+;; Like word_end, but also accepts '-' (Hacker Lang names).
+fn name_end(s: string, from: int) -> int is
+    let mut i: int = from
+    while i < string_len(s) && (util::is_alnum(util::ch(s, i)) || string_at(s, i) == "-") is i += 1 end
+    return i
+end
+
+fn starts(s: string, p: string) -> bool is
+    return string_starts_with(s, p)
+end
+
+;; `kw` followed by a space/tab (or the end), e.g. "pub", "fn".
+fn starts_kw(s: string, kw: string) -> bool is
+    if !string_starts_with(s, kw) is return false end
+    if string_len(s) == string_len(kw) is return true end
+    let c: string = string_at(s, string_len(kw))
+    return c == " " || c == "\t"
+end
+
+fn squash(s: string) -> string is
+    let mut t: string = string_replace(string_replace(s, "\t", " "), "\r", "")
+    let mut guard: int = 0
+    while string_contains(t, "  ") && guard < 12 is
+        t = string_replace(t, "  ", " ")
+        guard += 1
+    end
+    return string_trim(t)
+end
+
+;; Index of the ")" that closes the "(" at `open`, or -1.
+fn close_paren(s: string, open: int) -> int is
+    let mut depth: int = 0
+    let mut i: int = open
+    while i < string_len(s) is
+        let c: string = string_at(s, i)
+        if c == "(" is
+            depth += 1
+        else if c == ")" is
+            depth -= 1
+            if depth == 0 is return i end
+        end
+        i += 1
+    end
+    return -1
+end
+
+;; Lines i .. i+count-1 joined by a space.
+fn chunk(lines: [string], i: int, count: int) -> string is
+    let mut out: string = ""
+    let mut k: int = i
+    while k < i + count && k < array_len(lines) is
+        out = out + " " + lines[k]
+        k += 1
+    end
+    return out
+end
+
+;; The lines of a text, with \r removed.
+fn split_lines(text: string) -> [string] is
+    return string_split(string_replace(text, "\r", ""), "\n")
+end
+
+;; A "─────" / ";; -----" separator line is no documentation.
+fn is_decor(line: string) -> bool is
+    if string_contains(line, "───") || string_contains(line, "━━━") || string_contains(line, "═══") is return true end
+    let mut i: int = skip_ws(line, 0)
+    while i < string_len(line) && (string_at(line, i) == ";" || string_at(line, i) == "!" || string_at(line, i) == "/") is i += 1 end
+    let rest: string = string_trim(string_slice(line, i, string_len(line)))
+    if string_len(rest) < 3 is return false end
+    let mut k: int = 0
+    while k < string_len(rest) is
+        if string_find("-=*_~#", string_at(rest, k)) < 0 is return false end
+        k += 1
+    end
+    return true
+end
+
+fn doc_text(doc: [string]) -> string is
+    return string_trim(util::join(doc, "\n"))
+end
+
+;; Text after a doc marker (";;", "///", "!!", "!!!") and one optional space.
+fn doc_body(line: string, marker: string) -> string is
+    let t: string = ltrim(line)
+    let mut rest: string = string_slice(t, string_len(marker), string_len(t))
+    if marker == "!!" && string_starts_with(rest, "!") is rest = string_slice(rest, 1, string_len(rest)) end
+    if marker == ";;" && string_starts_with(rest, ";") is rest = string_slice(rest, 1, string_len(rest)) end
+    if string_starts_with(rest, " ") is rest = string_slice(rest, 1, string_len(rest)) end
+    return rest
+end
+
+;; (name, params, ret) of a declaration that starts right after the keyword: "name<T>(a: Int, b) -> R is ..."
+struct Decl is
+    ok: bool
+    name: string
+    params: string
+    ret: string
+end
+
+fn no_decl() -> Decl is
+    return Decl { ok: false, name: "", params: "", ret: "" }
+end
+
+;; `stop` ends the return type: " is" for H#, "[" for HackerScript.
+fn parse_decl(s: string, stop: string) -> Decl is
+    let n0: int = skip_ws(s, 0)
+    let ne: int = word_end(s, n0)
+    if ne == n0 is return no_decl() end
+    let name: string = string_slice(s, n0, ne)
+    let mut i: int = skip_ws(s, ne)
+    if i < string_len(s) && string_at(s, i) == "<" is
+        let gt: int = string_find(string_slice(s, i, string_len(s)), ">")
+        if gt < 0 is return no_decl() end
+        i = skip_ws(s, i + gt + 1)
+    end
+    if i >= string_len(s) || string_at(s, i) != "(" is return no_decl() end
+    let close: int = close_paren(s, i)
+    if close < 0 is return no_decl() end
+    let params: string = squash(string_slice(s, i + 1, close))
+    let mut rest: string = string_trim(string_slice(s, close + 1, string_len(s)))
+    let mut ret: string = ""
+    if string_starts_with(rest, "->") is
+        rest = string_trim(string_slice(rest, 2, string_len(rest)))
+        let mut cut_at: int = string_len(rest)
+        if stop == " is" is
+            let a: int = string_find(rest, " is ")
+            if a >= 0 is cut_at = a end
+            if string_ends_with(rest, " is") && string_len(rest) - 3 < cut_at is cut_at = string_len(rest) - 3 end
+        else is
+            let a: int = string_find(rest, stop)
+            if a >= 0 is cut_at = a end
+        end
+        ret = squash(string_slice(rest, 0, cut_at))
+    end
+    return Decl { ok: true, name: name, params: params, ret: ret }
+end
+
+fn sig_of(prefix: string, d: Decl) -> string is
+    return prefix + d.name + "(" + d.params + ")" + (if d.ret != "" then " -> " + d.ret else "")
+end
+
+fn qualified(owner: string, name: string) -> string is
+    if owner == "" is return name end
+    return owner + "." + name
+end
+
+;; ── H# ────────────────────────────────────────────────────────────────────────
+
+fn is_doc_hsharp(t: string) -> bool is
+    if string_starts_with(t, ";;") is return true end
+    return string_starts_with(t, "///") && !string_starts_with(t, "////")
+end
+
+pub fn parse_hsharp(text: string, file: string, interface: bool) -> [Item] is
+    let lines: [string] = split_lines(text)
+    let mut items: [Item] = []
+    let mut doc: [string] = []
+    let mut owner: string = ""
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let line: string = lines[i]
+        let t: string = ltrim(line)
+        let at: int = i
+        i += 1
+        if is_doc_hsharp(t) is
+            if is_decor(line) is
+                doc = []
+            else is
+                let marker: string = if string_starts_with(t, ";;") then ";;" else "///"
+                doc = array_push(doc, doc_body(line, marker))
+            end
+            continue
+        end
+        if string_trim(line) == "" is
+            doc = []
+            continue
+        end
+        let d0: string = doc_text(doc)
+        if string_starts_with(line, "impl ") is
+            let s0: int = skip_ws(line, 4)
+            owner = string_slice(line, s0, word_end(line, s0))
+            doc = []
+            continue
+        end
+        if owner != "" && (line == "end" || string_starts_with(line, "end ") || string_starts_with(line, "end;")) is
+            owner = ""
+            doc = []
+            continue
+        end
+        let indent_ok: bool = interface || skip_ws(line, 0) == 0 || owner != ""
+        let mut fn_at: int = -1
+        if starts_kw(t, "pub") && starts_kw(ltrim(string_slice(t, 3, string_len(t))), "fn") is
+            fn_at = string_find(t, "fn ") + 3
+        else if interface && starts_kw(t, "fn") is
+            fn_at = 3
+        end
+        if fn_at >= 0 && indent_ok is
+            let d: Decl = parse_decl(string_slice(chunk(lines, at, 6), 0, string_len(chunk(lines, at, 6))), " is")
+            ;; the chunk starts with the whole first line: cut the part before the name
+            let c: string = ltrim(chunk(lines, at, 6))
+            let k: int = string_find(c, "fn ")
+            let d2: Decl = if k >= 0 then parse_decl(string_slice(c, k + 3, string_len(c)), " is") else d
+            if d2.ok is
+                items = array_push(items, make("fn", qualified(owner, d2.name), sig_of("fn ", d2), d0, at + 1, file, [], owner))
+            end
+            doc = []
+            continue
+        end
+        let kw: string = if starts_kw(t, "pub") then ltrim(string_slice(t, 3, string_len(t))) else ""
+        if skip_ws(line, 0) == 0 && kw != "" && (starts_kw(kw, "struct") || starts_kw(kw, "enum")) is
+            let is_struct: bool = starts_kw(kw, "struct")
+            let rest: string = ltrim(string_slice(kw, if is_struct then 6 else 4, string_len(kw)))
+            let name: string = string_slice(rest, 0, word_end(rest, 0))
+            let mut members: [string] = []
+            let mut j: int = i
+            while j < array_len(lines) && !(lines[j] == "end" || string_starts_with(lines[j], "end ")) is
+                let m: string = string_trim(lines[j])
+                if m != "" && !is_doc_hsharp(m) is
+                    let cm: int = string_find(m, " ;;")
+                    let shown: string = if cm >= 0 then string_trim(string_slice(m, 0, cm)) else m
+                    members = array_push(members, shown)
+                end
+                j += 1
+            end
+            let kind_s: string = if is_struct then "struct" else "enum"
+            let sig_s: string = (if is_struct then "struct " else "enum ") + name
+            if name != "" is items = array_push(items, make(kind_s, name, sig_s, d0, at + 1, file, members, "")) end
+            i = j + 1
+            doc = []
+            continue
+        end
+        if skip_ws(line, 0) == 0 && kw != "" && starts_kw(kw, "const") is
+            let rest: string = ltrim(string_slice(kw, 5, string_len(kw)))
+            let name: string = string_slice(rest, 0, word_end(rest, 0))
+            if name != "" is items = array_push(items, make("const", name, "const " + squash(rest), d0, at + 1, file, [], "")) end
+        end
+        doc = []
+    end
+    return items
+end
+
+;; ── HackerScript ──────────────────────────────────────────────────────────────
+
+pub fn parse_hackerscript(text: string, file: string) -> [Item] is
+    let lines: [string] = split_lines(text)
+    let mut items: [Item] = []
+    let mut doc: [string] = []
+    let mut owner: string = ""
+    let mut in_region: bool = false
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let line: string = lines[i]
+        let t: string = ltrim(line)
+        let at: int = i
+        i += 1
+        if string_starts_with(t, "!>") && !string_contains(line, "<!") is
+            while i < array_len(lines) && !string_contains(lines[i], "<!") is i += 1 end
+            i += 1
+            doc = []
+            continue
+        end
+        if string_starts_with(t, "!!") && !string_starts_with(t, "!>") is
+            if is_decor(line) is
+                doc = []
+            else is
+                doc = array_push(doc, doc_body(line, "!!"))
+            end
+            continue
+        end
+        if string_trim(line) == "" is
+            doc = []
+            continue
+        end
+        let d0: string = doc_text(doc)
+        if string_starts_with(line, "impl ") is
+            let s0: int = skip_ws(line, 4)
+            owner = string_slice(line, s0, word_end(line, s0))
+            doc = []
+            continue
+        end
+        if string_starts_with(line, "region") && string_contains(line, "[") is
+            in_region = true
+            doc = []
+            continue
+        end
+        if (owner != "" || in_region) && string_starts_with(line, "]") is
+            owner = ""
+            in_region = false
+            doc = []
+            continue
+        end
+        let nested: bool = owner != "" || in_region
+        let indented: bool = skip_ws(line, 0) > 0
+        let is_pub: bool = starts_kw(t, "pub")
+        let body: string = if is_pub then ltrim(string_slice(t, 3, string_len(t))) else t
+        if starts_kw(body, "fun") && indented == nested is
+            let c: string = ltrim(chunk(lines, at, 6))
+            let k: int = string_find(c, "fun ")
+            let d: Decl = if k >= 0 then parse_decl(string_slice(c, k + 4, string_len(c)), "[") else no_decl()
+            if d.ok && !string_starts_with(d.name, "_") is
+                let pre: string = if is_pub then "pub fun " else "fun "
+                items = array_push(items, make("fn", qualified(owner, d.name), sig_of(pre, d), d0, at + 1, file, [], owner))
+            end
+            doc = []
+            continue
+        end
+        if !indented && (starts_kw(body, "struct") || starts_kw(body, "enum")) is
+            let is_struct: bool = starts_kw(body, "struct")
+            let rest: string = ltrim(string_slice(body, if is_struct then 6 else 4, string_len(body)))
+            let name: string = string_slice(rest, 0, word_end(rest, 0))
+            let mut members: [string] = []
+            let mut j: int = i
+            if string_contains(line, "[") && !string_ends_with(string_trim(line), "]") is
+                while j < array_len(lines) && !string_starts_with(lines[j], "]") is
+                    let m: string = string_trim(lines[j])
+                    if m != "" && !string_starts_with(m, "!!") is
+                        let cm: int = string_find(m, " !!")
+                        let mm: string = if cm >= 0 then string_trim(string_slice(m, 0, cm)) else m
+                        let item_s: string = if string_ends_with(mm, ",") then string_slice(mm, 0, string_len(mm) - 1) else mm
+                        members = array_push(members, item_s)
+                    end
+                    j += 1
+                end
+            end
+            let kind_s: string = if is_struct then "struct" else "enum"
+            let sig_s: string = (if is_pub then "pub " else "") + (if is_struct then "struct " else "enum ") + name
+            if name != "" is items = array_push(items, make(kind_s, name, sig_s, d0, at + 1, file, members, "")) end
+            if j > i is i = j end
+            doc = []
+            continue
+        end
+        if !nested && !indented && starts_kw(body, "const") is
+            let rest: string = ltrim(string_slice(body, 5, string_len(body)))
+            let name: string = string_slice(rest, 0, word_end(rest, 0))
+            if name != "" && !string_starts_with(name, "_") is items = array_push(items, make("const", name, "const " + squash(rest), d0, at + 1, file, [], "")) end
+        end
+        doc = []
+    end
+    return items
+end
+
+;; ── Hacker Lang ───────────────────────────────────────────────────────────────
+;; `:name def`, `:: name <size> def`, `:* name def` (functions), `=> name = value` / `=> name [ | a | b ]`
+;; (exports), `% NAME = value` (constants). A leading "_" marks a private name.
+
+pub fn parse_hackerlang(text: string, file: string) -> [Item] is
+    let lines: [string] = split_lines(text)
+    let mut items: [Item] = []
+    let mut doc: [string] = []
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let line: string = lines[i]
+        let at: int = i
+        i += 1
+        if string_starts_with(line, "///") || string_starts_with(line, ";;") is
+            if is_decor(line) is
+                doc = []
+            else is
+                let marker: string = if string_starts_with(line, ";;") then ";;" else "///"
+                doc = array_push(doc, doc_body(line, marker))
+            end
+            continue
+        end
+        if string_trim(line) == "" is
+            doc = []
+            continue
+        end
+        let d0: string = doc_text(doc)
+        if string_starts_with(line, ":") is
+            let mut lead: string = ":"
+            let mut p: int = 1
+            if string_starts_with(line, ":*") is
+                lead = ":*"
+                p = 2
+            else if string_starts_with(line, "::") is
+                lead = "::"
+                p = 2
+            end
+            p = skip_ws(line, p)
+            let ne: int = name_end(line, p)
+            let name: string = string_slice(line, p, ne)
+            let after: string = string_trim(string_slice(line, ne, string_len(line)))
+            let mut size: string = ""
+            let mut tail: string = util::own(after)
+            if string_starts_with(after, "<") is
+                let gt: int = string_find(after, ">")
+                if gt >= 0 is
+                    size = string_slice(after, 0, gt + 1)
+                    tail = string_trim(string_slice(after, gt + 1, string_len(after)))
+                end
+            end
+            if name != "" && (tail == "def" || string_starts_with(tail, "def ")) is
+                if !string_starts_with(name, "_") is
+                    let size_s: string = if size != "" then " " + size else ""
+                    let sig_s: string = lead + " " + name + size_s + " def"
+                    items = array_push(items, make("fn", name, sig_s, d0, at + 1, file, [], ""))
+                end
+                doc = []
+                continue
+            end
+        end
+        if string_starts_with(line, "=>") is
+            let p: int = skip_ws(line, 2)
+            let ne: int = name_end(line, p)
+            let name: string = string_slice(line, p, ne)
+            let rest: string = string_trim(string_slice(line, ne, string_len(line)))
+            if name != "" is
+                if string_starts_with(rest, "[") is
+                    let mut members: [string] = []
+                    let mut j: int = i
+                    while j < array_len(lines) && !string_starts_with(ltrim(lines[j]), "]") is
+                        let m: string = string_trim(lines[j])
+                        if string_starts_with(m, "|") && !string_starts_with(m, "|>") is members = array_push(members, string_trim(string_slice(m, 1, string_len(m)))) end
+                        j += 1
+                    end
+                    items = array_push(items, make("const", name, "=> " + name + " [ … ]", d0, at + 1, file, members, ""))
+                    i = j + 1
+                else is
+                    let val: string = if string_starts_with(rest, "=") then " = " + string_trim(string_slice(rest, 1, string_len(rest))) else ""
+                    items = array_push(items, make("const", name, "=> " + name + val, d0, at + 1, file, [], ""))
+                end
+            end
+            doc = []
+            continue
+        end
+        if string_starts_with(line, "%") is
+            let p: int = skip_ws(line, 1)
+            let ne: int = name_end(line, p)
+            let name: string = string_slice(line, p, ne)
+            let eq: int = string_find(line, "=")
+            if name != "" && !string_starts_with(name, "_") && eq > ne is
+                items = array_push(items, make("const", name, "% " + name + " = " + string_trim(string_slice(line, eq + 1, string_len(line))), d0, at + 1, file, [], ""))
+            end
+        end
+        doc = []
+    end
+    return items
+end
+
+;; ── Entry points ──────────────────────────────────────────────────────────────
+
+;; Source files the API view understands.
+pub fn is_api_file(path: string) -> bool is
+    return string_ends_with(path, ".h#") || string_ends_with(path, ".h#i") || string_ends_with(path, ".hcs") || string_ends_with(path, ".hl")
+end
+
+pub fn parse_file(text: string, file: string) -> [Item] is
+    if string_ends_with(file, ".hcs") is return parse_hackerscript(text, file) end
+    if string_ends_with(file, ".hl") is return parse_hackerlang(text, file) end
+    return parse_hsharp(text, file, string_ends_with(file, ".h#i"))
+end
+
+;; "src/util.h#" -> "util"
+pub fn mod_name(file: string) -> string is
+    let mut f: string = file
+    if string_starts_with(f, "src/") is f = string_slice(f, 4, string_len(f)) end
+    if string_starts_with(f, "lib/") is f = string_slice(f, 4, string_len(f)) end
+    if string_starts_with(f, "cmd/") is f = string_slice(f, 4, string_len(f)) end
+    let dot: int = string_find(f, ".")
+    if dot > 0 is return string_slice(f, 0, dot) end
+    return f
+end
+
+pub fn kind_label(kind: string) -> string is
+    if kind == "fn" is return "Functions" end
+    if kind == "struct" is return "Structs" end
+    if kind == "enum" is return "Enums" end
+    return "Constants"
+end
