@@ -4,6 +4,10 @@ mod hk
 mod model
 mod store
 mod markdown
+mod highlight
+mod langs
+mod apidoc
+mod diff
 
 ;; ── Application state ────────────────────────────────────────────────────────
 ;; One mutable struct (H# structs are references). main.h# changes it in `update`, view.h# only reads it.
@@ -23,8 +27,26 @@ pub struct Res is
     pub age: int          ;; seconds since the copy was saved (0 = fresh)
 end
 
+const README_STEP: int = 40
+const API_STEP: int = 60
+
+pub fn readme_step() -> int is
+    return README_STEP
+end
+
+pub fn api_step() -> int is
+    return API_STEP
+end
+
 pub fn res_new() -> Res is
     return Res { state: idle(), stale: false, err: "", age: 0 }
+end
+
+;; One line found by the code search.
+pub struct Hit is
+    pub path: string
+    pub line: int
+    pub text: string
 end
 
 pub struct St is
@@ -44,7 +66,7 @@ pub struct St is
     pub sel: string
     pub gen: int                  ;; bumped when the selection or version changes: answers of older requests are dropped
     pub ref: string               ;; version being viewed, "" = the default
-    pub tab: int                  ;; 0 overview, 1 source, 2 versions
+    pub tab: int                  ;; 0 overview, 1 API, 2 source, 3 versions
     pub mf: hk::Hk
     pub mf_file: string
     pub mf_res: Res
@@ -52,6 +74,9 @@ pub struct St is
     pub rd_res: Res
     pub rd_text: string
     pub rd_md: bool
+    pub rd_limit: int             ;; README blocks shown (the rest: "Show more")
+    pub rd_blocks: int
+    pub rd_raw: bool              ;; README as plain text
     pub rd_el: Element
     pub rd_has: bool
     pub rd_links: [markdown::Block]
@@ -72,6 +97,47 @@ pub struct St is
     pub file_has: bool
     pub file_lines: int
     pub file_note: string
+    pub file_md: bool             ;; a Markdown file shown rendered
+    pub fv_tokens: [highlight::Line]   ;; the file, tokenized once
+    pub fv_first: int             ;; window of rows built into the file view
+    pub fv_last: int
+    pub goto_line: int            ;; scroll to this line once the file is shown (0 = none)
+    pub gv_first: int             ;; window of cards built into the library grid
+    pub gv_last: int
+    ;; sources downloaded as one archive (API tab, code search, checksum, offline browsing)
+    pub snap_res: Res
+    pub snap_dir: string          ;; the library's root inside the snapshot, "" = none
+    pub langs: [langs::Share]
+    pub langs_done: bool
+    ;; API tab
+    pub api_state: int
+    pub api_items: [apidoc::Item]
+    pub api_files: [string]
+    pub api_pos: int
+    pub api_q: string
+    pub api_kind: string          ;; "" | fn | struct | enum | const
+    pub api_shown: int
+    ;; Source tab: file filter and code search
+    pub src_filter: string
+    pub src_query: string
+    pub src_hits: [Hit]
+    pub src_mode: int             ;; 0 files, 1 search results
+    pub src_cut: bool
+    ;; pinned revision and checksum
+    pub pin_res: Res
+    pub pin_sha: string
+    pub pin_date: string
+    pub pin_moved: bool
+    pub ver_state: int            ;; 0 idle, 1 running, 2 matches, 3 differs, 4 failed
+    pub ver_msg: string
+    pub used_res: Res
+    pub used: [string]
+    ;; manifest diffs between versions
+    pub mfs_refs: [string]
+    pub mfs_text: [string]
+    pub diff_open: [string]
+    pub diff_tags: [string]
+    pub diff_data: [diff::Diff]
     ;; docs
     pub docs_el: Element
     pub docs_has: bool
@@ -89,11 +155,18 @@ pub fn st_new(version: string) -> St is
         idx: model::empty_index(), idx_res: res_new(), query: "", lang: "", tag: "",
         sel: "", gen: 0, ref: "", tab: 0,
         mf: hk::empty(), mf_file: "", mf_res: res_new(),
-        rd_file: "", rd_res: res_new(), rd_text: "", rd_md: true, rd_el: 0, rd_has: false, rd_links: [],
+        rd_file: "", rd_res: res_new(), rd_text: "", rd_md: true, rd_limit: README_STEP, rd_blocks: 0, rd_raw: false, rd_el: 0, rd_has: false, rd_links: [],
         meta: model::parse_meta(""), meta_res: res_new(),
         rels: [], rel_res: res_new(), rel_open: [], rel_els: [], rel_els_tag: [],
         tree: model::empty_tree(), tree_res: res_new(), dir: "",
-        file_path: "", file_res: res_new(), file_text: "", file_el: 0, file_has: false, file_lines: 0, file_note: "",
+        file_path: "", file_res: res_new(), file_text: "", file_el: 0, file_has: false, file_lines: 0, file_note: "", file_md: false, fv_tokens: [], fv_first: 0, fv_last: 0,
+        goto_line: 0, gv_first: 0, gv_last: 0,
+        snap_res: res_new(), snap_dir: "", langs: [], langs_done: false,
+        api_state: 0, api_items: [], api_files: [], api_pos: 0, api_q: "", api_kind: "", api_shown: API_STEP,
+        src_filter: "", src_query: "", src_hits: [], src_mode: 0, src_cut: false,
+        pin_res: res_new(), pin_sha: "", pin_date: "", pin_moved: false, ver_state: 0, ver_msg: "",
+        used_res: res_new(), used: [],
+        mfs_refs: [], mfs_text: [], diff_open: [], diff_tags: [], diff_data: [],
         docs_el: 0, docs_has: false,
         settings: store::default_settings(), token_draft: "", token_shown: false, rate_text: "", cache_text: ""
     }
@@ -132,4 +205,25 @@ pub fn default_ref(s: St) -> string is
     let g: model::Gh = model::parse_github(l.target)
     if g.ref != "" is return g.ref end
     return "HEAD"
+end
+
+;; The release before `tag` in the list (older), or "".
+pub fn prev_tag(s: St, tag: string) -> string is
+    let mut i: int = 0
+    while i < array_len(s.rels) is
+        if s.rels[i].tag == tag && i + 1 < array_len(s.rels) is return s.rels[i + 1].tag end
+        i += 1
+    end
+    return ""
+end
+
+;; The newest release that is not a pre-release (the "Latest" badge).
+pub fn latest_tag(s: St) -> string is
+    let mut i: int = 0
+    while i < array_len(s.rels) is
+        if !s.rels[i].prerelease && !s.rels[i].tag_only is return s.rels[i].tag end
+        i += 1
+    end
+    if array_len(s.rels) > 0 is return s.rels[0].tag end
+    return ""
 end
