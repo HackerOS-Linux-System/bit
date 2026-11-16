@@ -4,6 +4,11 @@ mod hk
 mod model
 mod store
 mod markdown
+mod highlight
+mod langs
+mod apidoc
+mod diff
+mod jsonx
 mod state
 
 ;; ── Loading: index, manifest, README, stats, releases, tree, files ───────────
@@ -30,6 +35,10 @@ const TIMEOUT: string = "25"
 const MAX_README: int = 200000
 const MAX_MANIFEST: int = 100000
 const MAX_FILE: int = 300000
+const MAX_VIEW_BYTES: int = 2000000
+const MAX_API_FILE: int = 300000
+const MAX_API_FILES: int = 150
+const MAX_HITS: int = 200
 const INDEX_URL: string = "https://raw.githubusercontent.com/HackerOS-Linux-System/bit/main/index/repository.json"
 
 fn manifest_names() -> [string] is
@@ -176,6 +185,45 @@ fn reset_resources(s: state::St, keep_rels: bool) is
     s.file_has = false
     s.file_lines = 0
     s.file_note = ""
+    s.file_md = false
+    s.fv_tokens = []
+    s.fv_first = 0
+    s.fv_last = 0
+    s.goto_line = 0
+    s.rd_limit = state::readme_step()
+    s.rd_raw = false
+    s.rd_blocks = 0
+    s.snap_res = state::res_new()
+    s.snap_dir = ""
+    s.langs = []
+    s.langs_done = false
+    s.api_state = 0
+    s.api_items = []
+    s.api_files = []
+    s.api_pos = 0
+    s.api_q = ""
+    s.api_kind = ""
+    s.api_shown = state::api_step()
+    s.src_filter = ""
+    s.src_query = ""
+    s.src_hits = []
+    s.src_mode = 0
+    s.src_cut = false
+    s.ver_state = 0
+    s.ver_msg = ""
+    if !keep_rels is
+        s.pin_res = state::res_new()
+        s.pin_sha = ""
+        s.pin_date = ""
+        s.pin_moved = false
+        s.used_res = state::res_new()
+        s.used = []
+        s.mfs_refs = []
+        s.mfs_text = []
+        s.diff_open = []
+        s.diff_tags = []
+        s.diff_data = []
+    end
 end
 
 fn fail_all(s: state::St, why: string) is
@@ -301,11 +349,36 @@ pub fn load_file(app: App, s: state::St, path: string) is
     s.file_path = path
     s.file_text = ""
     s.file_note = ""
+    let fext: string = util::ext_of(path)
+    s.file_md = fext == "md" || fext == "markdown"
+    s.fv_tokens = []
     s.file_res = state::res_new()
     if !g.ok is
         s.file_res.state = state::failed()
         s.file_res.err = "This library's source is not on GitHub."
         return
+    end
+    if s.snap_dir != "" is
+        let p: string = s.snap_dir + "/" + path
+        let size: int = item_size(s, path)
+        if is_binary(path) is
+            s.file_text = ""
+            s.file_note = "Binary file (" + util::bytes_str(size) + ") - open it on GitHub."
+            s.file_res.state = state::ready()
+            s.file_has = false
+            return
+        end
+        if size > MAX_VIEW_BYTES is
+            s.file_text = ""
+            s.file_note = "File too large to show (" + util::bytes_str(size) + ") - open it on GitHub."
+            s.file_res.state = state::ready()
+            s.file_has = false
+            return
+        end
+        if file_exists(p) is
+            got_file(s, path, HTTP_OK, file_read(p), false, 0)
+            return
+        end
     end
     let key: string = file_key(s, path)
     s.file_res.state = state::loading()
@@ -328,6 +401,9 @@ pub fn open_library(app: App, s: state::St, name: string) is
     load_manifest(app, s, 0)
     load_readme(app, s, 0)
     load_meta(app, s)
+    ensure_snapshot(app, s)
+    load_pin(app, s)
+    load_used(app, s)
 end
 
 ;; Switches to another version (tag/branch) of the same library.
@@ -338,13 +414,15 @@ pub fn set_ref(app: App, s: state::St, ref: string) is
     load_manifest(app, s, 0)
     load_readme(app, s, 0)
     load_meta(app, s)
+    ensure_snapshot(app, s)
     s.tab = 0
 end
 
 ;; Loads what a tab needs the first time it is shown.
 pub fn ensure_tab(app: App, s: state::St) is
-    if s.tab == 1 && s.tree_res.state == state::idle() is load_tree(app, s) end
-    if s.tab == 2 && s.rel_res.state == state::idle() is load_releases(app, s) end
+    if s.tab == 1 && s.api_state == 0 is api_start(s) end
+    if s.tab == 2 && s.snap_res.state == state::failed() && s.tree_res.state == state::idle() is load_tree(app, s) end
+    if s.tab == 3 && s.rel_res.state == state::idle() is load_releases(app, s) end
 end
 
 pub fn refresh_library(app: App, s: state::St) is
@@ -367,6 +445,7 @@ pub fn refresh_library(app: App, s: state::St) is
         store::forget("rels:" + g.owner + "/" + g.repo)
         store::forget("tags:" + g.owner + "/" + g.repo)
         store::forget("tree:" + slug + "@" + r)
+        util::run("rm -rf " + util::sq(store::snap_dir(snap_key(g, r))))
     end
     open_library(app, s, name)
     s.ref = ref
@@ -545,6 +624,20 @@ pub fn on_net(app: App, s: state::St, id: string, out: string, net_err: string, 
         k += 1
     end
 
+    ;; tasks that run a shell script (stdout + exit code) instead of curl
+    if purpose == "snap" is
+        if gen == s.gen is got_snapshot(app, s, key, out, exit_code) end
+        return
+    end
+    if purpose == "verify" is
+        if gen == s.gen is got_verify(s, out, exit_code) end
+        return
+    end
+    if purpose == "used" is
+        if gen == s.gen is got_used(s, key, out, exit_code) end
+        return
+    end
+
     ;; split the status off the body
     let len: int = string_len(out)
     let mut code: int = 0
@@ -623,6 +716,16 @@ pub fn on_net(app: App, s: state::St, id: string, out: string, net_err: string, 
             s.rel_res.state = state::ready()
             s.rels = []
         end
+    else if purpose == "rev" is
+        if o.ok is
+            got_rev(s, key, o.body)
+        else is
+            s.pin_res.state = state::failed()
+            s.pin_res.err = o.err
+        end
+    else if purpose == "mfd" is
+        let mfb: string = if o.ok then o.body else ""
+        got_mf(s, key, mfb)
     else if purpose == "tree" is
         if o.ok is
             got_tree(s, 200, o.body, o.stale, o.age)
@@ -639,4 +742,434 @@ pub fn on_net(app: App, s: state::St, id: string, out: string, net_err: string, 
             s.file_res.err = o.err
         end
     end
+end
+
+;; ── The repository as one archive ("snapshot") ──────────────────────────────
+;; One download of  codeload.github.com/<o>/<r>/tar.gz/<ref>  gives everything the deeper views need - the file
+;; list, source files, the API tab, code search, the checksum - without spending GitHub API requests, and
+;; keeps a library readable offline afterwards. The archive is unpacked into ~/.cache/bit-io/snap/<repo>@<ref>
+;; by one `sh` task of the gui library (symlinks are removed, the size is limited).
+
+const UA: string = "bit-io-desktop"
+const MAX_ARCHIVE: string = "41943040"
+const FRESH_MIN_MOVING: string = "360"
+const FRESH_MIN_FIXED: string = "43200"
+
+fn is_moving(ref: string) -> bool is
+    return ref == "HEAD" || ref == "main" || ref == "master" || ref == "dev" || ref == "develop" || ref == "trunk"
+end
+
+pub fn snap_key(g: model::Gh, ref: string) -> string is
+    return "snap:" + g.owner + "/" + g.repo + "@" + ref
+end
+
+;; sh that makes sure `dir` holds the archive of the repository at `ref` (prints ok / stale, or fails).
+fn snap_script(g: model::Gh, ref: string, dir: string) -> string is
+    let url: string = "https://codeload.github.com/" + util::url_enc(g.owner) + "/" + util::url_enc(g.repo) + "/tar.gz/" + util::url_enc_path(ref)
+    let fresh: string = if is_moving(ref) then FRESH_MIN_MOVING else FRESH_MIN_FIXED
+    let d: string = util::sq(dir)
+    let mut sc: string = "d=" + d + "; url=" + util::sq(url) + "\n"
+    sc = sc + "if [ -d \"$d\" ] && [ -z \"$(find \"$d\" -maxdepth 0 -mmin +" + fresh + " 2>/dev/null)\" ]; then echo ok; exit 0; fi\n"
+    sc = sc + "rm -rf \"$d.tmp\"; mkdir -p \"$d.tmp\"\n"
+    sc = sc + "if curl -fsSL --max-time 120 --max-filesize " + MAX_ARCHIVE + " -A " + UA + " \"$url\" | tar -xz --no-same-owner --no-same-permissions -C \"$d.tmp\" --strip-components=1 2>/dev/null; then\n"
+    sc = sc + "  find \"$d.tmp\" -type l -delete 2>/dev/null; rm -rf \"$d\"; mv \"$d.tmp\" \"$d\"; echo ok\n"
+    sc = sc + "else rm -rf \"$d.tmp\"; if [ -d \"$d\" ]; then echo stale; else exit 1; fi; fi\n"
+    return sc
+end
+
+;; Runs a shell script as a background task; its stdout and exit code come back as the answer.
+fn spawn_sh(app: App, s: state::St, id: string, script: string) is
+    let a: List_Str = List_Str_new()
+    List_Str_push(a, "-c")
+    List_Str_push(a, script)
+    App_task_run(app, id, "sh", a)
+    List_Str_free(a)
+    s.busy += 1
+end
+
+pub fn ensure_snapshot(app: App, s: state::St) is
+    let g: model::Gh = model::parse_github(state::current(s).target)
+    s.snap_dir = ""
+    if !g.ok is
+        s.snap_res.state = state::failed()
+        s.snap_res.err = "This library's source is not on GitHub."
+        return
+    end
+    let ref: string = state::eff_ref(s)
+    let key: string = snap_key(g, ref)
+    s.snap_res.state = state::loading()
+    spawn_sh(app, s, make_id("snap", s.gen, 0, key), snap_script(g, ref, store::snap_dir(key)))
+end
+
+;; The unpacked files -> the same Tree the GitHub API would give (without its truncation).
+fn list_snapshot(s: state::St) is
+    let cmd: string = "cd " + util::sq(s.snap_dir) + " && find . -mindepth 1 \\( -path './.git' -o -path './.git/*' -o -path './.bit' -o -path './.bit/*' \\) -prune -o -printf '%y\\t%s\\t%P\\n' 2>/dev/null | head -n 20000"
+    let lines: [string] = string_split(shell(cmd), "\n")
+    let mut items: [model::Item] = []
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let line: string = lines[i]
+        i += 1
+        let t1: int = string_find(line, "\t")
+        if t1 < 1 is continue end
+        let rest: string = string_slice(line, t1 + 1, string_len(line))
+        let t2: int = string_find(rest, "\t")
+        if t2 < 0 is continue end
+        let kind: string = string_slice(line, 0, t1)
+        let size: int = str_to_int(string_slice(rest, 0, t2))
+        let path: string = string_slice(rest, t2 + 1, string_len(rest))
+        if path == "" is continue end
+        if kind == "d" is
+            items = array_push(items, model::Item { path: path, is_dir: true, size: 0 })
+        else if kind == "f" is
+            items = array_push(items, model::Item { path: path, is_dir: false, size: size })
+        end
+    end
+    s.tree = model::Tree { items: items, truncated: array_len(items) >= LIST_MAX }
+    s.tree_res.state = state::ready()
+    s.tree_res.stale = false
+    s.langs_done = false
+end
+
+const LIST_MAX: int = 20000
+
+fn got_snapshot(app: App, s: state::St, key: string, out: string, exit_code: int) is
+    let g: model::Gh = model::parse_github(state::current(s).target)
+    if exit_code != 0 is
+        s.snap_res.state = state::failed()
+        s.snap_res.err = "Could not download the sources (offline, or the repository is larger than 40 MB)."
+        if s.tree_res.state == state::idle() is load_tree(app, s) end
+        return
+    end
+    let mut root: string = store::snap_dir(key)
+    if g.dir != "" is root = root + "/" + g.dir end
+    if !dir_exists(root) is
+        s.snap_res.state = state::failed()
+        s.snap_res.err = "The folder " + g.dir + " is not in this version of the repository."
+        return
+    end
+    s.snap_dir = root
+    s.snap_res.state = state::ready()
+    s.snap_res.stale = string_contains(out, "stale")
+    list_snapshot(s)
+end
+
+pub fn item_size(s: state::St, path: string) -> int is
+    let mut i: int = 0
+    while i < array_len(s.tree.items) is
+        if s.tree.items[i].path == path is return s.tree.items[i].size end
+        i += 1
+    end
+    return 0
+end
+
+fn is_binary(path: string) -> bool is
+    let ext: string = util::ext_of(path)
+    let table: string = " png jpg jpeg gif webp ico bmp tiff pdf zip gz tgz xz bz2 7z rar tar so a o dll exe bin dylib ttf otf woff woff2 mp3 mp4 mov avi ogg wav flac wasm class jar hlib lock db sqlite "
+    return ext != "" && string_contains(table, " " + ext + " ")
+end
+
+;; ── Search in code ───────────────────────────────────────────────────────────
+
+pub fn code_search(s: state::St, q: string) is
+    s.src_hits = []
+    s.src_cut = false
+    let query: string = string_trim(q)
+    if query == "" || s.snap_dir == "" is
+        s.src_mode = 0
+        return
+    end
+    s.src_mode = 1
+    let cmd: string = "cd " + util::sq(s.snap_dir) + " && grep -rIn -i -F --exclude-dir=.git --exclude-dir=.bit -m 3 -e " + util::sq(query) + " . 2>/dev/null | head -n " + to_string(MAX_HITS + 1)
+    let lines: [string] = string_split(shell(cmd), "\n")
+    let mut hits: [state::Hit] = []
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let line: string = lines[i]
+        i += 1
+        if string_len(line) < 4 is continue end
+        let body: string = if string_starts_with(line, "./") then string_slice(line, 2, string_len(line)) else line
+        let c1: int = string_find(body, ":")
+        if c1 < 1 is continue end
+        let rest: string = string_slice(body, c1 + 1, string_len(body))
+        let c2: int = string_find(rest, ":")
+        if c2 < 1 is continue end
+        if array_len(hits) >= MAX_HITS is
+            s.src_cut = true
+        else is
+            hits = array_push(hits, state::Hit { path: string_slice(body, 0, c1), line: str_to_int(string_slice(rest, 0, c2)), text: util::cut(string_trim(string_slice(rest, c2 + 1, string_len(rest))), 140) })
+        end
+    end
+    s.src_hits = hits
+end
+
+;; ── The API tab ──────────────────────────────────────────────────────────────
+
+fn skip_dir_part(path: string) -> bool is
+    return string_contains(path, "/test") || string_starts_with(path, "test") || string_contains(path, "examples/") || string_starts_with(path, "examples") || string_contains(path, "bench") || string_contains(path, "node_modules") || string_contains(path, "cache/") || string_contains(path, "/target/")
+end
+
+pub fn api_start(s: state::St) is
+    s.api_state = 1
+    s.api_items = []
+    s.api_files = []
+    s.api_pos = 0
+    s.api_shown = state::api_step()
+end
+
+;; One slice of the API work (a few files); the main loop calls it until it is done. True = something changed.
+pub fn api_step(s: state::St, n: int) -> bool is
+    if s.api_state != 1 is return false end
+    if s.snap_res.state == state::failed() is
+        s.api_state = 3
+        return true
+    end
+    if s.snap_res.state != state::ready() || s.snap_dir == "" is return false end
+    if array_len(s.api_files) == 0 && s.api_pos == 0 is
+        let mut files: [string] = []
+        let mut i: int = 0
+        while i < array_len(s.tree.items) is
+            let it: model::Item = s.tree.items[i]
+            i += 1
+            if it.is_dir || !apidoc::is_api_file(it.path) || skip_dir_part(it.path) || it.size > MAX_API_FILE is continue end
+            if array_len(files) < MAX_API_FILES is files = array_push(files, it.path) end
+        end
+        s.api_files = files
+        if array_len(files) == 0 is
+            s.api_state = 2
+            return true
+        end
+    end
+    let mut done: int = 0
+    while done < n && s.api_pos < array_len(s.api_files) is
+        let path: string = s.api_files[s.api_pos]
+        let p: string = s.snap_dir + "/" + path
+        if file_exists(p) is
+            let found: [apidoc::Item] = apidoc::parse_file(file_read(p), path)
+            let mut k: int = 0
+            while k < array_len(found) is
+                s.api_items = array_push(s.api_items, found[k])
+                k += 1
+            end
+        end
+        s.api_pos += 1
+        done += 1
+    end
+    if s.api_pos >= array_len(s.api_files) is s.api_state = 2 end
+    return true
+end
+
+;; ── The pinned revision ──────────────────────────────────────────────────────
+
+pub fn load_pin(app: App, s: state::St) is
+    let l: model::Lib = state::current(s)
+    let g: model::Gh = model::parse_github(l.target)
+    if l.rev == "" || !g.ok is return end
+    let key: string = "rev:" + g.owner + "/" + g.repo + "@" + l.rev
+    s.pin_res.state = state::loading()
+    let hit: Hit = lookup(key, TTL_META)
+    if hit.used is
+        got_rev(s, key, hit.body)
+        return
+    end
+    spawn(app, s, make_id("rev", s.gen, 0, key), api_url(g, "/commits/" + util::url_enc_path(l.rev)), true, false)
+end
+
+fn got_rev(s: state::St, key: string, body: string) is
+    let o: jsonx::Obj = jsonx::parse_object(body)
+    let sha: string = jsonx::get_str(o, "sha")
+    if sha == "" is
+        s.pin_res.state = state::failed()
+        s.pin_res.err = "GitHub did not know this revision."
+        return
+    end
+    s.pin_sha = sha
+    s.pin_date = jsonx::get_str(jsonx::get_obj(jsonx::get_obj(o, "commit"), "committer"), "date")
+    s.pin_res.state = state::ready()
+    ;; "moved": the revision pointed somewhere else the last time we looked
+    let seen: store::Cached = store::get("pinsha:" + key)
+    s.pin_moved = seen.found && string_trim(seen.body) != sha
+    if !seen.found || s.pin_moved is store::put("pinsha:" + key, sha) end
+end
+
+;; ── Checksum ─────────────────────────────────────────────────────────────────
+;; The index entry's sha256 is the hash of the sorted list of per-file hashes of the library folder at its
+;; pinned revision (what `bit verify` computes). Same algorithm here, over the downloaded archive.
+
+pub fn start_verify(app: App, s: state::St) is
+    let l: model::Lib = state::current(s)
+    let g: model::Gh = model::parse_github(l.target)
+    if !g.ok || l.rev == "" || l.checksum == "" is
+        s.ver_state = 4
+        s.ver_msg = "The index entry has no pinned revision and checksum to verify."
+        return
+    end
+    let key: string = snap_key(g, l.rev)
+    let dir: string = store::snap_dir(key)
+    let mut inner: string = util::own(dir)
+    if g.dir != "" is inner = dir + "/" + g.dir end
+    let mut sc: string = snap_script(g, l.rev, dir)
+    sc = sc + "cd " + util::sq(inner) + " || exit 2\n"
+    sc = sc + "find . -type f ! -path './.git/*' ! -path './.bit/*' | LC_ALL=C sort | xargs -d '\\n' sha256sum | sha256sum | cut -d' ' -f1\n"
+    s.ver_state = 1
+    s.ver_msg = "Downloading " + l.rev + " and hashing the files…"
+    spawn_sh(app, s, make_id("verify", s.gen, 0, key), sc)
+end
+
+fn got_verify(s: state::St, out: string, exit_code: int) is
+    let l: model::Lib = state::current(s)
+    if exit_code != 0 is
+        s.ver_state = 4
+        s.ver_msg = "Could not download the pinned revision (offline?)."
+        return
+    end
+    let lines: [string] = string_split(string_trim(out), "\n")
+    let got: string = string_lower(string_trim(lines[array_len(lines) - 1]))
+    let mut want: string = string_lower(string_trim(l.checksum))
+    if string_starts_with(want, "sha256:") is want = string_slice(want, 7, string_len(want)) end
+    if string_len(got) != 64 is
+        s.ver_state = 4
+        s.ver_msg = "The checksum could not be computed."
+        return
+    end
+    if got == want is
+        s.ver_state = 2
+        s.ver_msg = "The files at " + l.rev + " match the checksum in the index."
+    else is
+        s.ver_state = 3
+        s.ver_msg = "MISMATCH: the index says " + util::cut(want, 20) + ", the files at " + l.rev + " hash to " + util::cut(got, 20) + "."
+    end
+end
+
+;; ── Used by ──────────────────────────────────────────────────────────────────
+;; Which libraries of the index list this one in their [dependencies]? One task fetches the manifest of every
+;; other library (6 at a time); the answer is kept for 6 hours.
+
+pub fn load_used(app: App, s: state::St) is
+    let name: string = s.sel
+    let key: string = "used:" + name
+    s.used_res.state = state::loading()
+    let c: store::Cached = store::get(key)
+    if c.found && c.age < TTL_MANIFEST is
+        if string_trim(c.body) == "" is
+            s.used = []
+        else is
+            s.used = string_split(string_trim(c.body), "\n")
+        end
+        s.used_res.state = state::ready()
+        return
+    end
+    let mut input: string = ""
+    let mut n: int = 0
+    let mut i: int = 0
+    while i < array_len(s.idx.libs) is
+        let l: model::Lib = s.idx.libs[i]
+        i += 1
+        let g: model::Gh = model::parse_github(l.target)
+        if !g.ok || string_lower(l.name) == string_lower(name) || n >= USED_MAX is continue end
+        let ref: string = if l.rev != "" then l.rev else if g.ref != "" then g.ref else "HEAD"
+        input = input + l.name + " " + raw_url(g, ref, "Bit.hk") + "\n"
+        n += 1
+    end
+    if n == 0 is
+        s.used = []
+        s.used_res.state = state::ready()
+        return
+    end
+    let mut sc: string = "printf '%s' " + util::sq(input) + " | xargs -P 6 -L 1 sh -c 'o=$(curl -fsSL --max-time 15 -A " + UA + " \"$1\" 2>/dev/null); printf \"@@@ %s\\n%s\\n\" \"$0\" \"$o\"'\n"
+    spawn_sh(app, s, make_id("used", s.gen, 0, key), sc)
+end
+
+const USED_MAX: int = 120
+
+fn got_used(s: state::St, key: string, out: string, exit_code: int) is
+    let name: string = s.sel
+    let mut found: [string] = []
+    let blocks: [string] = string_split(out, "@@@ ")
+    let mut i: int = 0
+    while i < array_len(blocks) is
+        let b: string = blocks[i]
+        i += 1
+        let nl: int = string_find(b, "\n")
+        if nl < 1 is continue end
+        let who: string = string_trim(string_slice(b, 0, nl))
+        let h: hk::Hk = hk::parse(string_slice(b, nl + 1, string_len(b)))
+        let deps: [model::Dep] = model::deps_of(h, s.idx)
+        let mut k: int = 0
+        while k < array_len(deps) is
+            if string_lower(deps[k].name) == string_lower(name) && !util::has(found, who) is found = array_push(found, util::own(who)) end
+            k += 1
+        end
+    end
+    s.used = found
+    s.used_res.state = state::ready()
+    store::put(key, util::join(found, "\n"))
+end
+
+;; ── Manifests of other versions (for the diff) ───────────────────────────────
+
+pub fn mf_text(s: state::St, ref: string) -> string is
+    let mut i: int = 0
+    while i < array_len(s.mfs_refs) is
+        if s.mfs_refs[i] == ref is return s.mfs_text[i] end
+        i += 1
+    end
+    return "\u0000"
+end
+
+pub fn has_mf(s: state::St, ref: string) -> bool is
+    return util::has(s.mfs_refs, ref)
+end
+
+fn got_mf(s: state::St, key: string, body: string) is
+    let at: int = string_rfind_at(key, "@")
+    let tail: string = ":Bit.hk"
+    if at < 0 || !string_ends_with(key, tail) is return end
+    let ref: string = string_slice(key, at + 1, string_len(key) - string_len(tail))
+    if !util::has(s.mfs_refs, ref) is
+        s.mfs_refs = array_push(s.mfs_refs, util::own(ref))
+        s.mfs_text = array_push(s.mfs_text, body)
+    end
+end
+
+fn string_rfind_at(s: string, needle: string) -> int is
+    let mut at: int = -1
+    let mut i: int = 0
+    while i < string_len(s) is
+        if string_at(s, i) == needle is at = i end
+        i += 1
+    end
+    return at
+end
+
+pub fn request_mf(app: App, s: state::St, ref: string) is
+    if util::has(s.mfs_refs, ref) is return end
+    let g: model::Gh = model::parse_github(state::current(s).target)
+    if !g.ok is return end
+    let key: string = "manifest:" + model::slug(g) + "@" + ref + ":Bit.hk"
+    let hit: Hit = lookup(key, TTL_MANIFEST)
+    if hit.used is
+        got_mf(s, key, hit.body)
+        return
+    end
+    spawn(app, s, make_id("mfd", s.gen, 0, key), raw_url(g, ref, "Bit.hk"), false, false)
+end
+
+;; The diff of Bit.hk between two versions, computed once and kept.
+pub fn diff_for(s: state::St, tag: string, prev: string) -> diff::Diff is
+    let mut i: int = 0
+    while i < array_len(s.diff_tags) is
+        if s.diff_tags[i] == tag is return s.diff_data[i] end
+        i += 1
+    end
+    let a: string = mf_text(s, prev)
+    let b: string = mf_text(s, tag)
+    let mut d: diff::Diff = diff::no_diff()
+    if a != "\u0000" && b != "\u0000" is
+        d = diff::diff_lines(util::lines_of(a), util::lines_of(b), 2)
+        d.summary = diff::manifest_changes(hk::parse(a), hk::parse(b), s.idx)
+        s.diff_tags = array_push(s.diff_tags, util::own(tag))
+        s.diff_data = array_push(s.diff_data, d)
+    end
+    return d
 end
