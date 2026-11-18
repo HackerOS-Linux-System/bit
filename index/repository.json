@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-11-15",
+  "updated_at": "2026-11-18",
   "libraries": [
     {
       "name": "mold",
@@ -171,29 +171,11 @@
       "author": "Bit Developers"
     },
     {
-      "name": "regex",
-      "target": "https://github.com/bit-io/regex",
-      "description": "Regex library for bit.io. Written in Hacker Lang",
+      "name": "BetterPrompt",
+      "target": "https://github.com/bit-io/BetterPrompt",
+      "description": "Library inspired prompt toolkit. Written in H#",
       "tags": [
-        "regex"
-      ],
-      "author": "Bit Developers"
-    },
-    {
-      "name": "json-parser",
-      "target": "https://github.com/bit-io/json-parser",
-      "description": "Parser for .json.",
-      "tags": [
-        "json"
-      ],
-      "author": "Bit Developers"
-    },
-    {
-      "name": "toml-parser",
-      "target": "https://github.com/bit-io/toml-parser",
-      "description": "Parser for .toml.",
-      "tags": [
-        "toml"
+        "prompt",
       ],
       "author": "Bit Developers"
     },
