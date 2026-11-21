@@ -1,0 +1,574 @@
+struct Repo [
+    owner: Str,
+    repo: Str,
+    ref: Str,
+    dir: Str
+]
+
+!! Wynik loadera: value (lub null), stale = z kopii lokalnej, age = wiek kopii (ms, -1 gdy brak), err = GhErr | null.
+struct Loaded [
+    value: Any,
+    stale: Bool,
+    age: Int,
+    err: Any
+]
+
+!! Wynik pobierania do cache: ok + value albo err.
+struct FetchRes [
+    ok: Bool,
+    value: Any,
+    err: Any
+]
+
+struct Raw [
+    found: Bool,
+    text: Str,
+    failed: Bool
+]
+
+struct Hit [
+    found: Bool,
+    file: Str,
+    text: Str,
+    failed: Bool
+]
+
+struct FileEntry [
+    path: Str,
+    size: Int,
+    mode: Str
+]
+
+struct Asset [
+    name: Str,
+    size: Int,
+    downloads: Int,
+    url: Str
+]
+
+struct Release [
+    tag: Str,
+    name: Str,
+    date: Str,
+    prerelease: Bool,
+    draft: Bool,
+    url: Str,
+    body: Str,
+    assets: List<Asset>,
+    tag_only: Bool
+]
+
+struct ManifestVal [
+    file: Str,
+    doc: Any,
+    text: Str
+]
+
+fun repo_path(r: Repo, path: Str) -> Str [
+    if r.dir != "" [
+        if path != "" [
+            end r.dir + "/" + path
+        ]
+        end r.dir
+    ]
+    end path
+]
+
+fun raw_url(r: Repo, path: Str) -> Str [
+    end "https://raw.githubusercontent.com/" + r.owner + "/" + r.repo + "/" + enc_path(r.ref) + "/" + enc_path(repo_path(r, path))
+]
+
+fun github_url(r: Repo, kind: Str, path: Str) -> Str [
+    let full = repo_path(r, path)
+    let tail = ""
+    if full != "" [
+        tail = "/" + enc_path(full)
+    ]
+    end "https://github.com/" + r.owner + "/" + r.repo + "/" + kind + "/" + enc_path(r.ref) + tail
+]
+
+fun fr_ok(v) -> FetchRes [
+    end FetchRes(true, v, null)
+]
+
+fun fr_err(e) -> FetchRes [
+    end FetchRes(false, null, e)
+]
+
+fun net_err() -> GhErr [
+    end GhErr("network", 0, false)
+]
+
+fun http_err(status: Int) -> GhErr [
+    end GhErr("GitHub API → HTTP " + (status as Str), status, false)
+]
+
+fun use_stale(key: Str, label: Str, err) -> Loaded [
+    let old = cache_get_stale(key)
+    if is_null(old) [
+        end Loaded(null, false, -1, err)
+    ]
+    let age = cache_age(key)
+    mark_stale(label, age)
+    end Loaded(old, true, age, null)
+]
+
+!! Swiezy cache -> wartosc; inaczej siec; przy bledzie sieci -> przeterminowana kopia.
+async fun load_cached(key: Str, ttl: Int, fetcher, ctx, label: Str) -> Loaded [
+    let fresh = cache_get(key)
+    if not is_null(fresh) [
+        clear_stale(label)
+        end Loaded(fresh, false, cache_age(key), null)
+    ]
+    if is_offline() [
+        end use_stale(key, label, GhErr("offline", 0, false))
+    ]
+    let r = await fetcher(ctx)
+    if r.ok [
+        if not is_null(r.value) [
+            cache_set(key, r.value, ttl)
+        ]
+        clear_stale(label)
+        end Loaded(r.value, false, 0, null)
+    ]
+    end use_stale(key, label, r.err)
+]
+
+async fun fetch_raw(r: Repo, path: Str) -> Raw [
+    let res = await http(raw_url(r, path), null)
+    if res.status == 0 [
+        end Raw(false, "", true)
+    ]
+    if res.status == 404 [
+        end Raw(false, "", false)
+    ]
+    if res.status < 200 or res.status > 299 [
+        end Raw(false, "", true)
+    ]
+    end Raw(true, res.text, false)
+]
+
+!! Pierwszy istniejacy plik z listy: najpierw glowny kandydat, reszta rownolegle.
+async fun first_hit(r: Repo, candidates) -> Hit [
+    let head = candidates[0]
+    let first = await fetch_raw(r, head)
+    if first.failed [
+        end Hit(false, "", "", true)
+    ]
+    if first.found [
+        end Hit(true, head, first.text, false)
+    ]
+    let rest = candidates.slice(1)
+    let promises = []
+    for f in rest [
+        promises.push(fetch_raw(r, f))
+    ]
+    let hits = await Promise.all(promises)
+    let i = 0
+    while i < hits.length [
+        if hits[i].found [
+            end Hit(true, rest[i], hits[i].text, false)
+        ]
+        i = i + 1
+    ]
+    for hh in hits [
+        if hh.failed [
+            end Hit(false, "", "", true)
+        ]
+    ]
+    end Hit(false, "", "", false)
+]
+
+fun cache_key(kind: Str, r: Repo, extra: Str) -> Str [
+    let d = ""
+    if r.dir != "" [
+        d = "/" + r.dir
+    ]
+    end kind + ":" + r.owner + "/" + r.repo + d + "@" + r.ref + extra
+]
+
+!! ---- manifest ----
+async fun fetch_manifest(r: Repo) -> FetchRes [
+    let hit = await first_hit(r, ["Bit.hk", "bit.hk"])
+    if hit.failed [
+        end fr_err(net_err())
+    ]
+    if not hit.found [
+        end fr_ok(null)
+    ]
+    end fr_ok(js_set(js_set(js_new_obj(), "file", hit.file), "text", hit.text.slice(0, 100000)))
+]
+
+async fun load_manifest(r: Repo) -> Loaded [
+    let res = await load_cached(cache_key("manifest", r, ""), TTL_MANIFEST, fetch_manifest, r, "manifest")
+    if is_null(res.value) [
+        end res
+    ]
+    end Loaded(ManifestVal(res.value.file, parse_hk(res.value.text), res.value.text), res.stale, res.age, res.err)
+]
+
+!! ---- README ----
+async fun fetch_readme(r: Repo) -> FetchRes [
+    let hit = await first_hit(r, ["README.md", "Readme.md", "readme.md", "README.markdown", "README.MD", "README", "README.txt", "README.rst"])
+    if hit.failed [
+        end fr_err(net_err())
+    ]
+    if not hit.found [
+        end fr_ok(null)
+    ]
+    let v = js_new_obj()
+    js_set(v, "file", hit.file)
+    js_set(v, "text", hit.text.slice(0, 200000))
+    js_set(v, "markdown", re_test("\\.(md|markdown)$", "i", hit.file))
+    end fr_ok(v)
+]
+
+fun load_readme(r: Repo) [
+    end load_cached(cache_key("readme", r, ""), TTL_README, fetch_readme, r, "readme")
+]
+
+!! ---- drzewo plikow ----
+const MAX_TREE_FILES = 6000
+let tree_inflight = js_new_obj()
+
+async fun fetch_tree(r: Repo) -> FetchRes [
+    let res = await github_api("/repos/" + r.owner + "/" + r.repo + "/git/trees/" + enc(r.ref) + "?recursive=1")
+    if res.status == 0 [
+        end fr_err(net_err())
+    ]
+    let se = github_status_error(res.status)
+    if not is_null(se) [
+        end fr_err(se)
+    ]
+    if res.status == 404 or res.status == 409 [
+        end fr_ok(null)
+    ]
+    if res.status < 200 or res.status > 299 [
+        end fr_err(http_err(res.status))
+    ]
+    let data = json_parse(res.text)
+    let tree = js_arr(data, "tree")
+    if not is_arr(js_get(data, "tree")) [
+        end fr_ok(null)
+    ]
+    let prefix = r.dir + "/"
+    let blobs = []
+    for e in tree [
+        if js_str(e, "type") != "blob" [
+            continue
+        ]
+        let p = js_str(e, "path")
+        if r.dir != "" [
+            if not p.startsWith(prefix) [
+                continue
+            ]
+            p = p.slice(prefix.length)
+        ]
+        blobs.push(FileEntry(p, js_num(e, "size"), js_str(e, "mode")))
+    ]
+    let truncated = js_bool(data, "truncated")
+    if r.dir != "" and blobs.length == 0 and not truncated [
+        end fr_ok(null)
+    ]
+    let value = js_new_obj()
+    js_set(value, "truncated", truncated or blobs.length > MAX_TREE_FILES)
+    js_set(value, "files", blobs.slice(0, MAX_TREE_FILES))
+    end fr_ok(value)
+]
+
+async fun load_tree(r: Repo) -> Loaded [
+    let k = cache_key("tree", r, "")
+    if not is_null(js_get(tree_inflight, k)) [
+        end await js_get(tree_inflight, k)
+    ]
+    let p = load_cached(k, TTL_TREE, fetch_tree, r, "tree")
+    js_set(tree_inflight, k, p)
+    let res = await p
+    js_set(tree_inflight, k, null)
+    end res
+]
+
+!! ---- wydania ----
+fun release_from_raw(owner: Str, repo: Str, x) -> Release [
+    let tag = js_str(x, "tag_name")
+    let date = js_str(x, "published_at")
+    if date == "" [
+        date = js_str(x, "created_at")
+    ]
+    let url = js_str(x, "html_url")
+    if url == "" [
+        url = "https://github.com/" + owner + "/" + repo + "/releases/tag/" + enc(tag)
+    ]
+    let assets: List<Asset> = []
+    for a in js_arr(x, "assets") [
+        let nm = js_str(a, "name")
+        if nm == "" [
+            nm = "file"
+        ]
+        assets.push(Asset(nm, js_num(a, "size"), js_num(a, "download_count"), js_str(a, "browser_download_url")))
+    ]
+    end Release(tag, js_str(x, "name"), date, js_bool(x, "prerelease"), js_bool(x, "draft"), url, js_str(x, "body").slice(0, 6000), assets, false)
+]
+
+async fun fetch_releases(r: Repo) -> FetchRes [
+    let res = await github_api("/repos/" + r.owner + "/" + r.repo + "/releases?per_page=50")
+    if res.status == 0 [
+        end fr_err(net_err())
+    ]
+    let se = github_status_error(res.status)
+    if not is_null(se) [
+        end fr_err(se)
+    ]
+    if res.status == 404 [
+        end fr_ok(null)
+    ]
+    if res.status < 200 or res.status > 299 [
+        end fr_err(http_err(res.status))
+    ]
+    let raw = json_parse(res.text)
+    let releases: List<Release> = []
+    if is_arr(raw) [
+        for x in raw [
+            if js_str(x, "tag_name") != "" [
+                releases.push(release_from_raw(r.owner, r.repo, x))
+            ]
+        ]
+    ]
+    if releases.length > 0 [
+        end fr_ok(releases)
+    ]
+    let t = await github_api("/repos/" + r.owner + "/" + r.repo + "/tags?per_page=50")
+    let se2 = github_status_error(t.status)
+    if not is_null(se2) [
+        end fr_err(se2)
+    ]
+    if t.status < 200 or t.status > 299 [
+        end fr_ok([])
+    ]
+    let tags = json_parse(t.text)
+    let out: List<Release> = []
+    if is_arr(tags) [
+        for x in tags [
+            let nm = js_str(x, "name")
+            if nm != "" [
+                out.push(Release(nm, "", "", false, false, "https://github.com/" + r.owner + "/" + r.repo + "/releases/tag/" + enc(nm), "", [], true))
+            ]
+        ]
+    ]
+    end fr_ok(out)
+]
+
+fun load_releases(r: Repo) [
+    let k = "releases:" + r.owner + "/" + r.repo
+    end load_cached(k, TTL_RELEASES, fetch_releases, r, "releases")
+]
+
+!! ---- plik ----
+fun load_file(r: Repo, path: Str) [
+    let k = cache_key("src", r, ":" + path)
+    end load_cached(k, TTL_FILE, fetch_file, js_set(js_set(js_new_obj(), "r", r), "path", path), "source")
+]
+
+async fun fetch_file(ctx) -> FetchRes [
+    let raw = await fetch_raw(ctx.r, ctx.path)
+    if raw.failed [
+        end fr_err(net_err())
+    ]
+    if not raw.found [
+        end fr_ok(null)
+    ]
+    end fr_ok(raw.text)
+]
+
+!! ---- metadane repozytorium ----
+async fun fetch_meta(r: Repo) -> FetchRes [
+    let res = await github_api("/repos/" + r.owner + "/" + r.repo)
+    if res.status == 0 [
+        end fr_err(net_err())
+    ]
+    let se = github_status_error(res.status)
+    if not is_null(se) [
+        end fr_err(se)
+    ]
+    if res.status == 404 [
+        end fr_ok(null)
+    ]
+    if res.status < 200 or res.status > 299 [
+        end fr_err(http_err(res.status))
+    ]
+    let d = json_parse(res.text)
+    let lic = js_obj(d, "license")
+    let license = ""
+    if not is_null(lic) [
+        let spdx = js_str(lic, "spdx_id")
+        if spdx != "" and spdx != "NOASSERTION" [
+            license = spdx
+        ] else [
+            license = js_str(lic, "name")
+        ]
+    ]
+    let topics = []
+    for t in js_arr(d, "topics") [
+        if is_str(t) [
+            topics.push(t)
+        ]
+    ]
+    let v = js_new_obj()
+    js_set(v, "stars", js_num(d, "stargazers_count"))
+    js_set(v, "forks", js_num(d, "forks_count"))
+    js_set(v, "issues", js_num(d, "open_issues_count"))
+    js_set(v, "watchers", js_num(d, "subscribers_count"))
+    js_set(v, "license", license)
+    js_set(v, "pushedAt", js_str(d, "pushed_at"))
+    js_set(v, "createdAt", js_str(d, "created_at"))
+    js_set(v, "archived", js_bool(d, "archived"))
+    js_set(v, "defaultBranch", js_str(d, "default_branch"))
+    js_set(v, "topics", topics)
+    js_set(v, "homepage", js_str(d, "homepage"))
+    js_set(v, "size", js_num(d, "size"))
+    end fr_ok(v)
+]
+
+fun load_repo_meta(r: Repo) [
+    end load_cached("meta:" + r.owner + "/" + r.repo, TTL_META, fetch_meta, r, "meta")
+]
+
+!! ---- rozwiazanie rev (tag/commit) ----
+async fun fetch_rev(r: Repo) -> FetchRes [
+    let res = await github_api("/repos/" + r.owner + "/" + r.repo + "/commits/" + enc(r.ref))
+    if res.status == 0 [
+        end fr_err(net_err())
+    ]
+    let se = github_status_error(res.status)
+    if not is_null(se) [
+        end fr_err(se)
+    ]
+    if res.status == 404 or res.status == 422 [
+        end fr_ok(null)
+    ]
+    if res.status < 200 or res.status > 299 [
+        end fr_err(http_err(res.status))
+    ]
+    let d = json_parse(res.text)
+    let sha = js_str(d, "sha")
+    if sha == "" [
+        end fr_ok(null)
+    ]
+    let commit = js_obj(d, "commit")
+    let committer = js_obj(commit, "committer")
+    let msg = js_str(commit, "message").split("\n")[0]
+    let v = js_new_obj()
+    js_set(v, "sha", sha)
+    js_set(v, "date", js_str(committer, "date"))
+    js_set(v, "message", msg)
+    end fr_ok(v)
+]
+
+fun resolve_rev(r: Repo) [
+    end load_cached(cache_key("rev", r, ""), TTL_REV, fetch_rev, r, "rev")
+]
+
+!! Ostatnio widziany SHA danego refa (wykrywa przesuniete tagi).
+fun seen_sha(r: Repo) [
+    end cache_get_stale(cache_key("seen", r, ""))
+]
+
+fun remember_sha(r: Repo, sha: Str) [
+    cache_set(cache_key("seen", r, ""), sha, 0)
+]
+
+!! ---- jeden katalog (gdy drzewo jest obciete) ----
+async fun fetch_dir(ctx) -> FetchRes [
+    let r = ctx.r
+    let full = repo_path(r, ctx.dir)
+    let path = ""
+    if full != "" [
+        path = "/" + enc_path(full)
+    ]
+    let resp = await github_api("/repos/" + r.owner + "/" + r.repo + "/contents" + path + "?ref=" + enc(r.ref))
+    if resp.status == 0 [
+        end fr_err(net_err())
+    ]
+    let se = github_status_error(resp.status)
+    if not is_null(se) [
+        end fr_err(se)
+    ]
+    if resp.status == 404 [
+        end fr_ok(null)
+    ]
+    if resp.status < 200 or resp.status > 299 [
+        end fr_err(http_err(resp.status))
+    ]
+    let list = json_parse(resp.text)
+    let files = []
+    let dirs = []
+    if is_arr(list) [
+        let strip_prefix = r.dir + "/"
+        for e in list [
+            let p = js_str(e, "path")
+            if r.dir != "" and p.startsWith(strip_prefix) [
+                p = p.slice(strip_prefix.length)
+            ]
+            if js_str(e, "type") == "file" [
+                files.push(FileEntry(p, js_num(e, "size"), ""))
+            ] elif js_str(e, "type") == "dir" [
+                dirs.push(p)
+            ]
+        ]
+    ]
+    end fr_ok(js_set(js_set(js_new_obj(), "files", files), "dirs", dirs))
+]
+
+!! Zwraca { files, dirs } albo null.
+async fun load_dir(r: Repo, dir: Str) [
+    let k = cache_key("dir", r, ":" + dir)
+    let res = await load_cached(k, TTL_TREE, fetch_dir, js_set(js_set(js_new_obj(), "r", r), "dir", dir), "source")
+    end res
+]
+
+!! ---- lekki odczyt pliku (cache trwaly albo pamiec) ----
+let mem_files = js_new_obj()
+
+async fun read_file_light(r: Repo, path: Str) -> Raw [
+    let k = cache_key("src", r, ":" + path)
+    let saved = cache_get_stale(k)
+    if not is_null(saved) [
+        end Raw(true, saved, false)
+    ]
+    if js_has(mem_files, k) [
+        end js_get(mem_files, k)
+    ]
+    let raw = await fetch_raw(r, path)
+    if not raw.failed [
+        js_set(mem_files, k, raw)
+    ]
+    end raw
+]
+
+async fun fetch_raw_bytes(r: Repo, path: Str) [
+    end await http_bytes(raw_url(r, path))
+]
+
+!! ---- pula rownoleglych zadan ----
+!! fn(ctx, item, index); stop(ctx) -> Bool (opcjonalne, null = nigdy).
+async fun pool_worker(st, items, fn, ctx, stop) [
+    while st.cursor < items.length [
+        if not is_null(stop) and stop(ctx) [
+            end 0
+        ]
+        let i = st.cursor
+        st.cursor = st.cursor + 1
+        await fn(ctx, items[i], i)
+    ]
+    end 0
+]
+
+async fun pool(items, limit: Int, fn, ctx, stop) [
+    let st = js_set(js_new_obj(), "cursor", 0)
+    let workers = []
+    let n = Math.min(limit, items.length)
+    for w in range(0, n) [
+        workers.push(pool_worker(st, items, fn, ctx, stop))
+    ]
+    await Promise.all(workers)
+]
