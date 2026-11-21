@@ -1,0 +1,285 @@
+use <mode:website>
+!! Strona biblioteki: naglowek, zakladki Overview / API / Source / Versions, wybor wersji.
+include <jsutil>
+include <platform>
+include <dom>
+include <store>
+include <offline>
+include <github>
+include <theme>
+include <langs>
+include <hk>
+include <index_data>
+include <langcolors>
+include <repodata>
+include <getapp>
+include <chrome>
+include <highlight>
+include <markdown>
+include <codeblocks>
+include <langbar>
+include <deps>
+include <diff>
+include <verify>
+include <versions>
+include <source>
+include <apidoc>
+include <overview>
+include <styles>
+
+let lb_entry = null
+let lb_repo_ref = null
+let lb_tabs = ["overview", "api", "source", "versions"]
+let lb_tab_labels = ["Overview", "API", "Source", "Versions"]
+let lb_panels = js_new_obj()
+let lb_links = js_new_obj()
+let lb_source_mounted = false
+let lb_root = null
+let vp_entry = null
+let vp_repo = null
+let vp_current = ""
+let vp_loaded = false
+let vp_select = null
+
+fun valid_ref(v) -> Str [
+    if not is_null(v) and re_test("^[\\w.+#@/-]{1,100}$", "", v) and not v.includes("..") [
+        end v
+    ]
+    end ""
+]
+
+!! ---- wybor wersji ----
+async fun vp_populate() [
+    if vp_loaded [
+        end 0
+    ]
+    vp_loaded = true
+    let res = await load_releases(vp_repo)
+    if not is_null(res.err) [
+        vp_loaded = false
+        end 0
+    ]
+    let list = []
+    if not is_null(res.value) [
+        list = res.value
+    ]
+    if list.length == 0 [
+        end 0
+    ]
+    let tags = []
+    let opts = [ha("option", ["value", ""], ["default branch"])]
+    let has_current = false
+    for r in list [
+        tags.push(r.tag)
+        let o = ha("option", ["value", r.tag], [r.tag])
+        if r.tag == vp_current [
+            o.selected = true
+            has_current = true
+        ]
+        opts.push(o)
+    ]
+    dom_set(vp_select, opts)
+    if vp_current == "" [
+        vp_select.options[0].selected = true
+    ] elif not has_current [
+        vp_select.prepend(ha("option", ["value", vp_current], [vp_current]))
+        vp_select.value = vp_current
+    ]
+]
+
+fun on_vp_open(e) [
+    vp_populate()
+]
+
+fun on_vp_change(e) [
+    location.href = url_with_ref(vp_select.value)
+]
+
+fun version_picker(entry, repo: Repo, ref_param: Str) [
+    vp_entry = entry
+    vp_repo = repo
+    vp_current = ref_param
+    if vp_current == "" [
+        vp_current = entry.rev
+    ]
+    if vp_current == "" and repo.ref != "HEAD" [
+        vp_current = repo.ref
+    ]
+    let label = vp_current
+    if label == "" [
+        label = "default branch"
+    ]
+    vp_select = ha("select", ["class", "ver-select", "aria-label", "Version"], [ha("option", ["value", vp_current], [label])])
+    vp_loaded = false
+    vp_select.addEventListener("focus", on_vp_open)
+    vp_select.addEventListener("pointerdown", on_vp_open)
+    vp_select.addEventListener("change", on_vp_change)
+    end h("label", "ver-picker", [h("span", "muted small", ["Version "]), vp_select])
+]
+
+!! ---- zakladki ----
+fun tab_known(id: Str) -> Bool [
+    for t in lb_tabs [
+        if t == id [
+            end true
+        ]
+    ]
+    end false
+]
+
+fun lib_route(e) [
+    let hash = dec_uri(location.hash.slice(1))
+    if hash.startsWith("user-content-") [
+        end 0
+    ]
+    let id = hash.split("/")[0]
+    let tab = "overview"
+    if tab_known(id) [
+        tab = id
+    ]
+    for t in lb_tabs [
+        let on = t == tab
+        js_get(lb_panels, t).hidden = not on
+        let a = js_get(lb_links, t)
+        a.classList.toggle("is-active", on)
+        if on [
+            a.setAttribute("aria-selected", "true")
+            a.setAttribute("aria-current", "page")
+        ] else [
+            a.setAttribute("aria-selected", "false")
+            a.removeAttribute("aria-current")
+        ]
+    ]
+    if tab == "source" and not is_null(lb_repo_ref) [
+        if not lb_source_mounted [
+            mount_source(js_get(lb_panels, "source"), lb_repo_ref)
+            lb_source_mounted = true
+        ]
+        if hash.length > 7 [
+            show_source(hash.slice(7))
+        ] else [
+            show_source(null)
+        ]
+    ]
+    if tab == "versions" and not is_null(lb_repo_ref) [
+        versions_load()
+    ]
+    if tab == "api" and not is_null(lb_repo_ref) [
+        api_load()
+    ]
+]
+
+fun on_lib_online() [
+    overview_reload()
+]
+
+fun empty_with_link(msg: Str) [
+    clear_el(lb_root)
+    lb_root.append(h("p", "empty", [msg]))
+    lb_root.append(link("index.html", "", ["Browse the index"]))
+]
+
+async fun main() [
+    head_setup("bit.io", "A library on bit.io")
+    let main_el = page_shell("libraries", "wrap page", true)
+    lb_root = ha("div", ["id", "detail"], [])
+    main_el.append(lb_root)
+    init_chrome()
+    let name = qs_get("name")
+    if is_null(name) or name == "" [
+        lb_root.append(h("p", "empty", ["No library selected. "]))
+        lb_root.append(link("index.html", "", ["Browse the index"]))
+        end 0
+    ]
+    document.title = name + " — bit.io"
+    let ix = await load_index()
+    if not ix.ok [
+        clear_el(lb_root)
+        if is_online() [
+            lb_root.append(h("p", "empty", ["Could not load the index (" + ix.error + ")."]))
+        ] else [
+            lb_root.append(h("p", "empty", ["You're offline and the library index hasn't been saved in this browser yet. Open bit.io once while online."]))
+        ]
+        end 0
+    ]
+    let libs = ix.libraries
+    let entry = null
+    for l in libs [
+        if is_null(entry) and l.name.toLowerCase() == name.toLowerCase() [
+            entry = l
+        ]
+    ]
+    if is_null(entry) [
+        clear_el(lb_root)
+        lb_root.append(h("p", "empty", ["\"" + name + "\" is not in the index."]))
+        lb_root.append(link("index.html", "", ["Browse the index"]))
+        end 0
+    ]
+    lb_entry = entry
+    let desc = entry.description
+    if desc == "" [
+        desc = "a library on bit.io"
+    ]
+    document.querySelector("meta[name=\"description\"]").setAttribute("content", entry.name + " — " + desc)
+    let gh = parse_github(entry.target)
+    let ref_param = valid_ref(qs_get("ref"))
+    let repo = null
+    if not is_null(gh) [
+        let ref = ref_param
+        if ref == "" [
+            ref = entry.rev
+        ]
+        if ref == "" [
+            ref = gh.ref
+        ]
+        if ref == "" [
+            ref = "HEAD"
+        ]
+        repo = Repo(gh.owner, gh.repo, ref, gh.dir)
+    ]
+    lb_repo_ref = repo
+    clear_el(lb_root)
+    let tag_links = []
+    for t in entry.tags [
+        tag_links.push(link("index.html?tag=" + enc(t), "tag", [t]))
+    ]
+    lb_root.append(h("h1", "", [entry.name]))
+    lb_root.append(h("p", "lead", [entry.description]))
+    lb_root.append(h("div", "tags", tag_links))
+    if ref_param != "" [
+        lb_root.append(h("p", "ref-banner", ["Viewing version " + ref_param + ". ", link("lib.html?name=" + enc(entry.name) + location.hash, "", ["Back to the default version"])]))
+    ]
+    let tablist = ha("div", ["class", "tabs", "role", "tablist", "aria-label", "Library sections"], [])
+    let panel_list = []
+    let i = 0
+    for t in lb_tabs [
+        let a = ha("a", ["class", "tab", "role", "tab", "href", "#" + t, "id", "tab-" + t, "aria-controls", "panel-" + t], [lb_tab_labels[i]])
+        js_set(lb_links, t, a)
+        tablist.append(a)
+        let p = ha("section", ["class", "tab-panel", "role", "tabpanel", "id", "panel-" + t, "aria-labelledby", "tab-" + t, "hidden", ""], [])
+        js_set(lb_panels, t, p)
+        panel_list.push(p)
+        i = i + 1
+    ]
+    if not is_null(repo) [
+        tablist.append(h("span", "grow", []))
+        tablist.append(version_picker(entry, repo, ref_param))
+    ]
+    lb_root.append(tablist)
+    for p in panel_list [
+        lb_root.append(p)
+    ]
+    mount_overview(js_get(lb_panels, "overview"), entry, repo, libs)
+    on_online(on_lib_online)
+    if not is_null(repo) [
+        mount_versions(js_get(lb_panels, "versions"), entry, repo)
+        mount_api(js_get(lb_panels, "api"), repo)
+        mount_lang_bar(repo)
+    ] else [
+        for t in ["source", "versions", "api"] [
+            js_get(lb_panels, t).append(muted("Only available for libraries hosted on GitHub."))
+        ]
+    ]
+    window.addEventListener("hashchange", lib_route)
+    lib_route(null)
+]
