@@ -1,0 +1,113 @@
+fun hk_unquote(s: Str) -> Str [
+    let t = s.trim()
+    if t.length >= 2 and t.startsWith("\"") and t.endsWith("\"") [
+        end t.slice(1, t.length - 1)
+    ]
+    end t
+]
+
+!! `[Default build]`, `[default_build]`, `[default-build]` to jedna sekcja.
+fun norm_section(raw: Str) -> Str [
+    end re_replace("[\\s_]+", "g", raw.trim().toLowerCase(), "-")
+]
+
+fun hk_strip_comment(v: Str) -> Str [
+    let in_str = false
+    let i = 0
+    while i < v.length - 1 [
+        let c = v[i]
+        if c == "\"" [
+            in_str = not in_str
+        ]
+        if not in_str and c == ";" and v[i + 1] == ";" [
+            end v.slice(0, i).trim()
+        ]
+        i = i + 1
+    ]
+    end v
+]
+
+fun parse_hk(source: Str) [
+    let doc = js_new_obj()
+    let section = ""
+    let last_key = ""
+    let lines = re_replace("\\r", "g", source, "").split("\n")
+    for raw in lines [
+        let line = raw.trim()
+        if line == "" or line.startsWith(";;") or line.startsWith("!") or line.startsWith("#") [
+            continue
+        ]
+        let sec = re_match("^\\[(.+)\\]$", "", line)
+        if not is_null(sec) [
+            section = norm_section(sec[1])
+            last_key = ""
+            if not js_has(doc, section) [
+                js_set(doc, section, js_new_obj())
+            ]
+            continue
+        ]
+        if section == "" [
+            continue
+        ]
+        let body = line
+        let sub = false
+        if body.startsWith("-->") [
+            body = body.slice(3).trim()
+            sub = true
+        ] elif body.startsWith("->") [
+            body = body.slice(2).trim()
+        ]
+        let arrow = body.indexOf("=>")
+        let eq = body.indexOf("=")
+        let key = body
+        let val = ""
+        if arrow >= 0 [
+            key = body.slice(0, arrow)
+            val = body.slice(arrow + 2)
+        ] elif eq >= 0 [
+            key = body.slice(0, eq)
+            val = body.slice(eq + 1)
+        ]
+        key = hk_unquote(key.trim())
+        if key == "" [
+            continue
+        ]
+        if sub and last_key != "" [
+            key = last_key + "." + key
+        ] elif not sub [
+            last_key = key
+        ]
+        js_set(js_get(doc, section), key, hk_unquote(hk_strip_comment(val.trim())))
+    ]
+    end doc
+]
+
+fun hk_list(value: Str) -> List<Str> [
+    let out: List<Str> = []
+    let t = value.trim()
+    if t == "" [
+        end out
+    ]
+    if t.startsWith("[") and t.endsWith("]") [
+        t = t.slice(1, t.length - 1)
+    ]
+    for part in t.split(",") [
+        let x = hk_unquote(part.trim())
+        if x != "" [
+            out.push(x)
+        ]
+    ]
+    end out
+]
+
+!! Wartosc doc[sekcja][klucz] albo "".
+fun hk_get(doc, section: Str, key: Str) -> Str [
+    if is_null(doc) [
+        end ""
+    ]
+    let sec = js_obj(doc, section)
+    if is_null(sec) [
+        end ""
+    ]
+    end js_str(sec, key)
+]
