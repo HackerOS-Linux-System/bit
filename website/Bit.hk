@@ -1,1 +1,16 @@
+[package]
+-> name        => bit-io-website
+-> version     => 0.4.0
+-> description => bit.io — the library index (HackerScript, mode:website)
+-> lang        => HackerScript
 
+[layout]
+-> cmd => cmd
+
+[commands]
+-> site
+--> run => bash scripts/build.sh
+--> description => Build the site into dist/ (hackerc website, every page)
+-> test
+--> run => npm ci --no-audit --no-fund && npm test
+--> description => Unit + smoke + service-worker tests (jsdom)
