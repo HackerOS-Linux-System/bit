@@ -1,0 +1,166 @@
+struct DepSpec [
+    name: Str,
+    spec: Str
+]
+
+struct DepClass [
+    kind: Str,
+    lib: Any
+]
+
+struct Note [
+    level: Str,
+    text: Str
+]
+
+struct UsedBy [
+    lib: Any,
+    spec: Str
+]
+
+fun dependencies_of(doc) -> List<DepSpec> [
+    let out: List<DepSpec> = []
+    if is_null(doc) [
+        end out
+    ]
+    let deps = js_obj(doc, "dependencies")
+    if is_null(deps) [
+        end out
+    ]
+    let keys = js_keys(deps)
+    for name in keys [
+        if name.includes(".") [
+            continue
+        ]
+        let own = js_str(deps, name)
+        let subs: List<Str> = []
+        for k in keys [
+            if k.startsWith(name + ".") [
+                subs.push(k.slice(name.length + 1) + "=" + js_str(deps, k))
+            ]
+        ]
+        let spec = own
+        if spec == "" [
+            spec = subs.join(", ")
+        ]
+        out.push(DepSpec(name, spec))
+    ]
+    end out
+]
+
+!! Rodzaj zaleznosci: index (jest w indeksie) | git | path | unknown.
+fun classify_dep(d: DepSpec, libs) -> DepClass [
+    if re_test("^git\\s", "", d.spec) or re_test("^https?:\\/\\/", "", d.spec) [
+        end DepClass("git", null)
+    ]
+    if re_test("^path\\b|^path=", "", d.spec) [
+        end DepClass("path", null)
+    ]
+    let lower = d.name.toLowerCase()
+    for l in libs [
+        if l.name.toLowerCase() == lower [
+            end DepClass("index", l)
+        ]
+    ]
+    end DepClass("unknown", null)
+]
+
+fun compat_notes(entry, doc, libs) -> List<Note> [
+    let notes: List<Note> = []
+    let pkg = js_obj(doc, "package")
+    let ed = js_obj(doc, "edition")
+    let build = js_obj(doc, "build")
+    if js_str(ed, "toolchain") != "" [
+        notes.push(Note("ok", "Needs the H# toolchain " + js_str(ed, "toolchain") + " or newer (`h# --version`)."))
+    ]
+    if js_str(ed, "edition") != "" [
+        notes.push(Note("ok", "Edition " + js_str(ed, "edition") + " (files without `using \"<year>\"` use it)."))
+    ]
+    let link = js_str(build, "link")
+    if link != "" and link != "static" [
+        notes.push(Note("warn", "[build] link => " + link + " — bit only links statically and rejects this."))
+    ]
+    let plat = js_str(build, "platform")
+    if plat != "" [
+        notes.push(Note("ok", "Cross-compiles for " + plat + "."))
+    ]
+    let pname = js_str(pkg, "name")
+    if pname != "" and pname.toLowerCase() != entry.name.toLowerCase() [
+        notes.push(Note("warn", "The manifest calls this package \"" + pname + "\", the index calls it \"" + entry.name + "\"."))
+    ]
+    if js_str(pkg, "lang") == "" [
+        notes.push(Note("ok", "No `lang` in the manifest — bit detects it from the file layout."))
+    ]
+    for d in dependencies_of(doc) [
+        if classify_dep(d, libs).kind == "unknown" [
+            notes.push(Note("warn", "Dependency \"" + d.name + "\" is not in the index (and isn't a git/path dependency)."))
+        ]
+    ]
+    end notes
+]
+
+!! ---- "Used by": skanuje manifesty innych bibliotek z indeksu ----
+let ub_found = []
+let ub_done = 0
+let ub_total = 0
+let ub_target = ""
+let ub_progress = null
+let ub_stop = null
+
+fun ub_should_stop(ctx) -> Bool [
+    if is_null(ub_stop) [
+        end false
+    ]
+    end ub_stop()
+]
+
+async fun ub_worker(ctx, lib, idx) [
+    let gh = parse_github(lib.target)
+    if not is_null(gh) [
+        let ref = lib.rev
+        if ref == "" [
+            ref = gh.ref
+        ]
+        if ref == "" [
+            ref = "HEAD"
+        ]
+        let res = await load_manifest(Repo(gh.owner, gh.repo, ref, gh.dir))
+        if is_null(res.err) and not is_null(res.value) [
+            for d in dependencies_of(res.value.doc) [
+                if d.name.toLowerCase() == ub_target [
+                    ub_found.push(UsedBy(lib, d.spec))
+                ]
+            ]
+        ]
+    ]
+    ub_done = ub_done + 1
+    if not is_null(ub_progress) [
+        ub_progress(ub_done, ub_total)
+    ]
+]
+
+fun used_by_cmp(a, b) [
+    end locale_cmp(a.lib.name, b.lib.name)
+]
+
+!! progress(done, total), stop() -> Bool; zwraca liste UsedBy.
+async fun scan_used_by(target, libs, progress, stop) [
+    let others = []
+    let t = target.name.toLowerCase()
+    for l in libs [
+        if l.name.toLowerCase() != t and not is_null(parse_github(l.target)) [
+            others.push(l)
+        ]
+    ]
+    ub_found = []
+    ub_done = 0
+    ub_total = others.length
+    ub_target = t
+    ub_progress = progress
+    ub_stop = stop
+    if not is_null(progress) [
+        progress(0, others.length)
+    ]
+    await pool(others, 4, ub_worker, null, ub_should_stop)
+    end ub_found.slice().sort(used_by_cmp)
+]
