@@ -1,0 +1,155 @@
+const COLLAPSED_KEY = "bitio:langbar-collapsed"
+
+let lb_repo = null
+let lb_body = null
+let lb_toggle = null
+let lb_widget = null
+
+fun lb_apply(collapsed: Bool) [
+    lb_widget.classList.toggle("is-collapsed", collapsed)
+    lb_body.hidden = collapsed
+    if collapsed [
+        lb_toggle.textContent = "+"
+        lb_toggle.setAttribute("aria-label", "Expand language bar")
+        lb_toggle.setAttribute("aria-expanded", "false")
+    ] else [
+        lb_toggle.textContent = "–"
+        lb_toggle.setAttribute("aria-label", "Collapse language bar")
+        lb_toggle.setAttribute("aria-expanded", "true")
+    ]
+]
+
+fun on_lb_toggle(e) [
+    let next = not lb_widget.classList.contains("is-collapsed")
+    lb_apply(next)
+    if next [
+        ls_set(COLLAPSED_KEY, "1")
+    ] else [
+        ls_set(COLLAPSED_KEY, "0")
+    ]
+]
+
+fun on_lb_retry(e) [
+    lb_run()
+]
+
+fun on_lb_online(e) [
+    lb_run()
+]
+
+fun on_brand_icon_error(e) [
+    let icon = e.currentTarget
+    if icon.dataset.fallback != null [
+        end 0
+    ]
+    icon.dataset.fallback = "1"
+    icon.src = icon.hks_fallback
+]
+
+fun lb_render(shares, stale_age: Int) [
+    let top = shares[0]
+    let labels: List<Str> = []
+    for s in shares [
+        labels.push(s.name + " " + fixed(s.pct, 1) + "%")
+    ]
+    let bar = ha("div", ["class", "lang-bar", "role", "img", "aria-label", labels.join(", ")], [])
+    let legend = h("div", "lang-legend", [])
+    for s in shares [
+        let light = ""
+        if needs_outline(s.name) [
+            light = "is-light"
+        ]
+        let seg = h("span", light, [])
+        seg.style.flexBasis = fixed(s.pct, 4) + "%"
+        seg.style.background = color_for_language(s.name)
+        seg.title = s.name + " " + fixed(s.pct, 1) + "%"
+        bar.append(seg)
+        let dot_cls = "dot"
+        if needs_outline(s.name) [
+            dot_cls = "dot is-light"
+        ]
+        let dot = h("span", dot_cls, [])
+        dot.style.background = color_for_language(s.name)
+        let pct = fixed(s.pct, 1)
+        if s.pct < 0.1 [
+            pct = "<0.1"
+        ]
+        legend.append(h("div", "lang-legend-item", [dot, h("b", "", [s.name]), h("span", "pct", [pct + "%"])]))
+    ]
+    let nodes = []
+    let brand = brand_for(top.name)
+    if not is_null(brand) [
+        let icon = ha("img", ["class", "lang-badge-icon", "src", brand.icon, "alt", "", "width", "36", "height", "36", "decoding", "async", "referrerpolicy", "no-referrer"], [])
+        icon.hks_fallback = brand.fallback
+        icon.addEventListener("error", on_brand_icon_error)
+        nodes.push(h("div", "lang-badge is-" + brand.id, [
+            icon,
+            h("div", "lang-badge-text", [
+                h("div", "top", [brand.label + " leads this repo"]),
+                h("div", "sub", [fixed(top.pct, 1) + "% of tracked bytes"])
+            ])
+        ]))
+    ]
+    nodes.push(bar)
+    nodes.push(legend)
+    if stale_age != -2 [
+        nodes.push(muted_small("Saved copy · " + format_age(stale_age)))
+    ]
+    dom_set(lb_body, nodes)
+]
+
+fun retry_actions(limited: Bool) [
+    let retry = ha("button", ["class", "retry-btn", "type", "button"], ["Try again"])
+    retry.addEventListener("click", on_lb_retry)
+    let kids = [retry]
+    if limited [
+        kids.push(link("settings.html", "retry-btn", ["Add token"]))
+    ]
+    end h("div", "lang-actions", kids)
+]
+
+async fun lb_run() [
+    dom_set(lb_body, [muted_small("Detecting languages…")])
+    let res = await load_tree(lb_repo)
+    if not is_null(res.err) [
+        let limited = res.err.limited
+        let msg = "Couldn't detect languages (offline?)."
+        if limited [
+            msg = res.err.message
+        ]
+        dom_set(lb_body, [muted_small(msg), retry_actions(limited)])
+        end 0
+    ]
+    let shares = []
+    if not is_null(res.value) [
+        shares = breakdown_from_files(res.value.files)
+    ]
+    if shares.length == 0 [
+        let msg = "Couldn't read this repository's files."
+        if not is_null(res.value) [
+            msg = "No known source languages found."
+        ]
+        dom_set(lb_body, [muted_small(msg)])
+        end 0
+    ]
+    let age = -2
+    if res.stale [
+        age = res.age
+    ]
+    lb_render(shares, age)
+]
+
+fun mount_lang_bar(repo: Repo) [
+    lb_repo = repo
+    lb_body = h("div", "lang-widget-body", [muted_small("Detecting languages…")])
+    lb_toggle = ha("button", ["class", "lang-widget-toggle", "type", "button", "aria-label", "Collapse language bar", "aria-expanded", "true"], ["–"])
+    lb_widget = ha("aside", ["class", "lang-widget", "aria-label", "Languages used in this library"], [
+        h("div", "lang-widget-head", [h("h4", "", ["Languages"]), lb_toggle]),
+        lb_body
+    ])
+    document.body.append(lb_widget)
+    lb_apply(ls_get(COLLAPSED_KEY) == "1")
+    lb_toggle.addEventListener("click", on_lb_toggle)
+    lb_run()
+    window.addEventListener("online", on_lb_online)
+]
