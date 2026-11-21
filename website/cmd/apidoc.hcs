@@ -1,0 +1,585 @@
+struct ApiItem [
+    kind: Str,
+    name: Str,
+    sig: Str,
+    doc: Str,
+    line: Int,
+    file: Str,
+    members: List<Str>,
+    owner: Str
+]
+
+const API_FILE_RE = "\\.(?:h#i?|hcs|hl)$"
+const DECOR_RE = "[─━═]{3,}|^\\s*(?:;;+|!!+|\\/\\/\\/?)\\s*[-=*_~#]{3,}\\s*$"
+
+fun clean_doc(doc) -> Str [
+    end doc.join("\n").trim()
+]
+
+fun api_lines(text: Str) [
+    end re_replace("\\r\\n?", "g", text, "\n").split("\n")
+]
+
+fun with_ret(params: Str, ret: Str) -> Str [
+    if ret != "" [
+        end " -> " + ret
+    ]
+    end ""
+]
+
+fun const_sig(c) -> Str [
+    let s = "const " + c[1]
+    if c[2] != "" [
+        s = s + ": " + c[2]
+    ]
+    if c[3] != "" [
+        s = s + " = " + c[3]
+    ]
+    end s
+]
+
+fun parse_hsharp(text: Str, file: Str, is_interface: Bool) -> List<ApiItem> [
+    let lines = api_lines(text)
+    let items: List<ApiItem> = []
+    let doc = []
+    let owner = ""
+    let pubkw = "pub\\s+"
+    let indent = "[ \\t]*"
+    if is_interface [
+        pubkw = "(?:pub\\s+)?"
+        indent = ""
+    ]
+    let start_fn = "^" + indent + pubkw + "fn\\s"
+    let fn_re = "^\\s*" + pubkw + "fn\\s+(\\w+)\\s*(?:<[^>]*>)?\\s*\\(([\\s\\S]*?)\\)\\s*(?:->\\s*([^\\n]*?))?\\s*(?:\\bis\\b|$)"
+    let i = 0
+    while i < lines.length [
+        let k = i
+        let line = lines[k]
+        i = i + 1
+        if re_test("^\\s*(?:;;|\\/\\/\\/(?!\\/))", "", line) [
+            if re_test(DECOR_RE, "", line) [
+                doc = []
+            ] else [
+                doc.push(re_replace("^\\s*(?:;;|\\/\\/\\/)\\s?", "", line, ""))
+            ]
+            continue
+        ]
+        if line.trim() == "" [
+            doc = []
+            continue
+        ]
+        let text0 = clean_doc(doc)
+        let im = re_match("^impl\\s+(\\w+)", "", line)
+        if not is_null(im) [
+            owner = im[1]
+            doc = []
+            continue
+        ]
+        if owner != "" and re_test("^end\\b", "", line) [
+            owner = ""
+            doc = []
+            continue
+        ]
+        if re_test(start_fn, "", line) [
+            let chunk = lines.slice(k, k + 6).join(" ")
+            let m = re_match(fn_re, "", chunk)
+            if not is_null(m) and m[1] != "" [
+                let params = re_replace("\\s+", "g", m[2], " ").trim()
+                let ret = re_replace("\\s+is$", "", m[3], "").trim()
+                let name = m[1]
+                if owner != "" [
+                    name = owner + "." + m[1]
+                ]
+                items.push(ApiItem("fn", name, "fn " + m[1] + "(" + params + ")" + with_ret(params, ret), text0, k + 1, file, [], owner))
+            ]
+            doc = []
+            continue
+        ]
+        let st = re_match("^pub\\s+(struct|enum)\\s+(\\w+)", "", line)
+        if not is_null(st) [
+            let members: List<Str> = []
+            let j = k + 1
+            while j < lines.length and not re_test("^end\\b", "", lines[j]) [
+                let l = lines[j].trim()
+                if l != "" and not re_test("^(?:;;|\\/\\/\\/)", "", l) [
+                    members.push(re_replace("\\s+(?:;;|\\/\\/\\/).*$", "", l, ""))
+                ]
+                j = j + 1
+            ]
+            items.push(ApiItem(st[1], st[2], st[1] + " " + st[2], text0, k + 1, file, members, ""))
+            i = j + 1
+            doc = []
+            continue
+        ]
+        let c = re_match("^pub\\s+const\\s+(\\w+)\\s*(?::\\s*([^=\\n]+?))?\\s*(?:=\\s*(.*))?$", "", line)
+        if not is_null(c) [
+            items.push(ApiItem("const", c[1], const_sig(c), text0, k + 1, file, [], ""))
+        ]
+        doc = []
+    ]
+    end items
+]
+
+fun parse_hackerscript(text: Str, file: Str) -> List<ApiItem> [
+    let lines = api_lines(text)
+    let items: List<ApiItem> = []
+    let doc = []
+    let owner = ""
+    let in_region = false
+    let fn_re = "^\\s*(?:pub\\s+)?fun\\s+(\\w+)\\s*(?:<[^>]*>)?\\s*\\(([\\s\\S]*?)\\)\\s*(?:->\\s*([^[\\n]*?))?\\s*(?:\\[|$)"
+    let i = 0
+    while i < lines.length [
+        let k = i
+        let line = lines[k]
+        i = i + 1
+        if re_test("^\\s*!>", "", line) and not line.includes("<!") [
+            while k < lines.length and not lines[k].includes("<!") [
+                k = k + 1
+            ]
+            i = k + 1
+            doc = []
+            continue
+        ]
+        if re_test("^\\s*!!!?(?!>)", "", line) [
+            if re_test(DECOR_RE, "", line) [
+                doc = []
+            ] else [
+                doc.push(re_replace("^\\s*!!!?\\s?", "", line, ""))
+            ]
+            continue
+        ]
+        if line.trim() == "" [
+            doc = []
+            continue
+        ]
+        let text0 = clean_doc(doc)
+        let im = re_match("^impl\\s+(\\w+)", "", line)
+        if not is_null(im) [
+            owner = im[1]
+            doc = []
+            continue
+        ]
+        if re_test("^region\\s*\\[", "", line) [
+            in_region = true
+            doc = []
+            continue
+        ]
+        if (owner != "" or in_region) and re_test("^\\]", "", line) [
+            owner = ""
+            in_region = false
+            doc = []
+            continue
+        ]
+        let nested = owner != "" or in_region
+        let fn_start = "^(?:pub\\s+)?fun\\s"
+        if nested [
+            fn_start = "^\\s+(?:pub\\s+)?fun\\s"
+        ]
+        if re_test(fn_start, "", line) [
+            let chunk = lines.slice(k, k + 6).join(" ")
+            let m = re_match(fn_re, "", chunk)
+            if not is_null(m) and m[1] != "" and not m[1].startsWith("_") [
+                let params = re_replace("\\s+", "g", m[2], " ").trim()
+                let ret = re_replace("\\s+$", "", m[3], "").trim()
+                let name = m[1]
+                if owner != "" [
+                    name = owner + "." + m[1]
+                ]
+                let pubkw = ""
+                if re_test("^\\s*pub\\s", "", line) [
+                    pubkw = "pub "
+                ]
+                items.push(ApiItem("fn", name, pubkw + "fun " + m[1] + "(" + params + ")" + with_ret(params, ret), text0, k + 1, file, [], owner))
+            ]
+            doc = []
+            continue
+        ]
+        let st = re_match("^(?:pub\\s+)?(struct|enum)\\s+(\\w+)", "", line)
+        if not is_null(st) [
+            let members: List<Str> = []
+            let j = k + 1
+            if line.includes("[") and not re_test("\\]\\s*$", "", line) [
+                while j < lines.length and not re_test("^\\]", "", lines[j]) [
+                    let l = lines[j].trim()
+                    if l != "" and not re_test("^!!", "", l) [
+                        members.push(re_replace(",$", "", re_replace("\\s+!!.*$", "", l, ""), ""))
+                    ]
+                    j = j + 1
+                ]
+            ]
+            let pubkw = ""
+            if re_test("^pub\\s", "", line) [
+                pubkw = "pub "
+            ]
+            items.push(ApiItem(st[1], st[2], pubkw + st[1] + " " + st[2], text0, k + 1, file, members, ""))
+            i = Math.max(k, j) + 1
+            doc = []
+            continue
+        ]
+        if not nested [
+            let c = re_match("^(?:pub\\s+)?const\\s+(\\w+)\\s*(?::\\s*([^=\\n]+?))?\\s*(?:=\\s*(.*))?$", "", line)
+            if not is_null(c) and not c[1].startsWith("_") [
+                items.push(ApiItem("const", c[1], const_sig(c), text0, k + 1, file, [], ""))
+            ]
+        ]
+        doc = []
+    ]
+    end items
+]
+
+fun parse_hackerlang(text: Str, file: Str) -> List<ApiItem> [
+    let lines = api_lines(text)
+    let items: List<ApiItem> = []
+    let doc = []
+    let i = 0
+    while i < lines.length [
+        let k = i
+        let line = lines[k]
+        i = i + 1
+        if re_test("^(?:\\/\\/\\/|;;)", "", line) [
+            if re_test(DECOR_RE, "", line) [
+                doc = []
+            ] else [
+                doc.push(re_replace("^(?:\\/\\/\\/|;;;?)\\s?", "", line, ""))
+            ]
+            continue
+        ]
+        if line.trim() == "" [
+            doc = []
+            continue
+        ]
+        let text0 = clean_doc(doc)
+        let fm = re_match("^:(?:(\\*)|(:))?\\s*([A-Za-z0-9_-]+)\\s*(<[^>\\n]*>)?\\s*def\\b", "", line)
+        if not is_null(fm) and fm[3] != "" [
+            if not fm[3].startsWith("_") [
+                let lead = ":"
+                if fm[1] != "" [
+                    lead = ":*"
+                ] elif fm[2] != "" [
+                    lead = "::"
+                ]
+                let gen = ""
+                if fm[4] != "" [
+                    gen = " " + fm[4]
+                ]
+                items.push(ApiItem("fn", fm[3], lead + " " + fm[3] + gen + " def", text0, k + 1, file, [], ""))
+            ]
+            doc = []
+            continue
+        ]
+        let ex = re_match("^=>\\s*([A-Za-z0-9_-]+)\\s*(?:(=)\\s*(.*)|(\\[))?", "", line)
+        if not is_null(ex) and ex[1] != "" [
+            if ex[4] != "" [
+                let members: List<Str> = []
+                let j = k + 1
+                while j < lines.length and not re_test("^\\s*\\]", "", lines[j]) [
+                    let l = lines[j].trim()
+                    if l.startsWith("|") and not l.startsWith("|>") [
+                        members.push(l.slice(1).trim())
+                    ]
+                    j = j + 1
+                ]
+                items.push(ApiItem("const", ex[1], "=> " + ex[1] + " [ … ]", text0, k + 1, file, members, ""))
+                i = j + 1
+            ] else [
+                let sig = "=> " + ex[1]
+                if ex[2] != "" [
+                    sig = sig + " = " + ex[3].trim()
+                ]
+                items.push(ApiItem("const", ex[1], sig, text0, k + 1, file, [], ""))
+            ]
+            doc = []
+            continue
+        ]
+        let v = re_match("^%\\s*([A-Za-z0-9_-]+)\\s*(?::\\s*([A-Za-z0-9_-]+))?\\s*=\\s*(.*)$", "", line)
+        if not is_null(v) and v[1] != "" and not v[1].startsWith("_") [
+            let ty = ""
+            if v[2] != "" [
+                ty = ": " + v[2]
+            ]
+            items.push(ApiItem("const", v[1], "% " + v[1] + ty + " = " + v[3].trim(), text0, k + 1, file, [], ""))
+        ]
+        doc = []
+    ]
+    end items
+]
+
+fun parse_api_file(text: Str, file: Str) -> List<ApiItem> [
+    if file.endsWith(".hcs") [
+        end parse_hackerscript(text, file)
+    ]
+    if file.endsWith(".hl") [
+        end parse_hackerlang(text, file)
+    ]
+    end parse_hsharp(text, file, file.endsWith(".h#i"))
+]
+
+!! ---- widok ----
+fun api_code(text: Str, file: Str) [
+    let ext = "h#"
+    if file.endsWith(".h#i") [
+        ext = "h#i"
+    ] elif file.endsWith(".hcs") [
+        ext = "hcs"
+    ] elif file.endsWith(".hl") [
+        ext = "hl"
+    ]
+    end h("code", "api-sig", tokens_to_nodes(highlight(text, ext, "")))
+]
+
+fun doc_node(doc: Str) [
+    let box = h("div", "api-doc", [])
+    for para in re_split("\\n\\s*\\n", "", doc) [
+        let p = h("p", "", [])
+        for part in re_split("(`[^`]+`)", "", re_replace("\\n", "g", para, " ")) [
+            if part.startsWith("`") and part.endsWith("`") and part.length > 2 [
+                p.append(h("code", "", [part.slice(1, part.length - 1)]))
+            ] else [
+                p.append(dom_text_node(part))
+            ]
+        ]
+        box.append(p)
+    ]
+    end box
+]
+
+fun kind_label(k: Str) -> Str [
+    if k == "fn" [
+        end "Functions"
+    ]
+    if k == "struct" [
+        end "Structs"
+    ]
+    if k == "enum" [
+        end "Enums"
+    ]
+    end "Constants"
+]
+
+fun mod_name(file: Str) -> Str [
+    end re_replace("\\.(?:h#i?|hcs|hl)$", "", re_replace("^(?:src|lib|cmd)\\/", "", file, ""), "")
+]
+
+let ap_box = null
+let ap_repo = null
+let ap_started = false
+let ap_items = []
+let ap_kinds = js_new_obj()
+let ap_filter = null
+let ap_count = null
+let ap_list = null
+
+fun mount_api(panel, repo: Repo) [
+    ap_repo = repo
+    ap_started = false
+    ap_box = h("div", "", [muted("Reading the sources…")])
+    panel.append(ap_box)
+]
+
+fun api_load() [
+    if not ap_started [
+        api_run()
+    ]
+]
+
+fun on_api_retry(e) [
+    ap_box.replaceChildren(muted("Reading the sources…"))
+    api_run()
+]
+
+fun api_cache_key() -> Str [
+    let d = ""
+    if ap_repo.dir != "" [
+        d = "/" + ap_repo.dir
+    ]
+    end "api2:" + ap_repo.owner + "/" + ap_repo.repo + d + "@" + ap_repo.ref
+]
+
+fun api_item_cmp(a, b) [
+    let c = locale_cmp(a.file, b.file)
+    if c != 0 [
+        end c
+    ]
+    end a.line - b.line
+]
+
+async fun api_worker(ctx, f, idx) [
+    let raw = await read_file_light(ap_repo, f.path)
+    if raw.found [
+        for it in parse_api_file(raw.text, f.path) [
+            ctx.all.push(it)
+        ]
+    ]
+    ctx.done = ctx.done + 1
+    ctx.progress.textContent = "Reading sources… " + (ctx.done as Str) + "/" + (ctx.total as Str)
+]
+
+async fun api_run() [
+    ap_started = true
+    let key = api_cache_key()
+    let items = cache_get(key)
+    let saved = -1
+    if is_null(items) [
+        let tree = await load_tree(ap_repo)
+        if not is_null(tree.err) [
+            let limited = tree.err.limited
+            let msg = "Couldn't read the sources. If you're offline, open this tab once while online to save it."
+            if limited [
+                msg = tree.err.message
+            ]
+            let retry = ha("button", ["class", "retry-btn", "type", "button"], ["Try again"])
+            retry.addEventListener("click", on_api_retry)
+            let acts = [retry]
+            if limited [
+                acts.push(link("settings.html", "retry-btn", ["Add token"]))
+            ]
+            dom_set(ap_box, [muted(msg), h("div", "lang-actions", acts)])
+            end 0
+        ]
+        let files = []
+        if not is_null(tree.value) [
+            for f in tree.value.files [
+                if re_test(API_FILE_RE, "", f.path) and f.size <= 200000 [
+                    files.push(f)
+                ]
+            ]
+        ]
+        files = files.slice(0, 150)
+        if is_null(tree.value) or files.length == 0 [
+            let msg = "No H#, HackerScript or Hacker Lang sources (.h#, .hcs, .hl) — the API view is generated from their public functions, types and constants."
+            if is_null(tree.value) [
+                let where = ""
+                if ap_repo.dir != "" [
+                    where = ap_repo.dir + " @ "
+                ]
+                msg = "Nothing found at \"" + where + ap_repo.ref + "\"."
+            ]
+            dom_set(ap_box, [h("p", "empty-note", [msg])])
+            end 0
+        ]
+        let progress = h("p", "muted small", [])
+        ap_box.replaceChildren(progress)
+        let ctx = js_new_obj()
+        js_set(ctx, "all", [])
+        js_set(ctx, "done", 0)
+        js_set(ctx, "total", files.length)
+        js_set(ctx, "progress", progress)
+        await pool(files, 6, api_worker, ctx, null)
+        items = ctx.all.slice().sort(api_item_cmp)
+        cache_set(key, items, TTL_TREE)
+    ] else [
+        saved = cache_age(key)
+    ]
+    api_render(items, saved)
+]
+
+fun api_apply() [
+    let q = ap_filter.value.trim().toLowerCase()
+    let shown = 0
+    for mod in dom_all(ap_list, "details.api-mod") [
+        let any = 0
+        for a in dom_all(mod, "article.api-item") [
+            let ok = js_has(ap_kinds, a.getAttribute("data-kind")) and (q == "" or a.getAttribute("data-text").includes(q))
+            a.hidden = not ok
+            if ok [
+                any = any + 1
+            ]
+        ]
+        mod.hidden = any == 0
+        if q != "" and any > 0 [
+            mod.open = true
+        ]
+        shown = shown + any
+    ]
+    ap_count.textContent = (shown as Str) + " of " + (ap_items.length as Str) + " items"
+]
+
+fun on_api_input(e) [
+    api_apply()
+]
+
+fun on_kind_toggle(e) [
+    let b = e.currentTarget
+    let k = b.hks_kind
+    if js_has(ap_kinds, k) [
+        delete_key(ap_kinds, k)
+    ] else [
+        js_set(ap_kinds, k, true)
+    ]
+    let on = js_has(ap_kinds, k)
+    b.classList.toggle("on", on)
+    if on [
+        b.setAttribute("aria-pressed", "true")
+    ] else [
+        b.setAttribute("aria-pressed", "false")
+    ]
+    api_apply()
+]
+
+fun api_render(items, saved: Int) [
+    ap_items = items
+    if items.length == 0 [
+        dom_set(ap_box, [h("p", "empty-note", ["No public items found (H#: `pub fn` / `pub struct` / `pub const` · HackerScript: `fun` / `struct` / `const` · Hacker Lang: `: name def`, `=> export`, `% CONST`)."])])
+        end 0
+    ]
+    ap_filter = ha("input", ["class", "src-filter", "type", "search", "placeholder", "Filter by name or docs…", "aria-label", "Filter the API", "autocomplete", "off"], [])
+    ap_kinds = word_set("fn struct enum const")
+    let chips = h("div", "chips api-kinds", [])
+    ap_count = h("span", "muted small", [])
+    ap_list = h("div", "api-list", [])
+    let modules = js_new_obj()
+    let order = []
+    for it in items [
+        if not js_has(modules, it.file) [
+            js_set(modules, it.file, [])
+            order.push(it.file)
+        ]
+        js_get(modules, it.file).push(it)
+    ]
+    for k in ["fn", "struct", "enum", "const"] [
+        let n = 0
+        for it in items [
+            if it.kind == k [
+                n = n + 1
+            ]
+        ]
+        if n == 0 [
+            continue
+        ]
+        let b = ha("button", ["class", "chip on", "type", "button", "aria-pressed", "true"], [kind_label(k) + " " + (n as Str)])
+        b.hks_kind = k
+        b.addEventListener("click", on_kind_toggle)
+        chips.append(b)
+    ]
+    for file in order [
+        let mod = js_get(modules, file)
+        let d = ha("details", ["class", "api-mod", "open", ""], [h("summary", "", [h("code", "", [mod_name(file)]), h("span", "muted small", ["  " + (mod.length as Str) + plural(mod.length, " item", " items")])])])
+        for it in mod [
+            let head_kids = [h("span", "api-kind is-" + it.kind, [it.kind]), api_code(it.sig, file)]
+            if it.owner != "" [
+                head_kids.push(h("span", "api-owner muted small", ["impl " + it.owner]))
+            ]
+            head_kids.push(link(source_hash(file, ":L" + (it.line as Str)), "api-src", ["source"]))
+            let art = ha("article", ["class", "api-item", "id", "api-" + re_replace("\\W+", "g", mod_name(file), "-") + "-" + it.name, "data-kind", it.kind, "data-text", (it.name + " " + it.doc).toLowerCase()], [h("header", "", head_kids)])
+            if it.doc != "" [
+                art.append(doc_node(it.doc))
+            ]
+            if it.members.length > 0 [
+                let lis = []
+                for m in it.members [
+                    lis.push(h("li", "", [api_code(m, file)]))
+                ]
+                art.append(h("ul", "api-members", lis))
+            ]
+            d.append(art)
+        ]
+        ap_list.append(d)
+    ]
+    let tools = [ap_filter, ap_count]
+    if saved >= 0 [
+        tools.push(h("span", "muted small", ["saved copy · " + format_age(saved)]))
+    ]
+    dom_set(ap_box, [h("div", "api-tools", tools), chips, ap_list])
+    ap_filter.addEventListener("input", on_api_input)
+    api_apply()
+]
