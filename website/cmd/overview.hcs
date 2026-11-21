@@ -1,0 +1,585 @@
+struct Activity [
+    label: Str,
+    cls: Str
+]
+
+fun side(title: Str, kids) [
+    end h("section", "side-card", [h("h3", "", [title]), kids])
+]
+
+fun kv(k: Str, v) [
+    end h("div", "kv", [h("dt", "", [k]), h("dd", "", [v])])
+]
+
+fun compact(n: Int) -> Str [
+    if n >= 1000 [
+        let digits = 1
+        if n >= 10000 [
+            digits = 0
+        ]
+        end re_replace("\\.0$", "", fixed(n / 1000.0, digits), "") + "k"
+    ]
+    end (n as Str)
+]
+
+fun activity(pushed_at: Str) [
+    let t = parse_date(pushed_at)
+    if isNaN(t) [
+        end null
+    ]
+    let days = (now_ms() - t) / 86400000.0
+    if days < 90 [
+        end Activity("Active", "is-ok")
+    ]
+    if days < 365 [
+        end Activity("Quiet", "is-warn")
+    ]
+    end Activity("Inactive", "is-err")
+]
+
+!! ---- stan zakladki ----
+let ov_entry = null
+let ov_repo = null
+let ov_libs = []
+let ov_ref = "HEAD"
+let ov_stats_box = null
+let ov_meta_box = null
+let ov_pin_box = null
+let ov_compat = null
+let ov_deps = null
+let ov_used = null
+let ov_cmds = null
+let ov_examples = null
+let ov_readme = null
+let ov_meta = null
+let ov_manifest = null
+let ov_used_stop = false
+let ov_pinned = null
+
+fun render_meta() [
+    let e = ov_entry
+    let pkg = null
+    let lib_sec = null
+    if not is_null(ov_manifest) [
+        pkg = js_obj(ov_manifest.doc, "package")
+        if is_null(pkg) [
+            pkg = js_obj(ov_manifest.doc, "project")
+        ]
+        lib_sec = js_obj(ov_manifest.doc, "lib")
+    ]
+    let lang_id = e.lang
+    if lang_id == "any" [
+        lang_id = normalize_lang(js_str(pkg, "lang"))
+    ]
+    let dl = h("dl", "meta", [])
+    dl.append(kv("Language", lang_info(lang_id).label))
+    if js_str(pkg, "version") != "" [
+        dl.append(kv("Version", js_str(pkg, "version")))
+    ]
+    let license = js_str(pkg, "license")
+    if license == "" and not is_null(ov_meta) [
+        license = js_str(ov_meta, "license")
+    ]
+    if license != "" [
+        dl.append(kv("License", license))
+    ]
+    if e.author != "" [
+        dl.append(kv("Author", e.author))
+    ]
+    let authors = hk_list(js_str(pkg, "authors"))
+    if authors.length > 0 [
+        dl.append(kv("Authors", authors.join(", ")))
+    ]
+    if ov_ref != "HEAD" and ov_ref != e.rev [
+        dl.append(kv("Viewing", ov_ref))
+    ]
+    let out = js_str(lib_sec, "output")
+    if out == "" [
+        out = "hlib"
+    ]
+    dl.append(kv("Library output", out + " — static"))
+    if e.target != "" [
+        dl.append(kv("Repository", ha("a", ["href", safe_url(e.target), "rel", "noopener", "target", "_blank"], [re_replace("^https:\\/\\/", "", e.target, "")])))
+    ]
+    if not is_null(ov_meta) [
+        let hp = js_str(ov_meta, "homepage")
+        if re_test("^https?:\\/\\/", "", hp) [
+            dl.append(kv("Homepage", ha("a", ["href", safe_url(hp), "rel", "noopener", "target", "_blank"], [re_replace("^https?:\\/\\/", "", hp, "")])))
+        ]
+    ]
+    end dl
+]
+
+fun redraw_meta() [
+    ov_meta_box.replaceChildren(render_meta())
+]
+
+fun stat(label: Str, value: Str) [
+    end h("div", "stat", [h("b", "", [value]), h("span", "", [label])])
+]
+
+async fun load_stats() [
+    if is_null(ov_repo) [
+        end 0
+    ]
+    let res = await load_repo_meta(ov_repo)
+    if not is_null(res.err) [
+        let msg = "Couldn't load repository stats (offline?)."
+        if res.err.limited [
+            msg = res.err.message
+        ]
+        ov_stats_box.replaceChildren(muted_small(msg))
+        end 0
+    ]
+    let m = res.value
+    if is_null(m) [
+        ov_stats_box.replaceChildren(muted_small("Repository not found on GitHub."))
+        end 0
+    ]
+    ov_meta = m
+    let act = activity(js_str(m, "pushedAt"))
+    let line = []
+    if not is_null(act) [
+        line.push(h("span", "pill " + act.cls, [act.label]))
+    ]
+    if js_str(m, "pushedAt") != "" [
+        line.push(" last push " + fmt_date_short(js_str(m, "pushedAt")))
+    ]
+    if js_bool(m, "archived") [
+        line.push(h("span", "pill is-err", ["Archived"]))
+    ]
+    if res.stale [
+        line.push(" · saved copy (" + format_age(res.age) + ")")
+    ]
+    let kids = [
+        h("div", "stats-row", [stat("stars", compact(js_num(m, "stars"))), stat("forks", compact(js_num(m, "forks"))), stat("open issues", compact(js_num(m, "issues")))]),
+        h("p", "muted small", line)
+    ]
+    let topics = js_arr(m, "topics")
+    if topics.length > 0 [
+        let tags = []
+        for t in topics.slice(0, 8) [
+            tags.push(h("span", "tag", [t]))
+        ]
+        kids.push(h("div", "tags", tags))
+    ]
+    dom_set(ov_stats_box, kids)
+    redraw_meta()
+]
+
+!! ---- przypieta rewizja ----
+async fun on_verify_click(e) [
+    let btn = e.currentTarget
+    let out = btn.hks_out
+    btn.disabled = true
+    out.className = "small muted"
+    out.textContent = "Downloading files…"
+    let r = await verify_checksum(ov_pinned, ov_entry.checksum, on_verify_progress)
+    if r.error != "" [
+        out.className = "small is-warn-text"
+        out.textContent = r.error
+    ] elif r.ok [
+        out.className = "small is-ok-text"
+        out.textContent = "✓ Matches — the " + (r.files as Str) + " files of " + ov_entry.rev + " hash to the checksum in the index."
+    ] else [
+        out.className = "small is-err-text"
+        out.textContent = "✗ Different. Index: " + untag(ov_entry.checksum).slice(0, 12) + "… · computed: " + r.actual.slice(0, 12) + "… (" + (r.files as Str) + " files). The code at this rev doesn't match what the index recorded."
+    ]
+    btn.disabled = false
+]
+
+let ov_verify_out = null
+
+fun on_verify_progress(done: Int, total: Int) [
+    if not is_null(ov_verify_out) [
+        ov_verify_out.textContent = "Hashing files… " + (done as Str) + "/" + (total as Str)
+    ]
+]
+
+async fun load_pin() [
+    let e = ov_entry
+    ov_pin_box.replaceChildren()
+    if is_null(ov_repo) [
+        ov_pin_box.append(muted_small("Only for GitHub-hosted libraries."))
+        end 0
+    ]
+    if e.rev == "" [
+        ov_pin_box.append(h("p", "muted small", [h("span", "pill is-warn", ["Not pinned"]), " The index doesn't pin a tag or commit, so `bit install` takes the newest default-branch head. New entries must be pinned."]))
+        end 0
+    ]
+    let pinned = Repo(ov_repo.owner, ov_repo.repo, e.rev, ov_repo.dir)
+    ov_pinned = pinned
+    let line = h("p", "small", [h("code", "", [e.rev]), " ", h("span", "muted", ["checking…"])])
+    ov_pin_box.append(line)
+    let res = await resolve_rev(pinned)
+    if not is_null(res.err) [
+        let msg = "couldn't check (offline?)"
+        if res.err.limited [
+            msg = res.err.message
+        ]
+        dom_set(line, [h("code", "", [e.rev]), " ", h("span", "muted", [msg])])
+    ] elif is_null(res.value) [
+        dom_set(line, [h("code", "", [e.rev]), " ", h("span", "pill is-err", ["Not found"]), h("span", "muted", [" this tag/commit doesn't exist on GitHub — installs will fail."])])
+    ] else [
+        let sha = js_str(res.value, "sha")
+        let before = seen_sha(pinned)
+        if not res.stale [
+            remember_sha(pinned, sha)
+        ]
+        let date = js_str(res.value, "date")
+        let date_node = ""
+        if date != "" [
+            date_node = h("span", "muted", [" " + fmt_date_short(date)])
+        ]
+        dom_set(line, [
+            h("code", "", [e.rev]),
+            " → ",
+            ha("a", ["href", "https://github.com/" + ov_repo.owner + "/" + ov_repo.repo + "/commit/" + sha, "target", "_blank", "rel", "noopener"], [h("code", "", [sha.slice(0, 7)])]),
+            " ",
+            h("span", "pill is-ok", ["Resolves"]),
+            date_node
+        ])
+        if not is_null(before) and before != sha [
+            ov_pin_box.append(h("p", "small", [h("span", "pill is-err", ["Moved"]), " This ref used to point to " + before.slice(0, 7) + " when you last looked — the pinned code changed."]))
+        ]
+    ]
+    if e.checksum != "" [
+        let out = ha("p", ["class", "small", "aria-live", "polite"], [])
+        ov_verify_out = out
+        let btn = ha("button", ["class", "btn", "type", "button"], ["Verify checksum"])
+        btn.hks_out = out
+        btn.addEventListener("click", on_verify_click)
+        ov_pin_box.append(h("p", "small", ["checksum ", h("code", "", [e.checksum.slice(0, 18) + "…"]), " ", copy_button(e.checksum, "Copy")]))
+        ov_pin_box.append(btn)
+        ov_pin_box.append(out)
+    ] else [
+        ov_pin_box.append(muted_small("No checksum recorded in the index."))
+    ]
+]
+
+!! ---- manifest -> zgodnosc, zaleznosci, komendy ----
+fun fill_manifest(m, stale: Bool, age: Int) [
+    ov_manifest = m
+    redraw_meta()
+    clear_el(ov_compat)
+    let notes = compat_notes(ov_entry, m.doc, ov_libs)
+    let source_line = "Read from " + m.file
+    if stale [
+        source_line = source_line + " · saved copy (" + format_age(age) + ")"
+    ]
+    if notes.length > 0 [
+        let lis = []
+        for n in notes [
+            let cls = ""
+            let mark = "✓ "
+            if n.level == "warn" [
+                cls = "is-warn-text"
+                mark = "⚠ "
+            ]
+            lis.push(h("li", cls, [mark + re_replace("`", "g", n.text, "")]))
+        ]
+        ov_compat.append(h("ul", "notes", lis))
+    ] else [
+        ov_compat.append(muted_small("Nothing special declared."))
+    ]
+    ov_compat.append(muted_small(source_line + "."))
+    clear_el(ov_deps)
+    let deps = dependencies_of(m.doc)
+    if deps.length == 0 [
+        ov_deps.append(muted_small("No dependencies."))
+    ] else [
+        let lis = []
+        for d in deps [
+            let c = classify_dep(d, ov_libs)
+            let name_node = h("span", "", [d.name])
+            if c.kind == "index" [
+                name_node = link("lib.html?name=" + enc(d.name), "", [d.name])
+            ]
+            let pill = null
+            if c.kind == "unknown" [
+                pill = h("span", "pill is-warn", ["not in index"])
+            ] elif c.kind == "git" [
+                pill = h("span", "pill", ["git"])
+            ] elif c.kind == "path" [
+                pill = h("span", "pill", ["path"])
+            ]
+            lis.push(h("li", "", [name_node, h("span", "muted small", ["  " + d.spec]), pill]))
+        ]
+        ov_deps.append(h("ul", "deps", lis))
+    ]
+    clear_el(ov_cmds)
+    let cmds = js_obj(m.doc, "commands")
+    if not is_null(cmds) [
+        let lis = []
+        for n in js_keys(cmds) [
+            if not n.includes(".") [
+                lis.push(h("li", "", [h("code", "", ["bit " + n]), h("span", "muted small", ["  " + js_str(cmds, n + ".description")])]))
+            ]
+        ]
+        if lis.length > 0 [
+            ov_cmds.append(side("Custom commands", h("ul", "deps", lis)))
+        ]
+    ]
+]
+
+async fun load_manifest_job() [
+    if is_null(ov_repo) [
+        end 0
+    ]
+    let res = await load_manifest(ov_repo)
+    if not is_null(res.err) [
+        ov_compat.replaceChildren(muted_small("Couldn't read the manifest (offline?)."))
+        ov_deps.replaceChildren(muted_small("—"))
+        end 0
+    ]
+    if not is_null(res.value) [
+        fill_manifest(res.value, res.stale, res.age)
+    ] else [
+        ov_compat.replaceChildren(muted_small("No Bit.hk in this repository."))
+        ov_deps.replaceChildren(muted_small("—"))
+    ]
+]
+
+!! ---- "Used by" ----
+let ov_used_prog = null
+
+fun on_used_progress(done: Int, total: Int) [
+    ov_used_prog.textContent = "Scanning the index… " + (done as Str) + "/" + (total as Str)
+]
+
+fun used_stop() -> Bool [
+    end ov_used_stop
+]
+
+async fun load_used_by() [
+    ov_used_stop = false
+    ov_used_prog = muted_small("Scanning the index…")
+    ov_used.replaceChildren(ov_used_prog)
+    let found = await scan_used_by(ov_entry, ov_libs, on_used_progress, used_stop)
+    if ov_used_stop [
+        end 0
+    ]
+    let kids = []
+    if found.length > 0 [
+        let lis = []
+        for u in found [
+            lis.push(h("li", "", [link("lib.html?name=" + enc(u.lib.name), "", [u.lib.name]), h("span", "muted small", ["  " + u.spec])]))
+        ]
+        kids.push(h("ul", "deps", lis))
+    ] else [
+        kids.push(muted_small("No other library in the index depends on this one."))
+    ]
+    kids.push(muted_small("Checked the manifests of " + ((ov_libs.length - 1) as Str) + " other libraries."))
+    dom_set(ov_used, kids)
+]
+
+fun used_by_later() [
+    load_used_by()
+]
+
+!! ---- README ----
+let rd_text = ""
+let rd_mode = "rendered"
+let rd_body = null
+let rd_toggle = null
+let rd_toc = null
+
+fun readme_draw() [
+    rd_toc.replaceChildren()
+    if rd_mode == "rendered" [
+        let md = h("div", "markdown-body", [])
+        md.append(render_markdown(rd_text, ov_repo))
+        decorate_code(md)
+        let toc = build_toc(md)
+        if not is_null(toc) [
+            rd_toc.append(toc)
+        ]
+        rd_body.replaceChildren(md)
+    ] else [
+        rd_body.replaceChildren(h("pre", "readme", [rd_text]))
+    ]
+    if rd_mode == "rendered" [
+        rd_toggle.textContent = "View raw"
+    ] else [
+        rd_toggle.textContent = "View rendered"
+    ]
+]
+
+fun on_readme_toggle(e) [
+    if rd_mode == "rendered" [
+        rd_mode = "raw"
+    ] else [
+        rd_mode = "rendered"
+    ]
+    readme_draw()
+]
+
+async fun load_readme_job() [
+    let title = h("h2", "", ["README"])
+    if is_null(ov_repo) [
+        dom_set(ov_readme, [title, muted("README and manifest are read from GitHub; this library isn't hosted there.")])
+        end 0
+    ]
+    dom_set(ov_readme, [title, muted("Loading README…")])
+    let res = await load_readme(ov_repo)
+    if not is_null(res.err) [
+        dom_set(ov_readme, [h("h2", "", ["README"]), muted("Couldn't load the README. If you're offline, it is only available for libraries you opened before.")])
+        end 0
+    ]
+    if is_null(res.value) [
+        dom_set(ov_readme, [h("h2", "", ["README"]), muted("This repository has no README at its root.")])
+        end 0
+    ]
+    let file = res.value.file
+    let markdown = res.value.markdown
+    rd_text = res.value.text
+    rd_body = h("div", "readme-body", [])
+    rd_toc = h("div", "", [])
+    rd_toggle = ha("button", ["class", "copy", "type", "button"], [""])
+    rd_mode = "raw"
+    if markdown [
+        rd_mode = "rendered"
+    ]
+    rd_toggle.addEventListener("click", on_readme_toggle)
+    readme_draw()
+    let head_kids = [h("h2", "", ["README"]), h("span", "grow", [])]
+    if res.stale [
+        head_kids.push(h("span", "muted small", ["saved copy · " + format_age(res.age)]))
+    ]
+    if markdown [
+        head_kids.push(rd_toggle)
+    ]
+    head_kids.push(gh_blank(github_url(ov_repo, "blob", file), "copy", [file + " ↗"]))
+    dom_set(ov_readme, [h("div", "readme-head", head_kids), rd_toc, rd_body])
+]
+
+!! ---- przyklady ----
+async fun on_example_toggle(e) [
+    let d = e.currentTarget
+    if not d.open or d.hks_loaded [
+        end 0
+    ]
+    d.hks_loaded = true
+    let path = d.hks_path
+    let box = h("div", "", [muted_small("Loading…")])
+    d.append(box)
+    let res = await load_file(ov_repo, path)
+    if not is_null(res.err) [
+        box.replaceChildren(muted_small("Couldn't load this example (offline?)."))
+        end 0
+    ]
+    let text = ""
+    if not is_null(res.value) [
+        text = res.value
+    ]
+    let parts = path.split("/")
+    let toks = highlight(text, extension_of(path), parts[parts.length - 1])
+    let code = h("code", "", tokens_to_nodes(toks))
+    dom_set(box, [
+        h("div", "snippet", [h("pre", "src-code", [code]), copy_button(text, "Copy")]),
+        link(source_hash(path, ""), "small", ["Open in the source browser"])
+    ])
+]
+
+fun example_item(path: Str) [
+    let d = h("details", "example", [h("summary", "", [h("code", "", [path])])])
+    d.hks_path = path
+    d.hks_loaded = false
+    d.addEventListener("toggle", on_example_toggle)
+    end d
+]
+
+async fun load_examples() [
+    if is_null(ov_repo) [
+        end 0
+    ]
+    let tree = await load_tree(ov_repo)
+    if not is_null(tree.err) or is_null(tree.value) [
+        end 0
+    ]
+    let files = []
+    for f in tree.value.files [
+        if re_test("^(examples?|samples?|demos?)\\/", "i", f.path) and f.size <= 30000 and not re_test("\\.(png|jpe?g|gif|webp|ico|bin|zip|gz|wasm)$", "i", f.path) [
+            files.push(f)
+        ]
+    ]
+    files = files.slice(0, 8)
+    if files.length == 0 [
+        end 0
+    ]
+    let kids = [h("h2", "", ["Examples"])]
+    for f in files [
+        kids.push(example_item(f.path))
+    ]
+    ov_examples.hidden = false
+    dom_set(ov_examples, kids)
+]
+
+!! ---- odznaka ----
+fun badge_card(entry) [
+    let page = url_abs("lib.html?name=" + enc(entry.name))
+    let img = "https://img.shields.io/badge/bit-" + enc(re_replace("_", "g", re_replace("-", "g", entry.name, "--"), "__")) + "-ec4899"
+    let md = "[![bit](" + img + ")](" + page + ")"
+    let html = "<a href=\"" + page + "\"><img src=\"" + img + "\" alt=\"bit\"></a>"
+    end side("Badge", [
+        ha("img", ["src", img, "alt", "bit: " + entry.name, "referrerpolicy", "no-referrer", "class", "badge-preview"], []),
+        h("div", "cmd", [h("span", "muted small", ["Markdown"]), copy_button(md, "Copy")]),
+        h("div", "cmd", [h("span", "muted small", ["HTML"]), copy_button(html, "Copy")])
+    ])
+]
+
+fun overview_reload() [
+    load_stats()
+    load_pin()
+    load_manifest_job()
+    load_readme_job()
+    load_examples()
+    setTimeout(used_by_later, 600)
+]
+
+fun mount_overview(panel, entry, repo, libs) [
+    ov_entry = entry
+    ov_repo = repo
+    ov_libs = libs
+    ov_ref = "HEAD"
+    if not is_null(repo) [
+        ov_ref = repo.ref
+    ]
+    ov_meta = null
+    ov_manifest = null
+    let install = "bit install " + entry.name
+    let add = "bit add " + entry.name
+    let main = h("div", "ov-main", [])
+    let aside = h("div", "ov-side", [])
+    panel.append(h("div", "ov-grid", [main, aside]))
+    aside.append(side("Install", [
+        h("div", "cmd", [h("code", "", [install]), copy_button(install, "Copy")]),
+        h("div", "cmd", [h("code", "", [add]), copy_button(add, "Copy")]),
+        muted_small("add also writes it to [dependencies] in Bit.hk.")
+    ]))
+    let initial = "Only for GitHub-hosted libraries."
+    if not is_null(repo) [
+        initial = "Loading…"
+    ]
+    ov_stats_box = h("div", "", [muted_small(initial)])
+    ov_meta_box = h("div", "", [])
+    ov_pin_box = h("div", "", [])
+    ov_compat = h("div", "", [])
+    ov_deps = h("div", "", [])
+    ov_used = h("div", "", [])
+    ov_cmds = h("div", "", [])
+    aside.append(side("Repository", ov_stats_box))
+    aside.append(side("Details", ov_meta_box))
+    redraw_meta()
+    aside.append(side("Pinned revision", ov_pin_box))
+    aside.append(side("Compatibility", ov_compat))
+    aside.append(side("Dependencies", ov_deps))
+    aside.append(side("Used by", ov_used))
+    aside.append(ov_cmds)
+    aside.append(badge_card(entry))
+    ov_examples = ha("section", ["class", "block", "hidden", ""], [])
+    ov_readme = ha("section", ["class", "block", "id", "readme-block"], [])
+    main.append(ov_readme)
+    main.append(ov_examples)
+    overview_reload()
+]
