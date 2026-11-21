@@ -1,0 +1,763 @@
+const MAX_PREVIEW_BYTES = 250000
+const MAX_LINES = 6000
+
+let image_ext = word_set("png jpg jpeg gif webp svg ico bmp")
+let binary_ext = word_set("pdf zip gz tgz tar 7z rar bz2 xz woff woff2 ttf eot otf mp3 mp4 mov wav ogg webm avi exe dll so dylib a o class jar wasm bin dat pyc hlib bit")
+
+struct TreeNode [
+    name: Str,
+    path: Str,
+    file: Any,
+    children: Any
+]
+
+struct LineRange [
+    from: Int,
+    to: Int
+]
+
+struct SourceSpec [
+    path: Str,
+    lines: Any
+]
+
+fun new_node(name: Str, path: Str) -> TreeNode [
+    end TreeNode(name, path, null, js_new_obj())
+]
+
+fun build_tree(files, extra_dirs) -> TreeNode [
+    let root = new_node("", "")
+    for d in js_keys(extra_dirs) [
+        let node = root
+        let acc = ""
+        for part in d.split("/") [
+            if acc != "" [
+                acc = acc + "/" + part
+            ] else [
+                acc = part
+            ]
+            let next = js_get(node.children, part)
+            if is_null(next) [
+                next = new_node(part, acc)
+                js_set(node.children, part, next)
+            ]
+            node = next
+        ]
+    ]
+    for f in files [
+        let node = root
+        let acc = ""
+        let parts = f.path.split("/")
+        let idx = 0
+        for part in parts [
+            if acc != "" [
+                acc = acc + "/" + part
+            ] else [
+                acc = part
+            ]
+            let next = js_get(node.children, part)
+            if is_null(next) [
+                next = new_node(part, acc)
+                if idx == parts.length - 1 [
+                    next.file = f
+                ]
+                js_set(node.children, part, next)
+            ]
+            node = next
+            idx = idx + 1
+        ]
+    ]
+    end root
+]
+
+fun find_node(root: TreeNode, path: Str) [
+    let node = root
+    for part in path.split("/") [
+        node = js_get(node.children, part)
+        if is_null(node) [
+            end null
+        ]
+    ]
+    end node
+]
+
+!! "src/a.hcs:L3-9" -> sciezka + zakres.
+fun parse_source_spec(spec: Str) -> SourceSpec [
+    let m = re_match("^(.*):L(\\d+)(?:-(\\d+))?$", "", spec)
+    if is_null(m) [
+        end SourceSpec(spec, null)
+    ]
+    let from = parseInt(m[2], 10)
+    let to = from
+    if m[3] != "" [
+        to = parseInt(m[3], 10)
+    ]
+    end SourceSpec(m[1], LineRange(Math.min(from, to), Math.max(from, to)))
+]
+
+fun source_hash(path: Str, lines: Str) -> Str [
+    end "#source/" + enc_path(path) + lines
+]
+
+fun file_icon(name: Str) -> Str [
+    let ext = extension_of(name)
+    if js_has(word_set("h# h#i hk hl hcs"), ext) [
+        end "⚡"
+    ]
+    if js_has(word_set("md markdown txt rst"), ext) [
+        end "📄"
+    ]
+    if js_has(word_set("json yml yaml toml lock"), ext) [
+        end "🔧"
+    ]
+    if js_has(image_ext, ext) [
+        end "🖼"
+    ]
+    if js_has(binary_ext, ext) [
+        end "🗂"
+    ]
+    end "📄"
+]
+
+!! ---- stan przegladarki (jedna na strone) ----
+let src_repo = null
+let src_files = []
+let src_truncated = false
+let src_extra = js_new_obj()
+let src_token = 0
+let src_ready = null
+let src_current = ""
+let src_pending = null
+let src_tree_box = null
+let src_filter = null
+let src_status = null
+let src_search_input = null
+let src_view = null
+let src_filter_timer = 0
+
+fun src_input(placeholder: Str, label: Str) [
+    end ha("input", ["class", "src-filter", "type", "search", "placeholder", placeholder, "aria-label", label, "autocomplete", "off"], [])
+]
+
+fun mount_source(panel, repo: Repo) [
+    src_repo = repo
+    src_files = []
+    src_truncated = false
+    src_extra = js_new_obj()
+    src_token = 0
+    src_ready = null
+    src_current = ""
+    src_pending = null
+    src_tree_box = ha("div", ["class", "src-tree", "role", "tree", "aria-label", "Files"], [muted_small("Loading file tree…")])
+    src_filter = src_input("Filter files…", "Filter files")
+    src_status = h("div", "src-status muted small", [])
+    src_search_input = src_input("Search in code…", "Search in code")
+    src_search_input.setAttribute("minlength", "2")
+    let search_form = ha("form", ["class", "src-search", "role", "search"], [src_search_input])
+    src_view = h("div", "src-view", [h("p", "src-placeholder", ["Select a file to read it."])])
+    panel.append(h("div", "src-layout", [h("aside", "src-side", [src_filter, search_form, src_status, src_tree_box]), src_view]))
+    src_filter.addEventListener("input", on_filter_input)
+    search_form.addEventListener("submit", on_search_submit)
+    src_view.addEventListener("click", on_view_click)
+]
+
+!! ---- drzewo ----
+fun node_cmp(a, b) [
+    let ad = 0
+    let bd = 0
+    if not is_null(a.file) [
+        ad = 1
+    ]
+    if not is_null(b.file) [
+        bd = 1
+    ]
+    if ad != bd [
+        end ad - bd
+    ]
+    end locale_cmp(a.name, b.name)
+]
+
+fun render_level(node: TreeNode, depth: Int) [
+    let role = "group"
+    if depth == 0 [
+        role = "none"
+    ]
+    let ul = ha("ul", ["class", "src-list", "role", role], [])
+    let kids = []
+    for k in js_keys(node.children) [
+        kids.push(js_get(node.children, k))
+    ]
+    kids.sort(node_cmp)
+    let total = src_files.length
+    for k in kids [
+        if not is_null(k.file) [
+            let a = ha("a", ["class", "src-node is-file", "href", source_hash(k.path, ""), "data-path", k.path, "role", "treeitem"], [
+                ha("span", ["class", "src-icon", "aria-hidden", "true"], [file_icon(k.name)]),
+                h("span", "src-name", [k.name])
+            ])
+            ul.append(h("li", "", [a]))
+        ] else [
+            let summary = ha("summary", ["class", "src-node is-dir", "data-dir", k.path], [
+                ha("span", ["class", "src-icon", "aria-hidden", "true"], ["▸"]),
+                h("span", "src-name", [k.name])
+            ])
+            let d = h("details", "", [summary, render_level(k, depth + 1)])
+            if depth == 0 and total <= 80 [
+                d.open = true
+            ]
+            if src_truncated [
+                d.hks_dir = k.path
+                listen_once(d, "toggle", on_dir_toggle)
+            ]
+            ul.append(h("li", "", [d]))
+        ]
+    ]
+    end ul
+]
+
+fun render_tree() [
+    let root = build_tree(src_files, src_extra)
+    clear_el(src_tree_box)
+    src_tree_box.append(render_level(root, 0))
+]
+
+fun on_dir_toggle(e) [
+    complete_dir(e.currentTarget)
+]
+
+!! Przy obcietym drzewie dociaga zawartosc rozwinietego katalogu.
+async fun complete_dir(d) [
+    if not d.open [
+        listen_once(d, "toggle", on_dir_toggle)
+        end 0
+    ]
+    let dir = d.hks_dir
+    let res = await load_dir(src_repo, dir)
+    if not is_null(res.err) or is_null(res.value) [
+        end 0
+    ]
+    let extra = res.value
+    let known = js_new_obj()
+    for f in src_files [
+        js_set(known, f.path, true)
+    ]
+    let fresh = []
+    for f in extra.files [
+        if not js_has(known, f.path) [
+            fresh.push(f)
+        ]
+    ]
+    let before = js_keys(src_extra).length
+    for x in extra.dirs [
+        js_set(src_extra, x, true)
+    ]
+    if fresh.length == 0 and js_keys(src_extra).length == before [
+        end 0
+    ]
+    src_files = src_files.concat(fresh)
+    let ul = d.querySelector(":scope > ul")
+    let node = find_node(build_tree(src_files, src_extra), dir)
+    if not is_null(ul) and not is_null(node) [
+        ul.replaceWith(render_level(node, 1))
+    ]
+]
+
+fun open_parents(path: Str) [
+    let parts = path.split("/")
+    parts.pop()
+    let acc = ""
+    for p in parts [
+        if acc != "" [
+            acc = acc + "/" + p
+        ] else [
+            acc = p
+        ]
+        for s in dom_all(src_tree_box, "summary[data-dir]") [
+            if s.getAttribute("data-dir") == acc and not is_null(s.parentElement) [
+                s.parentElement.open = true
+            ]
+        ]
+    ]
+]
+
+fun mark_active(path: Str) [
+    for n in dom_all(src_tree_box, ".src-node.is-file.is-active") [
+        n.classList.toggle("is-active", false)
+        n.removeAttribute("aria-current")
+    ]
+    for n in dom_all(src_tree_box, ".src-node.is-file") [
+        if n.getAttribute("data-path") == path [
+            n.classList.add("is-active")
+            n.setAttribute("aria-current", "true")
+            n.scrollIntoView(js_set(js_new_obj(), "block", "nearest"))
+        ]
+    ]
+]
+
+fun apply_filter_cb() [
+    apply_filter(src_filter.value.trim().toLowerCase())
+]
+
+fun on_filter_input(e) [
+    clearTimeout(src_filter_timer)
+    src_filter_timer = setTimeout(apply_filter_cb, 120)
+]
+
+fun apply_filter(q: Str) [
+    let items = dom_all(src_tree_box, "li")
+    if q == "" [
+        for li in items [
+            li.hidden = false
+        ]
+        end 0
+    ]
+    for li in items [
+        li.hidden = true
+    ]
+    for a in dom_all(src_tree_box, ".src-node.is-file") [
+        if not a.getAttribute("data-path").toLowerCase().includes(q) [
+            continue
+        ]
+        let li = a.closest("li")
+        while not is_null(li) [
+            li.hidden = false
+            let det = null
+            if not is_null(li.parentElement) [
+                det = li.parentElement.closest("details")
+            ]
+            if not is_null(det) [
+                det.open = true
+                li = det.closest("li")
+            ] else [
+                li = null
+            ]
+        ]
+    ]
+]
+
+fun on_tree_retry(e) [
+    src_ready = null
+    src_tree_box.replaceChildren(muted_small("Loading file tree…"))
+    show_source(src_pending)
+]
+
+async fun ensure_tree_run() [
+    let res = await load_tree(src_repo)
+    if not is_null(res.err) [
+        let limited = res.err.limited
+        let msg = "Couldn't load the file tree. If you're offline, open this library once while online to save it."
+        if limited [
+            msg = res.err.message
+        ]
+        let retry = ha("button", ["class", "retry-btn", "type", "button"], ["Try again"])
+        retry.addEventListener("click", on_tree_retry)
+        let acts = [retry]
+        if limited [
+            acts.push(link("settings.html", "retry-btn", ["Add token"]))
+        ]
+        dom_set(src_tree_box, [muted_small(msg), h("div", "lang-actions", acts)])
+        src_ready = null
+        end 0
+    ]
+    if is_null(res.value) or res.value.files.length == 0 [
+        let msg = "This repository has no files."
+        if is_null(res.value) [
+            let where = ""
+            if src_repo.dir != "" [
+                where = src_repo.dir + " @ "
+            ]
+            msg = "Nothing found at \"" + where + src_repo.ref + "\"."
+        ]
+        src_tree_box.replaceChildren(muted_small(msg))
+        end 0
+    ]
+    src_files = res.value.files
+    src_truncated = res.value.truncated
+    if src_truncated [
+        let top = await load_dir(src_repo, "")
+        if is_null(top.err) and not is_null(top.value) [
+            for x in top.value.dirs [
+                js_set(src_extra, x, true)
+            ]
+            let known = js_new_obj()
+            for f in src_files [
+                js_set(known, f.path, true)
+            ]
+            for f in top.value.files [
+                if not js_has(known, f.path) [
+                    src_files.push(f)
+                ]
+            ]
+        ]
+    ]
+    let branch = src_repo.ref
+    if branch == "HEAD" [
+        branch = "default branch"
+    ]
+    let st = (src_files.length as Str) + " files · " + branch
+    if res.stale [
+        st = st + " · saved copy (" + format_age(res.age) + ")"
+    ]
+    src_status.textContent = st
+    render_tree()
+    if res.value.truncated [
+        src_tree_box.append(h("p", "muted small", ["Large repository — partial listing. ", gh_blank(github_url(src_repo, "tree", ""), "", ["Open on GitHub ↗"])]))
+    ]
+]
+
+fun ensure_tree() [
+    if not is_null(src_ready) [
+        end src_ready
+    ]
+    src_ready = ensure_tree_run()
+    end src_ready
+]
+
+!! ---- widok pliku ----
+fun src_head(path: Str, extra) [
+    let crumbs = []
+    let parts = path.split("/")
+    let idx = 0
+    for p in parts [
+        if idx > 0 [
+            crumbs.push(" / ")
+        ]
+        let cls = "src-crumb"
+        if idx == parts.length - 1 [
+            cls = "src-crumb is-last"
+        ]
+        crumbs.push(h("span", cls, [p]))
+        idx = idx + 1
+    ]
+    let actions = []
+    for x in extra [
+        actions.push(x)
+    ]
+    actions.push(gh_blank(raw_url(src_repo, path), "copy", ["Raw"]))
+    actions.push(gh_blank(github_url(src_repo, "blob", path), "copy", ["GitHub ↗"]))
+    end h("div", "src-view-head", [h("div", "src-breadcrumb", crumbs), h("div", "src-view-actions", actions)])
+]
+
+fun src_message(path: Str, text: Str) [
+    dom_set(src_view, [src_head(path, []), h("div", "src-unavailable", [h("p", "", [text])])])
+]
+
+fun highlight_lines(range, scroll: Bool) [
+    for l in dom_all(src_view, ".src-line.is-hl") [
+        l.classList.toggle("is-hl", false)
+    ]
+    if is_null(range) [
+        end 0
+    ]
+    let first = null
+    let n = range.from
+    while n <= range.to [
+        let l = src_view.querySelector(".src-line[data-n=\"" + (n as Str) + "\"]")
+        if not is_null(l) [
+            l.classList.add("is-hl")
+            if is_null(first) [
+                first = l
+            ]
+        ]
+        n = n + 1
+    ]
+    if scroll and not is_null(first) [
+        first.scrollIntoView(js_set(js_new_obj(), "block", "center"))
+    ]
+]
+
+fun code_view(text: Str, path: Str, ext: Str) [
+    let parts = path.split("/")
+    let name = parts[parts.length - 1]
+    let lines = to_lines(highlight(re_replace("\\r\\n?", "g", text, "\n"), ext, name))
+    if lines.length > 1 and lines[lines.length - 1].length == 0 [
+        lines.pop()
+    ]
+    let total = lines.length
+    let cut = total > MAX_LINES
+    if cut [
+        lines = lines.slice(0, MAX_LINES)
+    ]
+    let code = h("code", "", [])
+    let idx = 0
+    for tokens in lines [
+        let n = idx + 1
+        let ln = ha("a", ["class", "ln", "href", source_hash(path, ":L" + (n as Str)), "data-n", (n as Str), "aria-label", "Line " + (n as Str)], [])
+        let lc = h("span", "lc", tokens_to_nodes(tokens))
+        if tokens.length == 0 [
+            lc.append(dom_text_node(zwsp()))
+        ]
+        code.append(ha("div", ["class", "src-line", "data-n", (n as Str)], [ln, lc]))
+        idx = idx + 1
+    ]
+    let wrap = h("div", "src-code-wrap", [h("pre", "src-code", [code])])
+    if cut [
+        wrap.append(h("p", "src-truncated-note", ["Showing the first " + fmt_int(MAX_LINES) + " of " + fmt_int(total) + " lines. ", gh_blank(github_url(src_repo, "blob", path), "", ["Open the full file on GitHub ↗"])]))
+    ]
+    end wrap
+]
+
+!! Podglad .md: przelacznik "Code"/"Preview" korzysta z danych zapisanych na przycisku.
+fun md_draw(toggle) [
+    let body = toggle.hks_body
+    if toggle.hks_preview [
+        let md = h("div", "markdown-body", [])
+        md.append(render_markdown(toggle.hks_text, src_repo))
+        decorate_code(md)
+        body.replaceChildren(md)
+        toggle.textContent = "Code"
+    ] else [
+        body.replaceChildren(code_view(toggle.hks_text, toggle.hks_path, toggle.hks_ext))
+        highlight_lines(toggle.hks_range, false)
+        toggle.textContent = "Preview"
+    ]
+    if toggle.hks_preview [
+        toggle.setAttribute("aria-pressed", "false")
+    ] else [
+        toggle.setAttribute("aria-pressed", "true")
+    ]
+]
+
+fun on_md_toggle(e) [
+    let t = e.currentTarget
+    t.hks_preview = not t.hks_preview
+    md_draw(t)
+]
+
+async fun open_file(path: Str, range) [
+    src_token = src_token + 1
+    if path == src_current [
+        highlight_lines(range, true)
+        end 0
+    ]
+    src_current = path
+    mark_active(path)
+    open_parents(path)
+    let entry = null
+    for f in src_files [
+        if f.path == path [
+            entry = f
+        ]
+    ]
+    let ext = extension_of(path)
+    if is_null(entry) [
+        src_message(path, "\"" + path + "\" is not in this version of the repository.")
+        end 0
+    ]
+    if js_has(image_ext, ext) [
+        dom_set(src_view, [src_head(path, []), h("div", "src-image", [ha("img", ["src", raw_url(src_repo, path), "alt", path, "loading", "lazy", "referrerpolicy", "no-referrer"], [])])])
+        end 0
+    ]
+    if js_has(binary_ext, ext) or entry.size > MAX_PREVIEW_BYTES [
+        if entry.size > MAX_PREVIEW_BYTES [
+            src_message(path, format_bytes(entry.size) + " — too large to preview here. Use Raw or GitHub above.")
+        ] else [
+            src_message(path, "Binary file — nothing to preview. Use Raw or GitHub above.")
+        ]
+        end 0
+    ]
+    dom_set(src_view, [src_head(path, []), h("p", "muted small src-loading", ["Loading…"])])
+    let res = await load_file(src_repo, path)
+    if src_current != path [
+        end 0
+    ]
+    if not is_null(res.err) [
+        src_message(path, "Couldn't load this file. If you're offline, only files you opened before are available.")
+        end 0
+    ]
+    if is_null(res.value) [
+        src_message(path, "This file could not be found on GitHub.")
+        end 0
+    ]
+    let text = res.value
+    let body = h("div", "src-body", [])
+    let copy = copy_button(text, "Copy")
+    copy.classList.add("src-copy")
+    let extra = [copy]
+    if re_test("^(md|markdown)$", "", ext) [
+        let toggle = ha("button", ["class", "copy", "type", "button", "aria-pressed", "true"], ["Code"])
+        toggle.hks_body = body
+        toggle.hks_text = text
+        toggle.hks_path = path
+        toggle.hks_ext = ext
+        toggle.hks_range = range
+        toggle.hks_preview = is_null(range)
+        toggle.addEventListener("click", on_md_toggle)
+        extra.unshift(toggle)
+        dom_set(src_view, [src_head(path, extra), body])
+        md_draw(toggle)
+    ] else [
+        dom_set(src_view, [src_head(path, extra), body])
+        body.replaceChildren(code_view(text, path, ext))
+    ]
+    if res.stale [
+        body.prepend(h("p", "muted small src-stale", ["Saved copy · " + format_age(res.age)]))
+    ]
+    highlight_lines(range, true)
+]
+
+!! ---- szukanie w kodzie ----
+fun marked_nodes(text: Str, needle: Str) [
+    let out = []
+    let lower = text.toLowerCase()
+    let at = 0
+    let i = lower.indexOf(needle)
+    while i != -1 [
+        if i > at [
+            out.push(text.slice(at, i))
+        ]
+        out.push(h("mark", "", [text.slice(i, i + needle.length)]))
+        at = i + needle.length
+        i = lower.indexOf(needle, at)
+    ]
+    if at < text.length [
+        out.push(text.slice(at))
+    ]
+    end out
+]
+
+fun search_stop(ctx) -> Bool [
+    end ctx.token != src_token or ctx.hits >= 300
+]
+
+fun search_progress_text(ctx) -> Str [
+    end "Searching… " + (ctx.done as Str) + "/" + (ctx.total as Str) + " files · " + (ctx.hits as Str) + plural(ctx.hits, " match", " matches")
+]
+
+async fun search_worker(ctx, f, idx) [
+    let raw = await read_file_light(src_repo, f.path)
+    if raw.found [
+        let found = []
+        let ln = 0
+        for line in raw.text.split("\n") [
+            ln = ln + 1
+            if found.length < 5 and ctx.hits < 300 and line.toLowerCase().includes(ctx.needle) [
+                found.push(js_set(js_set(js_new_obj(), "n", ln), "text", line.trim().slice(0, 220)))
+                ctx.hits = ctx.hits + 1
+            ]
+        ]
+        if found.length > 0 [
+            js_set(ctx.results, f.path, found)
+        ]
+    ] elif raw.failed [
+        ctx.failed = ctx.failed + 1
+    ]
+    ctx.done = ctx.done + 1
+    ctx.progress.textContent = search_progress_text(ctx)
+]
+
+async fun source_search(q: Str) [
+    src_token = src_token + 1
+    let token = src_token
+    src_current = ""
+    await ensure_tree()
+    if token != src_token or src_files.length == 0 [
+        end 0
+    ]
+    let needle = q.toLowerCase()
+    let candidates = []
+    for f in src_files [
+        let ext = extension_of(f.path)
+        if not js_has(binary_ext, ext) and not js_has(image_ext, ext) and f.size <= 100000 [
+            candidates.push(f)
+        ]
+    ]
+    candidates = candidates.slice(0, 300)
+    let progress = h("p", "muted small src-loading", [])
+    let out = h("div", "src-results", [])
+    dom_set(src_view, [h("div", "src-view-head", [h("div", "src-breadcrumb", ["Search “" + q + "”"])]), progress, out])
+    let ctx = js_new_obj()
+    js_set(ctx, "needle", needle)
+    js_set(ctx, "results", js_new_obj())
+    js_set(ctx, "hits", 0)
+    js_set(ctx, "done", 0)
+    js_set(ctx, "failed", 0)
+    js_set(ctx, "total", candidates.length)
+    js_set(ctx, "progress", progress)
+    js_set(ctx, "token", token)
+    await pool(candidates, 6, search_worker, ctx, search_stop)
+    if token != src_token [
+        end 0
+    ]
+    let files_n = js_keys(ctx.results).length
+    let summary = (ctx.hits as Str) + plural(ctx.hits, " match", " matches") + " in " + (files_n as Str) + plural(files_n, " file", " files") + " (" + (candidates.length as Str) + " files searched"
+    if src_files.length > candidates.length [
+        summary = summary + ", large/binary files skipped"
+    ]
+    summary = summary + ")"
+    if ctx.hits >= 300 [
+        summary = summary + " — showing the first 300"
+    ]
+    if ctx.failed > 0 [
+        summary = summary + " · " + (ctx.failed as Str) + " could not be read"
+    ]
+    progress.textContent = summary
+    let paths = js_keys(ctx.results)
+    paths.sort(locale_cmp)
+    for path in paths [
+        let rows = [ha("a", ["class", "src-result-file", "href", source_hash(path, "")], [path])]
+        for m in js_get(ctx.results, path) [
+            rows.push(ha("a", ["class", "src-result-line", "href", source_hash(path, ":L" + (m.n as Str))], [h("span", "ln-n", [(m.n as Str)]), h("code", "", marked_nodes(m.text, needle))]))
+        ]
+        out.append(h("section", "src-result", rows))
+    ]
+]
+
+fun on_search_submit(e) [
+    e.preventDefault()
+    let q = src_search_input.value.trim()
+    if q.length >= 2 [
+        source_search(q)
+    ]
+]
+
+fun on_view_click(e) [
+    let t = e.target
+    if is_null(t) or is_null(t.classList) or not t.classList.contains("ln") or not e.shiftKey [
+        end 0
+    ]
+    let m = re_match(":L(\\d+)(?:-\\d+)?$", "", location.hash)
+    let a = 0
+    if not is_null(m) [
+        a = parseInt(m[1], 10)
+    ]
+    let b = parseInt(t.getAttribute("data-n"), 10)
+    if a > 0 and b > 0 and a != b [
+        e.preventDefault()
+        let spec = re_replace(":L\\d+(?:-\\d+)?$", "", dec_uri(location.hash.slice(8)), "")
+        set_hash(source_hash(spec, ":L" + (Math.min(a, b) as Str) + "-" + (Math.max(a, b) as Str)))
+    ]
+]
+
+async fun show_source(spec) [
+    src_pending = spec
+    await ensure_tree()
+    if src_files.length == 0 [
+        end 0
+    ]
+    let s = SourceSpec("", null)
+    if not is_null(spec) [
+        s = parse_source_spec(spec)
+    ]
+    let path = s.path
+    let lines = s.lines
+    if path == "" [
+        let prefer = ["Bit.hk", "bit.hk", "README.md", "Readme.md", "readme.md"]
+        for p in prefer [
+            if path == "" [
+                for f in src_files [
+                    if f.path == p [
+                        path = p
+                    ]
+                ]
+            ]
+        ]
+        if path == "" [
+            path = src_files[0].path
+        ]
+        lines = null
+    ]
+    if path != "" [
+        open_file(path, lines)
+    ]
+]
