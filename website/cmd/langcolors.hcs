@@ -1,0 +1,103 @@
+const LANGUAGE_COLORS_SPEC = "H#=#9c1120;H# Interface=#c23b4e;hk=#ffffff;HackerScript=#4b4b55;Hacker Lang=#8250df;JavaScript=#f1e05a;TypeScript=#3178c6;Python=#3572A5;Java=#b07219;C=#555555;C++=#f34b7d;C#=#178600;Go=#00ADD8;Rust=#dea584;Ruby=#701516;PHP=#4F5D95;Swift=#F05138;Kotlin=#A97BFF;Dart=#00B4AB;HTML=#e34c26;CSS=#563d7c;Shell=#89e051;PowerShell=#012456;Scala=#c22d40;Haskell=#5e5086;Lua=#000080;Perl=#0298c3;R=#198CE7;Objective-C=#438eff;Elixir=#6e4a7e;Clojure=#db5855;Zig=#ec915c;OCaml=#3be133;Erlang=#B83998;Julia=#a270ba;Vim script=#199f4b;Vue=#41b883;Svelte=#ff3e00;Assembly=#6E4C13;Crystal=#000100;Nim=#ffc200;Solidity=#AA6746"
+
+const EXT_LANG_SPEC = "h#=H#;h#i=H# Interface;hk=hk;hcs=HackerScript;hl=Hacker Lang;js=JavaScript;jsx=JavaScript;mjs=JavaScript;cjs=JavaScript;ts=TypeScript;tsx=TypeScript;py=Python;pyw=Python;java=Java;c=C;h=C;cpp=C++;cc=C++;cxx=C++;hpp=C++;hh=C++;hxx=C++;cs=C#;go=Go;rs=Rust;rb=Ruby;php=PHP;swift=Swift;kt=Kotlin;kts=Kotlin;dart=Dart;html=HTML;htm=HTML;css=CSS;sh=Shell;bash=Shell;zsh=Shell;ps1=PowerShell;psm1=PowerShell;scala=Scala;sc=Scala;hs=Haskell;lhs=Haskell;lua=Lua;pl=Perl;pm=Perl;r=R;m=Objective-C;mm=Objective-C;ex=Elixir;exs=Elixir;clj=Clojure;cljs=Clojure;cljc=Clojure;zig=Zig;ml=OCaml;mli=OCaml;erl=Erlang;hrl=Erlang;jl=Julia;vim=Vim script;vue=Vue;svelte=Svelte;asm=Assembly;s=Assembly;cr=Crystal;nim=Nim;sol=Solidity"
+
+const FALLBACK_COLOR = "#8f8fa3"
+
+let lang_colors = kv_table(LANGUAGE_COLORS_SPEC)
+let ext_lang = kv_table(EXT_LANG_SPEC)
+
+struct LangShare [
+    name: Str,
+    bytes: Int,
+    pct: Float
+]
+
+struct LangBrand [
+    id: Str,
+    label: Str,
+    icon: Str,
+    fallback: Str
+]
+
+fun color_for_language(name: Str) -> Str [
+    if js_has(lang_colors, name) [
+        end js_get(lang_colors, name)
+    ]
+    end FALLBACK_COLOR
+]
+
+fun needs_outline(name: Str) -> Bool [
+    end name == "hk" or name == "HackerScript"
+]
+
+fun brand_for(name: Str) [
+    if name == "H#" [
+        end LangBrand("hsharp", "H#", "https://raw.githubusercontent.com/HackerOS-Linux-System/H-Sharp/main/images/icon.png", "images/lang/hsharp.png")
+    ]
+    if name == "HackerScript" [
+        end LangBrand("hackerscript", "HackerScript", "https://raw.githubusercontent.com/HackerOS-Linux-System/HackerScript/main/images/icon.png", "images/lang/hackerscript.png")
+    ]
+    if name == "Hacker Lang" [
+        end LangBrand("hackerlang", "Hacker Lang", "https://raw.githubusercontent.com/HackerOS-Linux-System/Hacker-Lang/main/images/icon.png", "images/lang/hackerlang.png")
+    ]
+    end null
+]
+
+!! Rozszerzenie pliku: wszystko po pierwszej kropce w nazwie ("a.test.js" -> "test.js"), male litery.
+fun extension_of(path: Str) -> Str [
+    let parts = path.split("/")
+    let name = parts[parts.length - 1]
+    let dot = name.indexOf(".")
+    if dot <= 0 [
+        end ""
+    ]
+    end name.slice(dot + 1).toLowerCase()
+]
+
+!! Udzial jezykow w bajtach (entries: lista {path, size}); posortowane malejaco.
+fun breakdown_from_files(files) -> List<LangShare> [
+    let totals = js_new_obj()
+    let order: List<Str> = []
+    for f in files [
+        let ext = extension_of(f.path)
+        let lang = ""
+        if js_has(ext_lang, ext) [
+            lang = js_get(ext_lang, ext)
+        ] else [
+            let parts = ext.split(".")
+            let last = parts[parts.length - 1]
+            if js_has(ext_lang, last) [
+                lang = js_get(ext_lang, last)
+            ]
+        ]
+        if lang == "" [
+            continue
+        ]
+        if not js_has(totals, lang) [
+            js_set(totals, lang, 0)
+            order.push(lang)
+        ]
+        js_set(totals, lang, js_num(totals, lang) + js_num(f, "size"))
+    ]
+    let sum = 0
+    for l in order [
+        sum = sum + js_num(totals, l)
+    ]
+    let out: List<LangShare> = []
+    if sum == 0 [
+        end out
+    ]
+    for l in order [
+        out.push(LangShare(l, js_num(totals, l), js_num(totals, l) * 100.0 / sum))
+    ]
+    end sort_shares(out)
+]
+
+fun sort_shares(xs) [
+    end xs.slice().sort(share_cmp)
+]
+
+fun share_cmp(a, b) [
+    end b.bytes - a.bytes
+]
