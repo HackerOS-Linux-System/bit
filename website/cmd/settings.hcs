@@ -1,0 +1,206 @@
+use <mode:website>
+!! Ustawienia: token GitHub (tylko w tej przegladarce) i dane offline.
+include <jsutil>
+include <platform>
+include <dom>
+include <store>
+include <offline>
+include <github>
+include <theme>
+include <getapp>
+include <chrome>
+include <styles>
+
+const TOKEN_SHAPE = "^(?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{20,}$|^[a-f0-9]{40}$"
+
+let st_input = null
+let st_show = null
+let st_status = null
+let st_rate = null
+let st_test_btn = null
+let st_cache_out = null
+let st_clear_btn = null
+let st_sw = null
+
+fun set_status(el, text: Str, kind: Str) [
+    el.textContent = text
+    if kind != "" [
+        el.className = "status is-" + kind
+    ] else [
+        el.className = "status"
+    ]
+]
+
+fun refresh_state() [
+    for a in dom_all(document, "[data-settings-link]") [
+        a.classList.toggle("has-token", has_github_token())
+    ]
+    if has_github_token() [
+        set_status(st_status, "A token is saved in this browser.", "ok")
+    ] else [
+        set_status(st_status, "No token saved — GitHub's anonymous limit (60 requests/hour per IP) applies.", "")
+    ]
+]
+
+async fun test_token() [
+    st_rate.textContent = "Checking…"
+    st_test_btn.disabled = true
+    let r = await fetch_rate_limit()
+    if r.status == 0 [
+        st_rate.textContent = "Couldn't reach GitHub — are you offline?"
+        st_rate.className = "status is-warn"
+    ] elif not r.ok [
+        if r.status == 401 [
+            st_rate.textContent = "GitHub rejected this token (401). Check that it is correct and not expired."
+        ] else [
+            st_rate.textContent = "GitHub API → HTTP " + (r.status as Str) + "."
+        ]
+        st_rate.className = "status is-err"
+    ] elif r.has_rate [
+        let note = rate_limit_note()
+        let tail = ""
+        if note != "" [
+            tail = " — " + note
+        ]
+        let auth = " (anonymous)"
+        if has_github_token() [
+            auth = " (authenticated)"
+        ]
+        st_rate.textContent = (r.remaining as Str) + " of " + (r.limit as Str) + " requests left this hour" + tail + auth + "."
+        st_rate.className = "status is-ok"
+    ] else [
+        st_rate.textContent = "Connected, but GitHub didn't report a limit."
+        st_rate.className = "status"
+    ]
+    st_test_btn.disabled = false
+]
+
+fun on_show_change(e) [
+    if st_show.checked [
+        st_input.setAttribute("type", "text")
+    ] else [
+        st_input.setAttribute("type", "password")
+    ]
+]
+
+fun on_token_clear(e) [
+    set_github_token("")
+    st_input.value = ""
+    refresh_state()
+    st_rate.textContent = ""
+]
+
+fun on_token_save(e) [
+    let v = st_input.value.trim()
+    if v == "" [
+        on_token_clear(null)
+        end 0
+    ]
+    if not set_github_token(v) [
+        set_status(st_status, "Couldn't save: this browser blocks localStorage.", "err")
+        end 0
+    ]
+    refresh_state()
+    if not re_test(TOKEN_SHAPE, "", v) [
+        set_status(st_status, "Saved, but it doesn't look like a GitHub token (ghp_…, github_pat_…). Use “Test token” to check.", "warn")
+    ]
+    test_token()
+]
+
+fun on_token_test(e) [
+    test_token()
+]
+
+fun render_cache() [
+    let s = cache_stats()
+    if s.entries == 0 [
+        st_cache_out.textContent = "Nothing saved yet. Open the index and a few libraries while online and they will work offline."
+    ] else [
+        let libs_word = " libraries"
+        if s.libraries == 1 [
+            libs_word = " library"
+        ]
+        st_cache_out.textContent = (s.entries as Str) + plural(s.entries, " saved item", " saved items") + " (" + format_bytes(s.bytes) + ") · " + (s.libraries as Str) + libs_word + " readable offline."
+    ]
+]
+
+fun reset_clear_label() [
+    st_clear_btn.textContent = "Clear saved data"
+]
+
+fun on_cache_clear(e) [
+    cache_clear()
+    render_cache()
+    st_clear_btn.textContent = "Cleared ✓"
+    setTimeout(reset_clear_label, 1400)
+]
+
+async fun show_sw_status() [
+    if not has_sw() [
+        st_sw.textContent = "Not supported by this browser — the data above still works, but the page itself needs a connection."
+        end 0
+    ]
+    let active = await sw_registration()
+    if active [
+        st_sw.textContent = "Offline mode is active: the site itself opens without a connection."
+    ] else [
+        st_sw.textContent = "Offline mode will turn on after the next page load."
+    ]
+]
+
+fun field_label(text: Str, target: Str) [
+    end ha("label", ["class", "field", "for", target], [text])
+]
+
+fun token_panel() [
+    st_input = ha("input", ["id", "token-input", "class", "search", "type", "password", "placeholder", "ghp_… or github_pat_…", "autocomplete", "off", "spellcheck", "false"], [])
+    st_show = ha("input", ["type", "checkbox", "id", "token-show"], [])
+    st_status = ha("p", ["id", "token-status", "class", "status", "role", "status"], [])
+    st_rate = ha("p", ["id", "token-rate", "class", "status", "role", "status"], [])
+    let save_btn = ha("button", ["class", "btn primary", "id", "token-save", "type", "button"], ["Save"])
+    st_test_btn = ha("button", ["class", "btn", "id", "token-test", "type", "button"], ["Test token"])
+    let clear_btn = ha("button", ["class", "btn", "id", "token-clear", "type", "button"], ["Remove"])
+    save_btn.addEventListener("click", on_token_save)
+    st_test_btn.addEventListener("click", on_token_test)
+    clear_btn.addEventListener("click", on_token_clear)
+    st_show.addEventListener("change", on_show_change)
+    end h("section", "panel", [
+        h("h2", "", ["GitHub token"]),
+        h("p", "", ["When you open a library, bit.io asks GitHub's API for its file tree (languages and the source browser) and its releases. Anonymous requests are limited to ", h("b", "", ["60 per hour"]), " per IP address; with a personal access token the limit is ", h("b", "", ["5,000 per hour"]), "."]),
+        h("p", "muted", ["The token is used ", h("b", "", ["only on a library's detail page"]), " and only for ", h("code", "", ["api.github.com"]), ". It is never sent to raw.githubusercontent.com or to bit.io. A token with ", h("b", "", ["no scopes"]), " (or a fine-grained, read-only, public-repositories token) is enough — ", link_out("https://github.com/settings/personal-access-tokens/new", "", ["create one ↗"]), "."]),
+        field_label("Personal access token", "token-input"),
+        st_input,
+        h("label", "check", [st_show, " Show token"]),
+        h("div", "actions", [save_btn, st_test_btn, clear_btn]),
+        st_status,
+        st_rate
+    ])
+]
+
+fun offline_panel() [
+    st_cache_out = ha("p", ["id", "cache-stats", "class", "muted"], [])
+    st_sw = ha("p", ["id", "sw-status", "class", "muted"], [])
+    st_clear_btn = ha("button", ["class", "btn", "id", "cache-clear", "type", "button"], ["Clear saved data"])
+    st_clear_btn.addEventListener("click", on_cache_clear)
+    end h("section", "panel", [
+        h("h2", "", ["Offline mode"]),
+        h("p", "", ["Libraries you open are saved in this browser (details, README, file tree, files you read, releases). Without a connection the site still opens and shows that saved copy, with a notice at the top."]),
+        st_cache_out,
+        st_sw,
+        h("div", "actions", [st_clear_btn])
+    ])
+]
+
+fun main() [
+    head_setup("Settings — bit.io", "bit.io settings: GitHub token and offline data.")
+    let main_el = page_shell("settings", "wrap page", false)
+    dom_add(main_el, [h("h1", "", ["Settings"]), h("p", "lead", ["Everything here is stored only in this browser."]), token_panel(), offline_panel()])
+    init_chrome()
+    st_input.value = get_github_token()
+    refresh_state()
+    render_cache()
+    show_sw_status()
+    if has_github_token() and is_online() [
+        test_token()
+    ]
+]
