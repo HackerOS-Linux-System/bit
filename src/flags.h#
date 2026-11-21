@@ -2,7 +2,7 @@ mod util
 mod project
 
 pub fn features() -> [string] is
-    return util::csv_split(env_get("BIT_SEL_FEATURES"))
+    return util::csv_split(string_replace(env_get("BIT_SEL_FEATURES"), " ", ","))
 end
 
 pub fn no_default() -> bool is return env_get("BIT_SEL_NO_DEFAULT") == "1" end
