@@ -1,0 +1,486 @@
+let UNDEF = Array(1).at(0)
+let STASH_MARK = String.fromCharCode(0)
+let BR_MARK = String.fromCharCode(1)
+
+fun is_null(v) -> Bool [
+    end v == null or v == UNDEF
+]
+
+fun js_type(v) -> Str [
+    end Object.prototype.toString.call(v)
+]
+
+fun is_arr(v) -> Bool [
+    end Array.isArray(v)
+]
+
+fun is_str(v) -> Bool [
+    end js_type(v) == "[object String]"
+]
+
+fun is_num(v) -> Bool [
+    end js_type(v) == "[object Number]"
+]
+
+fun is_obj(v) -> Bool [
+    end js_type(v) == "[object Object]"
+]
+
+fun is_container(v) -> Bool [
+    end is_obj(v) or is_arr(v)
+]
+
+!! ---- obiekty ----
+fun js_new_obj() [
+    end Object()
+]
+
+fun js_has(o, k: Str) -> Bool [
+    if not is_container(o) [
+        end false
+    ]
+    end Object.hasOwn(o, k)
+]
+
+!! Wartosc pola albo null (nigdy undefined).
+fun js_get(o, k: Str) [
+    if not js_has(o, k) [
+        end null
+    ]
+    let v = Object.getOwnPropertyDescriptor(o, k).value
+    if is_null(v) [
+        end null
+    ]
+    end v
+]
+
+fun js_set(o, k: Str, v) [
+    Reflect.set(o, k, v)
+    end o
+]
+
+fun delete_key(o, k: Str) [
+    Reflect.deleteProperty(o, k)
+]
+
+fun js_keys(o) [
+    if not is_container(o) [
+        end []
+    ]
+    end Object.keys(o)
+]
+
+fun js_str(o, k: Str) -> Str [
+    let v = js_get(o, k)
+    if is_str(v) [
+        end v
+    ]
+    end ""
+]
+
+fun js_num(o, k: Str) [
+    let v = js_get(o, k)
+    if is_num(v) [
+        end v
+    ]
+    end 0
+]
+
+fun js_bool(o, k: Str) -> Bool [
+    end Boolean(js_get(o, k))
+]
+
+fun js_arr(o, k: Str) [
+    let v = js_get(o, k)
+    if is_arr(v) [
+        end v
+    ]
+    end []
+]
+
+fun js_obj(o, k: Str) [
+    let v = js_get(o, k)
+    if is_container(v) [
+        end v
+    ]
+    end null
+]
+
+!! Zbior slow: "a b c" -> { a: true, b: true, c: true }; sprawdzanie przez js_has.
+fun word_set(s: Str) [
+    let o = Object()
+    for w in re_split("\\s+", "", s) [
+        if w != "" [
+            Reflect.set(o, w, true)
+        ]
+    ]
+    end o
+]
+
+!! "k=v;k2=v2" -> { k: "v", k2: "v2" }
+fun kv_table(spec: Str) [
+    let o = Object()
+    for pair in spec.split(";") [
+        let i = pair.indexOf("=")
+        if i > 0 [
+            Reflect.set(o, pair.slice(0, i), pair.slice(i + 1))
+        ]
+    ]
+    end o
+]
+
+!! ---- RegExp (skompilowane wzorce sa cache'owane) ----
+!! Uwaga: kompilator zamienia `s.replace(x, r)` na `s.split(x).join(r)` (bez $1, zawsze globalnie),
+!! dlatego re_replace woła String.prototype.replace przez .call().
+let rx_cache = Object()
+
+fun rx(p: Str, f: Str) [
+    let key = f + "/" + p
+    let r = js_get(rx_cache, key)
+    if is_null(r) [
+        r = RegExp(p, f)
+        Reflect.set(rx_cache, key, r)
+    ]
+    r.lastIndex = 0
+    end r
+]
+
+!! Wynik exec -> lista napisow (brakujaca grupa = ""), albo null.
+fun re_groups(m) [
+    if is_null(m) [
+        end null
+    ]
+    let out = []
+    let i = 0
+    while i < m.length [
+        let g = m.at(i)
+        if is_null(g) [
+            out.push("")
+        ] else [
+            out.push(g)
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+fun re_test(p: Str, f: Str, s: Str) -> Bool [
+    end rx(p, f).test(s)
+]
+
+fun re_match(p: Str, f: Str, s: Str) [
+    end re_groups(rx(p, f).exec(s))
+]
+
+fun re_replace(p: Str, f: Str, s: Str, r: Str) -> Str [
+    end String.prototype.replace.call(s, rx(p, f), r)
+]
+
+!! Zamiana z funkcja: fn(grupy) -> napis. Wzorzec musi miec flage "g". Uzywa wlasnej instancji RegExp,
+!! bo fn moze wolac inne re_* (wspolny lastIndex z cache'u by sie psul).
+fun re_replace_fn(p: Str, f: Str, s: Str, fn) -> Str [
+    let r = RegExp(p, f)
+    let out = ""
+    let last = 0
+    while true [
+        let m = r.exec(s)
+        if is_null(m) [
+            break
+        ]
+        let at = m.index
+        let whole = m.at(0)
+        out = out + s.slice(last, at) + fn(re_groups(m))
+        last = at + whole.length
+        if whole.length == 0 [
+            r.lastIndex = r.lastIndex + 1
+        ]
+    ]
+    end out + s.slice(last)
+]
+
+fun re_split(p: Str, f: Str, s: Str) [
+    end s.split(rx(p, f))
+]
+
+!! Dopasowanie dokladnie od indeksu `at` (flaga y): lista grup albo null.
+fun re_sticky(p: Str, s: Str, at: Int) [
+    let r = rx(p, "y")
+    r.lastIndex = at
+    end re_groups(r.exec(s))
+]
+
+fun re_search(p: Str, s: Str) -> Int [
+    end s.search(rx(p, ""))
+]
+
+!! ---- JSON ----
+fun json_str(v) -> Str [
+    end JSON.stringify(v)
+]
+
+const JP_NUM = "-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?"
+
+let jp_s = ""
+let jp_n = 0
+let jp_i = 0
+let jp_ok = true
+
+fun jp_ws() [
+    while jp_i < jp_n [
+        let c = jp_s.charCodeAt(jp_i)
+        if c == 32 or c == 10 or c == 13 or c == 9 [
+            jp_i = jp_i + 1
+        ] else [
+            break
+        ]
+    ]
+]
+
+fun jp_fail() [
+    jp_ok = false
+    end null
+]
+
+!! Napis JSON od cudzyslowu na pozycji jp_i. Szybka sciezka: bez backslashy.
+fun jp_string() -> Str [
+    let start = jp_i + 1
+    let q = jp_s.indexOf("\"", start)
+    if q == -1 [
+        jp_ok = false
+        end ""
+    ]
+    let bs = jp_s.indexOf("\\", start)
+    if bs == -1 or bs > q [
+        jp_i = q + 1
+        end jp_s.slice(start, q)
+    ]
+    let out = ""
+    let i = start
+    while i < jp_n [
+        let c = jp_s.charAt(i)
+        if c == "\"" [
+            jp_i = i + 1
+            end out
+        ]
+        if c != "\\" [
+            let run = re_sticky("[^\"\\\\]+", jp_s, i)
+            out = out + run[0]
+            i = i + run[0].length
+            continue
+        ]
+        let e = jp_s.charAt(i + 1)
+        if e == "n" [
+            out = out + "\n"
+        ] elif e == "t" [
+            out = out + "\t"
+        ] elif e == "r" [
+            out = out + "\r"
+        ] elif e == "b" [
+            out = out + String.fromCharCode(8)
+        ] elif e == "f" [
+            out = out + String.fromCharCode(12)
+        ] elif e == "/" or e == "\\" or e == "\"" [
+            out = out + e
+        ] elif e == "u" [
+            let hex = jp_s.slice(i + 2, i + 6)
+            if not re_test("^[0-9a-fA-F]{4}$", "", hex) [
+                jp_ok = false
+                end ""
+            ]
+            out = out + String.fromCharCode(parseInt(hex, 16))
+            i = i + 4
+        ] else [
+            jp_ok = false
+            end ""
+        ]
+        i = i + 2
+    ]
+    jp_ok = false
+    end ""
+]
+
+fun jp_object() [
+    let o = Object()
+    jp_i = jp_i + 1
+    jp_ws()
+    if jp_i < jp_n and jp_s.charCodeAt(jp_i) == 125 [
+        jp_i = jp_i + 1
+        end o
+    ]
+    while jp_ok [
+        jp_ws()
+        if jp_i >= jp_n or jp_s.charCodeAt(jp_i) != 34 [
+            end jp_fail()
+        ]
+        let k = jp_string()
+        jp_ws()
+        if not jp_ok or jp_i >= jp_n or jp_s.charCodeAt(jp_i) != 58 [
+            end jp_fail()
+        ]
+        jp_i = jp_i + 1
+        jp_ws()
+        let v = jp_value()
+        if not jp_ok [
+            end null
+        ]
+        Reflect.set(o, k, v)
+        jp_ws()
+        if jp_i >= jp_n [
+            end jp_fail()
+        ]
+        let c = jp_s.charCodeAt(jp_i)
+        jp_i = jp_i + 1
+        if c == 125 [
+            end o
+        ]
+        if c != 44 [
+            end jp_fail()
+        ]
+    ]
+    end null
+]
+
+fun jp_array() [
+    let a = []
+    jp_i = jp_i + 1
+    jp_ws()
+    if jp_i < jp_n and jp_s.charCodeAt(jp_i) == 93 [
+        jp_i = jp_i + 1
+        end a
+    ]
+    while jp_ok [
+        jp_ws()
+        a.push(jp_value())
+        if not jp_ok [
+            end null
+        ]
+        jp_ws()
+        if jp_i >= jp_n [
+            end jp_fail()
+        ]
+        let c = jp_s.charCodeAt(jp_i)
+        jp_i = jp_i + 1
+        if c == 93 [
+            end a
+        ]
+        if c != 44 [
+            end jp_fail()
+        ]
+    ]
+    end null
+]
+
+fun jp_value() [
+    if not jp_ok or jp_i >= jp_n [
+        end jp_fail()
+    ]
+    let c = jp_s.charCodeAt(jp_i)
+    if c == 123 [
+        end jp_object()
+    ]
+    if c == 91 [
+        end jp_array()
+    ]
+    if c == 34 [
+        end jp_string()
+    ]
+    if jp_s.startsWith("true", jp_i) [
+        jp_i = jp_i + 4
+        end true
+    ]
+    if jp_s.startsWith("false", jp_i) [
+        jp_i = jp_i + 5
+        end false
+    ]
+    if jp_s.startsWith("null", jp_i) [
+        jp_i = jp_i + 4
+        end null
+    ]
+    let m = re_sticky(JP_NUM, jp_s, jp_i)
+    if is_null(m) [
+        end jp_fail()
+    ]
+    jp_i = jp_i + m[0].length
+    end Number(m[0])
+]
+
+!! Odpowiednik JSON.parse, ktory zamiast wyjatku zwraca null (wejscie nie moze byc samym `null`).
+fun json_parse(text: Str) [
+    jp_s = text
+    jp_n = text.length
+    jp_i = 0
+    jp_ok = true
+    jp_ws()
+    let v = jp_value()
+    jp_ws()
+    if not jp_ok or jp_i != jp_n [
+        end null
+    ]
+    end v
+]
+
+!! ---- napisy / liczby ----
+fun enc(s: Str) -> Str [
+    end encodeURIComponent(s)
+]
+
+fun enc_path(p: Str) -> Str [
+    let parts = []
+    for seg in p.split("/") [
+        parts.push(encodeURIComponent(seg))
+    ]
+    end parts.join("/")
+]
+
+fun flush_bytes(bytes) -> Str [
+    end Reflect.construct(TextDecoder, []).decode(Reflect.construct(Uint8Array, [bytes]))
+]
+
+!! decodeURIComponent, ktory nie rzuca: zle sekwencje zostaja, zle UTF-8 -> U+FFFD.
+fun dec_uri(s: Str) -> Str [
+    if not s.includes("%") [
+        end s
+    ]
+    let out = ""
+    let bytes = []
+    let i = 0
+    let n = s.length
+    while i < n [
+        let c = s.charAt(i)
+        if c == "%" and i + 2 < n and re_test("^[0-9a-fA-F]{2}$", "", s.slice(i + 1, i + 3)) [
+            bytes.push(parseInt(s.slice(i + 1, i + 3), 16))
+            i = i + 3
+            continue
+        ]
+        if bytes.length > 0 [
+            out = out + flush_bytes(bytes)
+            bytes = []
+        ]
+        out = out + c
+        i = i + 1
+    ]
+    if bytes.length > 0 [
+        out = out + flush_bytes(bytes)
+    ]
+    end out
+]
+
+fun fixed(n, d: Int) -> Str [
+    end Number(n).toFixed(d)
+]
+
+fun fmt_int(n) -> Str [
+    end Number(n).toLocaleString()
+]
+
+fun locale_cmp(a, b) [
+    end String(a).localeCompare(String(b))
+]
+
+fun zeros(n: Int) [
+    end Array(n).fill(0)
+]
+
+fun zwsp() -> Str [
+    end String.fromCharCode(8203)
+]
