@@ -1,0 +1,276 @@
+use <mode:website>
+!! Strona glowna bit.io: wyszukiwarka i lista bibliotek z indeksu.
+include <jsutil>
+include <platform>
+include <dom>
+include <store>
+include <offline>
+include <github>
+include <theme>
+include <langs>
+include <hk>
+include <index_data>
+include <getapp>
+include <chrome>
+include <styles>
+
+let hm_q = ""
+let hm_lang = "all"
+let hm_tag = ""
+let hm_all = []
+let hm_search = null
+let hm_grid = null
+let hm_count = null
+let hm_filters = null
+let hm_tagbox = null
+let hm_stat_libs = null
+let hm_stat_langs = null
+let hm_stat_updated = null
+
+fun read_url() [
+    hm_q = qs_get("q")
+    if is_null(hm_q) [
+        hm_q = ""
+    ]
+    let l = qs_get("lang")
+    hm_lang = "all"
+    if l == "hsharp" or l == "hackerlang" or l == "hackerscript" or l == "any" [
+        hm_lang = l
+    ]
+    hm_tag = qs_get("tag")
+    if is_null(hm_tag) [
+        hm_tag = ""
+    ]
+]
+
+fun write_url() [
+    let pairs: List<Str> = []
+    if hm_q != "" [
+        pairs.push("q")
+        pairs.push(hm_q)
+    ]
+    if hm_lang != "all" [
+        pairs.push("lang")
+        pairs.push(hm_lang)
+    ]
+    if hm_tag != "" [
+        pairs.push("tag")
+        pairs.push(hm_tag)
+    ]
+    let s = qs_build(pairs)
+    if s != "" [
+        history.replaceState(null, "", "?" + s)
+    ] else [
+        history.replaceState(null, "", location.pathname)
+    ]
+]
+
+fun entry_matches(e) -> Bool [
+    if hm_lang != "all" and e.lang != hm_lang [
+        end false
+    ]
+    if hm_tag != "" [
+        let found = false
+        for t in e.tags [
+            if t.toLowerCase() == hm_tag.toLowerCase() [
+                found = true
+            ]
+        ]
+        if not found [
+            end false
+        ]
+    ]
+    if hm_q == "" [
+        end true
+    ]
+    let n = hm_q.toLowerCase()
+    if e.name.toLowerCase().includes(n) or e.description.toLowerCase().includes(n) or e.author.toLowerCase().includes(n) [
+        end true
+    ]
+    for t in e.tags [
+        if t.toLowerCase().includes(n) [
+            end true
+        ]
+    ]
+    end false
+]
+
+fun lang_badge(l: Str) [
+    let info = lang_info(l)
+    let b = h("span", "badge", [info.label])
+    b.style.setProperty("--badge", info.color)
+    end b
+]
+
+fun on_tag_click(e) [
+    hm_tag = e.currentTarget.hks_tag
+    render_home()
+]
+
+fun lib_card(e) [
+    let install = "bit install " + e.name
+    let tags = []
+    for t in e.tags.slice(0, 5) [
+        let b = ha("button", ["class", "tag", "type", "button"], [t])
+        b.hks_tag = t
+        b.addEventListener("click", on_tag_click)
+        tags.push(b)
+    ]
+    let desc = e.description
+    if desc == "" [
+        desc = "No description."
+    ]
+    let foot = [h("code", "", [install]), copy_button(install, "Copy")]
+    if e.target != "" [
+        foot.push(ha("a", ["class", "ext", "href", safe_url(e.target), "rel", "noopener", "target", "_blank"], ["source ↗"]))
+    ]
+    end h("article", "card", [
+        h("header", "card-head", [h("h3", "", [link("lib.html?name=" + enc(e.name), "", [e.name])]), lang_badge(e.lang)]),
+        h("p", "card-desc", [desc]),
+        h("div", "tags", tags),
+        h("footer", "card-foot", foot)
+    ])
+]
+
+fun on_lang_chip(e) [
+    hm_lang = e.currentTarget.hks_lang
+    render_home()
+]
+
+fun lang_chip(id: Str, label: Str, color: Str) [
+    let cls = "chip"
+    if hm_lang == id [
+        cls = "chip on"
+    ]
+    let b = ha("button", ["class", cls, "type", "button"], [label])
+    if color != "" [
+        b.style.setProperty("--badge", color)
+    ]
+    b.hks_lang = id
+    b.addEventListener("click", on_lang_chip)
+    end b
+]
+
+fun render_filters() [
+    clear_el(hm_filters)
+    hm_filters.append(lang_chip("all", "All languages", ""))
+    for l in all_langs() [
+        hm_filters.append(lang_chip(l.id, l.label, l.color))
+    ]
+]
+
+fun on_tag_clear(e) [
+    hm_tag = ""
+    render_home()
+]
+
+fun render_tags() [
+    clear_el(hm_tagbox)
+    if hm_tag == "" [
+        end 0
+    ]
+    let b = ha("button", ["class", "chip on", "type", "button"], ["tag: " + hm_tag + " ✕"])
+    b.addEventListener("click", on_tag_clear)
+    hm_tagbox.append(b)
+]
+
+fun render_home() [
+    write_url()
+    render_filters()
+    render_tags()
+    clear_el(hm_grid)
+    let list = []
+    for e in hm_all [
+        if entry_matches(e) [
+            list.push(e)
+        ]
+    ]
+    hm_count.textContent = (list.length as Str) + " of " + (hm_all.length as Str) + " libraries"
+    if list.length == 0 [
+        hm_grid.append(h("p", "empty", ["Nothing matches. Try another search or clear the filters."]))
+        end 0
+    ]
+    for e in list [
+        hm_grid.append(lib_card(e))
+    ]
+]
+
+fun show_stats(ix) [
+    hm_stat_libs.textContent = (ix.libraries.length as Str)
+    let seen = js_new_obj()
+    for l in ix.libraries [
+        if l.lang != "any" [
+            js_set(seen, l.lang, true)
+        ]
+    ]
+    hm_stat_langs.textContent = (Math.max(js_keys(seen).length, 3) as Str)
+    let up = ix.updated_at
+    if up == "" [
+        up = "—"
+    ]
+    hm_stat_updated.textContent = up
+]
+
+async fun load_home() [
+    let ix = await load_index()
+    if not ix.ok [
+        clear_el(hm_grid)
+        hm_grid.append(h("p", "empty", ["Could not load the library index (" + ix.error + ")."]))
+        end 0
+    ]
+    hm_all = ix.libraries
+    show_stats(ix)
+    render_home()
+]
+
+fun on_search_input(e) [
+    hm_q = hm_search.value.trim()
+    render_home()
+]
+
+fun on_slash_key(e) [
+    if e.key == "/" and document.activeElement != hm_search [
+        e.preventDefault()
+        hm_search.focus()
+    ]
+]
+
+fun on_home_online() [
+    load_home()
+]
+
+fun stat_item(id: Str, value: Str, label: Str) [
+    end h("div", "", [ha("b", ["id", id], [value]), label])
+]
+
+fun hero() [
+    let install = ha("div", ["class", "install", "id", "hero-install"], [h("span", "", ["$ bit install <name>"])])
+    install.append(copy_button("bit install <name>", "Copy"))
+    end h("section", "hero", [h("div", "wrap", [
+        h("h1", "", [h("span", "grad", ["bit.io"]), ha("br", [], []), "one index for every HackerOS language"]),
+        h("p", "", ["Libraries for ", h("b", "", ["H#"]), ", ", h("b", "", ["Hacker Lang"]), " and ", h("b", "", ["HackerScript"]), ". One tool — ", h("code", "", ["bit"]), " — installs them checksummed, links them statically and builds your project from a single ", h("code", "", ["Bit.hk"]), "."]),
+        install,
+        h("div", "stats", [stat_item("stat-libs", "–", "libraries"), stat_item("stat-langs", "3", "languages"), stat_item("stat-updated", "–", "index updated")])
+    ])])
+]
+
+fun main() [
+    head_setup("bit.io — the library index for H#, Hacker Lang and HackerScript", "bit.io is the open library index for H#, Hacker Lang and HackerScript. One package manager, statically linked libraries.")
+    let main_el = page_shell("libraries", "", true)
+    hm_search = ha("input", ["id", "search", "class", "search", "type", "search", "placeholder", "Search libraries, tags, authors…   (press / to focus)", "aria-label", "Search libraries", "autocomplete", "off"], [])
+    hm_filters = ha("div", ["class", "chips", "id", "lang-filters", "role", "group", "aria-label", "Filter by language"], [])
+    hm_tagbox = ha("div", ["class", "chips", "id", "tag-filter"], [])
+    hm_count = ha("div", ["class", "count", "id", "count", "aria-live", "polite"], ["Loading…"])
+    hm_grid = ha("div", ["class", "grid", "id", "grid", "aria-live", "polite"], [])
+    dom_add(main_el, [hero(), h("div", "wrap", [h("div", "controls", [hm_search, hm_filters, hm_tagbox, hm_count]), hm_grid])])
+    hm_stat_libs = by_id("stat-libs")
+    hm_stat_langs = by_id("stat-langs")
+    hm_stat_updated = by_id("stat-updated")
+    init_chrome()
+    read_url()
+    hm_search.value = hm_q
+    hm_search.addEventListener("input", on_search_input)
+    document.addEventListener("keydown", on_slash_key)
+    on_online(on_home_online)
+    load_home()
+]
