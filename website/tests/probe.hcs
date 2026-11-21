@@ -1,0 +1,97 @@
+use <mode:website>
+!! Sonda testowa: wystawia funkcje modulow na `window.bitio`, by testy w jsdom mogly je wywolac.
+include <../cmd/jsutil>
+include <../cmd/platform>
+include <../cmd/dom>
+include <../cmd/store>
+include <../cmd/offline>
+include <../cmd/github>
+include <../cmd/theme>
+include <../cmd/langs>
+include <../cmd/hk>
+include <../cmd/index_data>
+include <../cmd/langcolors>
+include <../cmd/repodata>
+include <../cmd/highlight>
+include <../cmd/markdown>
+include <../cmd/codeblocks>
+include <../cmd/deps>
+include <../cmd/diff>
+include <../cmd/verify>
+include <../cmd/versions>
+include <../cmd/source>
+include <../cmd/apidoc>
+include <../cmd/getapp>
+
+fun main() [
+    let api = js_new_obj()
+    js_set(api, "parse_hk", parse_hk)
+    js_set(api, "hk_list", hk_list)
+    js_set(api, "hk_get", hk_get)
+    js_set(api, "parse_lenient", parse_lenient)
+    js_set(api, "strip_trailing_commas", strip_trailing_commas)
+    js_set(api, "dependencies_of", dependencies_of)
+    js_set(api, "classify_dep", classify_dep)
+    js_set(api, "compat_notes", compat_notes)
+    js_set(api, "manifest_changes", manifest_changes)
+    js_set(api, "diff_lines", diff_lines)
+    js_set(api, "breakdown_from_files", breakdown_from_files)
+    js_set(api, "extension_of", extension_of)
+    js_set(api, "parse_hsharp", parse_hsharp)
+    js_set(api, "parse_hackerscript", parse_hackerscript)
+    js_set(api, "parse_hackerlang", parse_hackerlang)
+    js_set(api, "parse_api_file", parse_api_file)
+    js_set(api, "combine_checksum", combine_checksum)
+    js_set(api, "untag", untag)
+    js_set(api, "parse_github", parse_github)
+    js_set(api, "repo_path", repo_path)
+    js_set(api, "raw_url", raw_url)
+    js_set(api, "github_url", github_url)
+    js_set(api, "brand_for", brand_for)
+    js_set(api, "color_for_language", color_for_language)
+    js_set(api, "needs_outline", needs_outline)
+    js_set(api, "highlight", highlight)
+    js_set(api, "ext_for_lang", ext_for_lang)
+    js_set(api, "family_for", family_for)
+    js_set(api, "render_markdown", render_markdown)
+    js_set(api, "markdown_to_html", markdown_to_html)
+    js_set(api, "parse_source_spec", parse_source_spec)
+    js_set(api, "source_hash", source_hash)
+    js_set(api, "normalize_lang", normalize_lang)
+    js_set(api, "lang_from_tags", lang_from_tags)
+    js_set(api, "format_age", format_age)
+    js_set(api, "format_bytes", format_bytes)
+    js_set(api, "escape_html", escape_html)
+    js_set(api, "APP_ANDROID_URL", APP_ANDROID_URL)
+    js_set(api, "APP_IOS_URL", APP_IOS_URL)
+    js_set(api, "HACKEROS_COMMAND", HACKEROS_COMMAND)
+    js_set(api, "Repo", Repo)
+    js_set(api, "sha256_str", sha256_str)
+    js_set(api, "json_parse", json_parse)
+    js_set(api, "json_str", json_str)
+    js_set(api, "is_null", is_null)
+    js_set(api, "js_get", js_get)
+    js_set(api, "js_str", js_str)
+    js_set(api, "js_has", js_has)
+    js_set(api, "re_match", re_match)
+    js_set(api, "re_replace", re_replace)
+    js_set(api, "re_replace_fn", re_replace_fn)
+    js_set(api, "re_split", re_split)
+    js_set(api, "re_sticky", re_sticky)
+    js_set(api, "dec_uri", dec_uri)
+    js_set(api, "word_set", word_set)
+    js_set(api, "kv_table", kv_table)
+    js_set(api, "safe_url", safe_url)
+    js_set(api, "qs_get", qs_get)
+    js_set(api, "qs_build", qs_build)
+    js_set(api, "fixed", fixed)
+    js_set(api, "compare_bytes", compare_bytes)
+    js_set(api, "fmt_date", fmt_date)
+    js_set(api, "url_with_ref", url_with_ref)
+    js_set(api, "ls_set", ls_set)
+    js_set(api, "ls_get", ls_get)
+    js_set(api, "ls_remove", ls_remove)
+    js_set(api, "http", http)
+    js_set(api, "dom_add", dom_add)
+    window.bitio = api
+]
