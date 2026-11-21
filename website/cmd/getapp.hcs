@@ -1,0 +1,136 @@
+const APP_ANDROID_URL = "https://github.com/HackerOS-Linux-System/bit/releases/download/v0.4/bit-io-android-app.apk"
+const APP_ANDROID_FILE = "bit-io-android-app.apk"
+const APP_IOS_URL = "https://github.com/HackerOS-Linux-System/bit/releases/download/v0.4/bit-io-ios-app.ipa"
+const APP_IOS_FILE = "bit-io-ios-app.ipa"
+const HACKEROS_COMMAND = "hacker unpack bit-app"
+
+let app_dialog = null
+let app_body = null
+
+fun app_close(e) [
+    app_dialog.close()
+]
+
+fun app_close_button() [
+    let b = ha("button", ["class", "icon-btn app-dialog-close", "type", "button", "aria-label", "Close"], ["×"])
+    b.addEventListener("click", app_close)
+    end b
+]
+
+fun app_platform_button(id: Str, name: Str, hint: Str, glyph: Str) [
+    let b = ha("button", ["class", "platform", "type", "button", "data-platform", id], [
+        ha("span", ["class", "platform-glyph", "aria-hidden", "true"], [glyph]),
+        h("span", "platform-text", [h("b", "", [name]), h("small", "", [hint])])
+    ])
+    b.addEventListener("click", on_platform_pick)
+    end b
+]
+
+fun app_chooser() [
+    let buttons = [
+        app_platform_button("hackeros", "HackerOS", "install from the package source", "⌘"),
+        app_platform_button("android", "Android", "download the .apk", "▲"),
+        app_platform_button("ios", "iOS", "download the .ipa", "●")
+    ]
+    dom_set(app_body, [
+        app_close_button(),
+        ha("h2", ["id", "app-dialog-title"], ["Get the bit.io app"]),
+        muted("Which platform are you on?"),
+        h("div", "platforms", buttons)
+    ])
+    buttons[0].focus()
+]
+
+fun on_back_to_chooser(e) [
+    app_chooser()
+]
+
+fun app_back_button() [
+    let b = ha("button", ["class", "btn", "type", "button"], ["← Choose another platform"])
+    b.addEventListener("click", on_back_to_chooser)
+    end b
+]
+
+fun on_platform_pick(e) [
+    app_result(e.currentTarget.dataset.platform)
+]
+
+fun app_result(platform: Str) [
+    let title_text = "bit.io for iOS"
+    if platform == "hackeros" [
+        title_text = "bit.io on HackerOS"
+    ] elif platform == "android" [
+        title_text = "bit.io for Android"
+    ]
+    let title = ha("h2", ["id", "app-dialog-title"], [title_text])
+    if platform == "hackeros" [
+        dom_set(app_body, [
+            app_close_button(),
+            title,
+            muted("Run this in a terminal:"),
+            h("div", "install app-command", [h("span", "", ["$ " + HACKEROS_COMMAND]), copy_button(HACKEROS_COMMAND, "Copy")]),
+            h("div", "app-actions", [app_back_button()])
+        ])
+        end 0
+    ]
+    let url = APP_IOS_URL
+    let file = APP_IOS_FILE
+    if platform == "android" [
+        url = APP_ANDROID_URL
+        file = APP_ANDROID_FILE
+    ]
+    start_download(url, file)
+    dom_set(app_body, [
+        app_close_button(),
+        title,
+        muted("Your download of " + file + " has started."),
+        h("p", "small muted", ["Nothing happened? ", link(url, "", ["Download " + file]), "."]),
+        h("div", "app-actions", [app_back_button()])
+    ])
+]
+
+fun on_dialog_click(e) [
+    if e.target == app_dialog [
+        app_dialog.close()
+    ]
+]
+
+fun on_dialog_closed(e) [
+    app_chooser()
+]
+
+fun build_dialog() [
+    app_dialog = ha("dialog", ["class", "app-dialog", "aria-labelledby", "app-dialog-title"], [])
+    app_body = h("div", "app-dialog-body", [])
+    app_dialog.append(app_body)
+    app_dialog.addEventListener("click", on_dialog_click)
+    app_dialog.addEventListener("close", on_dialog_closed)
+    app_chooser()
+]
+
+fun on_get_app(e) [
+    if is_null(app_dialog) [
+        build_dialog()
+        document.body.append(app_dialog)
+    ]
+    if app_dialog.showModal != null [
+        app_dialog.showModal()
+    ] else [
+        app_dialog.setAttribute("open", "")
+    ]
+]
+
+fun init_get_app() [
+    let wrap = document.querySelector(".nav .wrap")
+    if is_null(wrap) or not is_null(wrap.querySelector("[data-get-app]")) [
+        end 0
+    ]
+    let button = ha("button", ["class", "btn primary get-app", "type", "button", "data-get-app", "", "aria-haspopup", "dialog"], ["Get the app"])
+    let toggle = wrap.querySelector("[data-theme-toggle]")
+    if not is_null(toggle) [
+        wrap.insertBefore(button, toggle)
+    ] else [
+        wrap.append(button)
+    ]
+    button.addEventListener("click", on_get_app)
+]
