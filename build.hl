@@ -1,1 +1,13 @@
+|| H#
+|| HackerScript
 
+;; bit cli tool build
+> bit build --release
+
+;; bit desktop app build
+>> cd app
+>> bit build --release
+
+;; bit website build
+> cd website 
+> bit site
