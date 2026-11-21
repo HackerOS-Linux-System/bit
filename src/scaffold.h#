@@ -124,7 +124,7 @@ fn write_project(dir: string, name: string, lang: string, is_lib: bool, gen: str
         file_write(dir + "/" + entry, stub_source(lang, name, is_lib, gen))
     end
     if !file_exists(dir + "/.gitignore") is
-        file_write(dir + "/.gitignore", "cache/\nsrc/bit_features.h#\n")
+        file_write(dir + "/.gitignore", "cache/\n")
     end
 end
 
@@ -238,7 +238,7 @@ pub fn new_workspace(name_in: string, special: bool) -> int is
     end
     ws = ws + "[default-build]\n-> profile => release\n"
     file_write(name_in + "/Bit.hk", ws)
-    file_write(name_in + "/.gitignore", "cache/\nsrc/bit_features.h#\n")
+    file_write(name_in + "/.gitignore", "cache/\n")
 
     ui::ok("created workspace " + ui::bold(name) + (if special then " " + ui::magenta("(special)") else ""))
     ui::line(ui::dim("Bit.hk  core/ (H# library)  cli/ (H# binary)" + (if special then "  fast/ (Rust)" else "")))
