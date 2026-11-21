@@ -1,0 +1,125 @@
+use <lang:javascript>
+!! Generator statycznych stron bibliotek (lib/<nazwa>.html z metadanymi OG/Twitter), sitemap.xml i robots.txt.
+!! HackerScript -> JavaScript (Node):  hackerc build scripts/generate-pages.hcs -o dist-gen.cjs && node dist-gen.cjs
+!! Zmienna SITE_URL (np. https://bit.io) wlacza adresy bezwzgledne i sitemape.
+get <npm:fs>
+get <npm:path>
+include <../cmd/jsutil>
+
+fun env_get(k: Str) -> Str [
+    let v = js_get(process.env, k)
+    if is_str(v) [
+        end v
+    ]
+    end ""
+]
+
+fun mkdirp(p: Str) [
+    let o = Object()
+    Reflect.set(o, "recursive", true)
+    fs.mkdirSync(p, o)
+]
+
+fun esc(s: Str) -> Str [
+    let a = re_replace("&", "g", s, "&amp;")
+    let b = re_replace("<", "g", a, "&lt;")
+    let c = re_replace(">", "g", b, "&gt;")
+    end re_replace("\"", "g", c, "&quot;")
+]
+
+!! Reczny indeks mial zbedne przecinki.
+fun parse_lenient(text: Str) [
+    end json_parse(re_replace(",(\\s*[}\\]])", "g", text, "$1"))
+]
+
+fun page_html(name: Str, description: Str, site: Str) -> Str [
+    let title = name + " — bit.io"
+    let desc = description
+    if desc == "" [
+        desc = name + " is a library in the bit.io index for H#, Hacker Lang and HackerScript."
+    ]
+    let target = "../lib.html?name=" + enc(name)
+    let url = ""
+    let image = ""
+    if site != "" [
+        url = site + "/lib/" + enc(name) + ".html"
+        image = site + "/images/logo.png"
+    ]
+    let canonical = ""
+    if url != "" [
+        canonical = "<link rel=\"canonical\" href=\"" + esc(url) + "\" />\n<meta property=\"og:url\" content=\"" + esc(url) + "\" />"
+    ]
+    let og_image = ""
+    let card = "summary"
+    if image != "" [
+        og_image = "<meta property=\"og:image\" content=\"" + esc(image) + "\" />\n<meta name=\"twitter:image\" content=\"" + esc(image) + "\" />"
+        card = "summary_large_image"
+    ]
+    let lines = [
+        "<!doctype html>",
+        "<html lang=\"en\">",
+        "<head>",
+        "<meta charset=\"utf-8\" />",
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />",
+        "<title>" + esc(title) + "</title>",
+        "<meta name=\"description\" content=\"" + esc(desc) + "\" />",
+        canonical,
+        "<meta property=\"og:type\" content=\"website\" />",
+        "<meta property=\"og:site_name\" content=\"bit.io\" />",
+        "<meta property=\"og:title\" content=\"" + esc(title) + "\" />",
+        "<meta property=\"og:description\" content=\"" + esc(desc) + "\" />",
+        og_image,
+        "<meta name=\"twitter:card\" content=\"" + card + "\" />",
+        "<meta name=\"twitter:title\" content=\"" + esc(title) + "\" />",
+        "<meta name=\"twitter:description\" content=\"" + esc(desc) + "\" />",
+        "<meta http-equiv=\"refresh\" content=\"0; url=" + esc(target) + "\" />",
+        "<script>location.replace(" + JSON.stringify(target) + ");</script>",
+        "</head>",
+        "<body><p><a href=\"" + esc(target) + "\">" + esc(name) + "</a> — " + esc(desc) + "</p></body>",
+        "</html>",
+        ""
+    ]
+    end lines.join("\n")
+]
+
+fun main() [
+    let root = process.cwd()
+    let dist = path.join(root, "dist")
+    let site = re_replace("\\/+$", "", env_get("SITE_URL"), "")
+    let doc = parse_lenient(fs.readFileSync(path.join(root, "..", "index", "repository.json"), "utf8"))
+    let raw = []
+    if is_arr(doc) [
+        raw = doc
+    ] elif is_arr(js_get(doc, "libraries")) [
+        raw = js_get(doc, "libraries")
+    ]
+    let libs = []
+    for l in raw [
+        if is_str(js_get(l, "name")) and re_test("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", "", js_str(l, "name")) [
+            libs.push(l)
+        ]
+    ]
+    mkdirp(path.join(dist, "lib"))
+    for l in libs [
+        fs.writeFileSync(path.join(dist, "lib", js_str(l, "name") + ".html"), page_html(js_str(l, "name"), js_str(l, "description"), site))
+    ]
+    let note = " (set SITE_URL for absolute URLs and a sitemap)"
+    if site != "" [
+        let pages = ["index.html", "about.html", "settings.html"]
+        for l in libs [
+            pages.push("lib/" + enc(js_str(l, "name")) + ".html")
+        ]
+        let rows = []
+        for p in pages [
+            rows.push("  <url><loc>" + esc(site + "/" + p) + "</loc></url>")
+        ]
+        let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n" + rows.join("\n") + "\n</urlset>\n"
+        fs.writeFileSync(path.join(dist, "sitemap.xml"), xml)
+        let robots = path.join(dist, "robots.txt")
+        if fs.existsSync(robots) [
+            fs.appendFileSync(robots, "Sitemap: " + site + "/sitemap.xml\n")
+        ]
+        note = " + sitemap.xml"
+    ]
+    log("generated " + (libs.length as Str) + " library pages" + note)
+]
