@@ -1,0 +1,159 @@
+use <lang:javascript>
+!! Service worker bit.io (offline): powloka strony z cache, network-first z limitem 4 s, czcionki stale-while-revalidate.
+!! HackerScript -> JavaScript:  hackerc build cmd/sw.hcs -o dist/sw.js
+!! Listenery rejestrujemy w inicjalizatorach `let` na gorze pliku, czyli synchronicznie przy pierwszym wykonaniu skryptu.
+
+const VERSION = "bitio-v6"
+const FONTS = "bitio-fonts-v1"
+const NETWORK_TIMEOUT_MS = 4000
+
+let SHELL = ["./", "index.html", "lib.html", "about.html", "settings.html", "offline.html", "home.js", "lib.js", "about.js", "settings.js", "repository.json", "images/icon.png", "images/logo.png"]
+
+let UNDEF = Array(1).at(0)
+
+fun is_null(v) -> Bool [
+    end v == null or v == UNDEF
+]
+
+fun ret_null(e) [
+    end null
+]
+
+!! Metody, ktorych kompilator nie przepuszcza (`match` to slowo kluczowe; `.keys()` i `.clone()` sa
+!! przepisywane na Array.from / hks_clone) wolamy przez prototyp: js_call(obiekt, "nazwa", [argumenty]).
+fun js_call(o, name: Str, args) [
+    let cur = o
+    while not is_null(cur) [
+        let d = Object.getOwnPropertyDescriptor(cur, name)
+        if not is_null(d) [
+            end Reflect.apply(d.value, o, args)
+        ]
+        cur = Object.getPrototypeOf(cur)
+    ]
+    end null
+]
+
+!! ---- install / activate ----
+!! Brakujacy plik (np. repository.json w lokalnym buildzie) nie moze wywalic instalacji.
+async fun precache() [
+    let cache = await caches.open(VERSION)
+    let adds = []
+    for u in SHELL [
+        adds.push(cache.add(u).catch(ret_null))
+    ]
+    await Promise.all(adds)
+    await globalThis.skipWaiting()
+]
+
+fun on_install(event) [
+    event.waitUntil(precache())
+]
+
+async fun drop_old_caches() [
+    let keys = await js_call(caches, "keys", [])
+    let drops = []
+    for k in keys [
+        if k != VERSION and k != FONTS [
+            drops.push(caches.delete(k))
+        ]
+    ]
+    await Promise.all(drops)
+    await globalThis.clients.claim()
+]
+
+fun on_activate(event) [
+    event.waitUntil(drop_old_caches())
+]
+
+!! ---- network-first ----
+async fun fetch_and_cache(request) [
+    let res = await fetch(request).catch(ret_null)
+    if is_null(res) [
+        end null
+    ]
+    if res.ok [
+        let copy = js_call(res, "clone", [])
+        let cache = await caches.open(VERSION)
+        cache.put(request, copy)
+    ]
+    end res
+]
+
+fun delay_executor(resolve, reject) [
+    setTimeout(resolve, NETWORK_TIMEOUT_MS, null)
+]
+
+async fun cache_fallback(request) [
+    let nav = request.mode == "navigate"
+    let opts = Object()
+    Reflect.set(opts, "ignoreSearch", nav)
+    let hit = await js_call(caches, "match", [request, opts])
+    if not is_null(hit) [
+        end hit
+    ]
+    if nav [
+        let offline = await js_call(caches, "match", ["offline.html"])
+        if not is_null(offline) [
+            end offline
+        ]
+    ]
+    end Response.error()
+]
+
+!! Odpowiedz z sieci, a gdy jej nie ma (blad albo > 4 s) - kopia z cache; dla nawigacji offline.html.
+async fun network_first(request) [
+    let timer = Reflect.construct(Promise, [delay_executor])
+    let first = await Promise.race([fetch_and_cache(request), timer])
+    if not is_null(first) [
+        end first
+    ]
+    end await cache_fallback(request)
+]
+
+!! ---- czcionki Google: stale-while-revalidate ----
+async fun fonts_refresh(cache, request) [
+    let res = await fetch(request).catch(ret_null)
+    if is_null(res) [
+        end null
+    ]
+    cache.put(request, js_call(res, "clone", []))
+    end res
+]
+
+async fun fonts_swr(request) [
+    let cache = await caches.open(FONTS)
+    let hit = await js_call(cache, "match", [request])
+    let net = fonts_refresh(cache, request)
+    if not is_null(hit) [
+        end hit
+    ]
+    let res = await net
+    if is_null(res) [
+        end Response.error()
+    ]
+    end res
+]
+
+fun on_fetch(event) [
+    let request = event.request
+    if request.method != "GET" [
+        end 0
+    ]
+    let url = Reflect.construct(URL, [request.url])
+    if url.origin == globalThis.location.origin [
+        event.respondWith(network_first(request))
+        end 0
+    ]
+    if url.hostname == "fonts.googleapis.com" or url.hostname == "fonts.gstatic.com" [
+        event.respondWith(fonts_swr(request))
+    ]
+    !! reszta (api.github.com, raw.githubusercontent.com…) idzie prosto do sieci
+]
+
+let sw_on_install = globalThis.addEventListener("install", on_install)
+let sw_on_activate = globalThis.addEventListener("activate", on_activate)
+let sw_on_fetch = globalThis.addEventListener("fetch", on_fetch)
+
+fun main() [
+    end 0
+]
