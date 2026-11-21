@@ -1,0 +1,54 @@
+fun decorate_code(container) [
+    for pre in dom_all(container, "pre") [
+        if not is_null(pre.closest(".snippet")) [
+            continue
+        ]
+        let code = pre.querySelector("code")
+        let text = pre.textContent
+        let cls = ""
+        if not is_null(code) [
+            cls = code.className
+        ]
+        let m = re_match("(?:^|\\s)language-([\\w+#.-]+)", "", cls)
+        if not is_null(code) and not is_null(m) and text.length < 60000 [
+            let ext = ext_for_lang(m[1])
+            let tokens = highlight(text, ext, "")
+            let any = false
+            for t in tokens [
+                if t.kind != "" [
+                    any = true
+                ]
+            ]
+            if any [
+                code.replaceChildren()
+                dom_add(code, tokens_to_nodes(tokens))
+            ]
+        ]
+        let wrap = h("div", "snippet", [])
+        pre.replaceWith(wrap)
+        wrap.append(pre)
+        wrap.append(copy_button(text, "Copy"))
+    ]
+]
+
+!! "On this page": lista naglowkow README (tylko gdy jest ich dosc).
+fun build_toc(container) [
+    let heads = []
+    for x in dom_all(container, "h2, h3") [
+        if x.id != "" [
+            heads.push(x)
+        ]
+    ]
+    if heads.length < 3 [
+        end null
+    ]
+    let list = h("ul", "toc-list", [])
+    for x in heads [
+        let cls = ""
+        if x.tagName == "H3" [
+            cls = "is-sub"
+        ]
+        list.append(h("li", cls, [link("#" + x.id, "", [x.textContent])]))
+    ]
+    end h("details", "toc", [h("summary", "", ["On this page"]), list])
+]
