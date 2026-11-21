@@ -1,0 +1,397 @@
+fun net_fail(e) [
+    end null
+]
+
+fun ret_true(x) [
+    end true
+]
+
+fun ret_false(e) [
+    end false
+]
+
+!! ---- localStorage ----
+!! Zapis nie moze przekroczyc limitu (~5 MB): liczymy znaki i odmawiamy zapisu ponad budzet,
+!! zamiast liczyc na wyjatek QuotaExceeded. cache_set() po odmowie usuwa najstarsze wpisy i ponawia.
+const LS_BUDGET = 4000000
+let ls_used = -1
+
+fun ls_keys() [
+    let out = []
+    let i = 0
+    while i < localStorage.length [
+        let k = localStorage.key(i)
+        if not is_null(k) [
+            out.push(k)
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+fun ls_get(k: Str) [
+    let v = localStorage.getItem(k)
+    if is_null(v) [
+        end null
+    ]
+    end v
+]
+
+fun ls_measure() -> Int [
+    let total = 0
+    for k in ls_keys() [
+        let v = localStorage.getItem(k)
+        if not is_null(v) [
+            total = total + k.length + v.length
+        ]
+    ]
+    end total
+]
+
+fun ls_set(k: Str, v: Str) -> Bool [
+    if ls_used < 0 [
+        ls_used = ls_measure()
+    ]
+    let old = localStorage.getItem(k)
+    let delta = k.length + v.length
+    if not is_null(old) [
+        delta = v.length - old.length
+    ]
+    if ls_used + delta > LS_BUDGET [
+        end false
+    ]
+    localStorage.setItem(k, v)
+    ls_used = ls_used + delta
+    end true
+]
+
+fun ls_remove(k: Str) -> Bool [
+    let old = localStorage.getItem(k)
+    if not is_null(old) [
+        localStorage.removeItem(k)
+        if ls_used >= 0 [
+            ls_used = ls_used - k.length - old.length
+        ]
+    ]
+    end true
+]
+
+!! ---- siec ----
+struct HttpRes [
+    status: Int,
+    text: Str,
+    rl: Any
+]
+
+struct BytesRes [
+    status: Int,
+    bytes: Any
+]
+
+!! Naglowki limitu GitHuba -> { remaining, limit, reset(ms) } albo null.
+fun rate_from(res) [
+    let hdrs = Object.fromEntries(res.headers.entries())
+    let rem = js_str(hdrs, "x-ratelimit-remaining")
+    if rem == "" [
+        end null
+    ]
+    let rl = Object()
+    Reflect.set(rl, "remaining", Number(rem))
+    let lim = js_str(hdrs, "x-ratelimit-limit")
+    let rst = js_str(hdrs, "x-ratelimit-reset")
+    if lim != "" [
+        Reflect.set(rl, "limit", Number(lim))
+    ] else [
+        Reflect.set(rl, "limit", -1)
+    ]
+    if rst != "" [
+        Reflect.set(rl, "reset", Number(rst) * 1000)
+    ] else [
+        Reflect.set(rl, "reset", -1)
+    ]
+    end rl
+]
+
+fun http_dead() -> HttpRes [
+    end HttpRes(0, "", null)
+]
+
+!! GET. token: null = zwykle zapytanie, "" = API bez tokenu, "xyz" = API z tokenem (tylko api.github.com).
+async fun http(url: Str, token) -> HttpRes [
+    let init = Object()
+    if is_str(token) and token != "" [
+        let headers = Object()
+        Reflect.set(headers, "Accept", "application/vnd.github+json")
+        Reflect.set(headers, "Authorization", "Bearer " + token)
+        Reflect.set(init, "headers", headers)
+    ]
+    let res = await fetch(url, init).catch(net_fail)
+    if is_null(res) [
+        end http_dead()
+    ]
+    let rl = rate_from(res)
+    let text = ""
+    if res.status != 204 [
+        let t = await res.text().catch(net_fail)
+        if is_null(t) [
+            end http_dead()
+        ]
+        text = t
+    ]
+    end HttpRes(res.status, text, rl)
+]
+
+async fun http_nocache(url: Str) -> HttpRes [
+    let init = Object()
+    Reflect.set(init, "cache", "no-cache")
+    let res = await fetch(url, init).catch(net_fail)
+    if is_null(res) [
+        end http_dead()
+    ]
+    let t = await res.text().catch(net_fail)
+    if is_null(t) [
+        end http_dead()
+    ]
+    end HttpRes(res.status, t, null)
+]
+
+async fun http_bytes(url: Str) -> BytesRes [
+    let res = await fetch(url).catch(net_fail)
+    if is_null(res) [
+        end BytesRes(0, null)
+    ]
+    if not res.ok [
+        end BytesRes(res.status, null)
+    ]
+    let b = await res.arrayBuffer().catch(net_fail)
+    if is_null(b) [
+        end BytesRes(0, null)
+    ]
+    end BytesRes(res.status, b)
+]
+
+!! ---- kryptografia ----
+fun can_hash() -> Bool [
+    end not is_null(crypto) and not is_null(crypto.subtle)
+]
+
+fun hex_of(buf) -> Str [
+    let u = Reflect.construct(Uint8Array, [buf])
+    let out = ""
+    let i = 0
+    while i < u.length [
+        let b = u.at(i)
+        let h = b.toString(16)
+        if h.length < 2 [
+            h = "0" + h
+        ]
+        out = out + h
+        i = i + 1
+    ]
+    end out
+]
+
+async fun sha256_buf(buf) -> Str [
+    let d = await crypto.subtle.digest("SHA-256", buf)
+    end hex_of(d)
+]
+
+async fun sha256_str(s: Str) -> Str [
+    let bytes = Reflect.construct(TextEncoder, []).encode(s)
+    let d = await crypto.subtle.digest("SHA-256", bytes)
+    end hex_of(d)
+]
+
+!! Porownanie bajtowe (UTF-8) jak `sort` w locale C.
+fun compare_bytes(a: Str, b: Str) -> Int [
+    let e = Reflect.construct(TextEncoder, [])
+    let x = e.encode(a)
+    let y = e.encode(b)
+    let n = Math.min(x.length, y.length)
+    let i = 0
+    while i < n [
+        let d = x.at(i) - y.at(i)
+        if d != 0 [
+            end d
+        ]
+        i = i + 1
+    ]
+    end x.length - y.length
+]
+
+!! ---- URL / adres strony / data ----
+fun qs_get(k: Str) [
+    let m = re_match("[?&]" + k + "=([^&#]*)", "", location.search)
+    if is_null(m) [
+        end null
+    ]
+    end dec_uri(re_replace("\\+", "g", m[1], " "))
+]
+
+fun qs_build(pairs) -> Str [
+    let parts = []
+    let i = 0
+    while i + 1 < pairs.length [
+        parts.push(enc(pairs[i]) + "=" + enc(pairs[i + 1]))
+        i = i + 2
+    ]
+    end parts.join("&")
+]
+
+fun url_abs(rel: Str) -> Str [
+    end Reflect.construct(URL, [rel, location.href]).href
+]
+
+fun url_with_ref(ref: Str) -> Str [
+    let u = Reflect.construct(URL, [location.href])
+    if ref != "" [
+        u.searchParams.set("ref", ref)
+    ] else [
+        u.searchParams.delete("ref")
+    ]
+    end u.href
+]
+
+!! Tylko http(s) bez bialych znakow/znakow sterujacych; wszystko inne -> "#".
+fun safe_url(u: Str) -> Str [
+    if re_test("^https?:\\/\\/[^\\s\\u0000-\\u001f]+$", "i", u) [
+        end u
+    ]
+    end "#"
+]
+
+fun fmt_date(iso: Str) -> Str [
+    let d = Reflect.construct(Date, [iso])
+    if isNaN(d.getTime()) [
+        end ""
+    ]
+    let o = Object()
+    Reflect.set(o, "year", "numeric")
+    Reflect.set(o, "month", "short")
+    Reflect.set(o, "day", "numeric")
+    end d.toLocaleDateString(Array(), o)
+]
+
+fun fmt_date_short(iso: Str) -> Str [
+    end Reflect.construct(Date, [iso]).toLocaleDateString()
+]
+
+fun fmt_clock(ms) -> Str [
+    let o = Object()
+    Reflect.set(o, "hour", "numeric")
+    Reflect.set(o, "minute", "2-digit")
+    end Reflect.construct(Date, [ms]).toLocaleTimeString(Array(), o)
+]
+
+fun parse_date(iso: Str) [
+    end Date.parse(iso)
+]
+
+fun has_sw() -> Bool [
+    end Reflect.has(navigator, "serviceWorker")
+]
+
+fun is_online() -> Bool [
+    end navigator.onLine
+]
+
+fun set_hash(h: Str) [
+    location.hash = h
+]
+
+!! ---- service worker ----
+fun on_window_load(e) [
+    navigator.serviceWorker.register("sw.js").catch(net_fail)
+]
+
+fun sw_register() [
+    if has_sw() [
+        window.addEventListener("load", on_window_load)
+    ]
+]
+
+async fun sw_registration() -> Bool [
+    let r = await navigator.serviceWorker.getRegistration().catch(net_fail)
+    end not is_null(r) and not is_null(r.active)
+]
+
+!! ---- DOM ----
+!! Dodaje dziecko: napis/liczba -> wezel tekstowy, tablica -> rekurencyjnie, null/bool -> pomija.
+fun dom_add(el, k) [
+    if is_null(k) [
+        end el
+    ]
+    let t = js_type(k)
+    if t == "[object Boolean]" [
+        end el
+    ]
+    if t == "[object Array]" [
+        for x in k [
+            dom_add(el, x)
+        ]
+        end el
+    ]
+    if t == "[object String]" or t == "[object Number]" [
+        el.append(document.createTextNode(String(k)))
+    ] else [
+        el.append(k)
+    ]
+    end el
+]
+
+fun dom_set(el, kids) [
+    el.replaceChildren()
+    end dom_add(el, kids)
+]
+
+fun dom_text_node(s: Str) [
+    end document.createTextNode(s)
+]
+
+fun dom_all(root, sel: Str) [
+    end Array.from(root.querySelectorAll(sel))
+]
+
+fun dom_children(n) [
+    end Array.from(n.childNodes)
+]
+
+fun parse_html(html: Str) [
+    end Reflect.construct(DOMParser, []).parseFromString("<!doctype html><body>" + html, "text/html").body
+]
+
+fun new_fragment() [
+    end document.createDocumentFragment()
+]
+
+async fun copy_text(t: Str) -> Bool [
+    if is_null(navigator.clipboard) [
+        end false
+    ]
+    end await navigator.clipboard.writeText(t).then(ret_true).catch(ret_false)
+]
+
+fun start_download(url: Str, file: Str) [
+    let a = document.createElement("a")
+    a.href = url
+    a.download = file
+    a.rel = "noopener"
+    a.style.display = "none"
+    document.body.append(a)
+    a.click()
+    a.parentNode.removeChild(a)
+]
+
+fun listen_once(el, ev: Str, fn) [
+    let opts = Object()
+    Reflect.set(opts, "once", true)
+    el.addEventListener(ev, fn, opts)
+]
+
+fun sort_by_name(xs) [
+    end xs.slice().sort(name_cmp)
+]
+
+fun name_cmp(a, b) [
+    end locale_cmp(a.name, b.name)
+]
