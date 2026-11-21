@@ -354,6 +354,55 @@ For `lang => h#` projects the optional `[edition]` section pins two things:
 - Both keys apply **only to H#**. With `lang => hl` / `hs` (or no `lang`), the section is ignored and
   `bit check` / `bit build` say so. `bit new` writes `[edition] -> edition => 2026` for H# projects.
 
+## Features (`[features]`, `--features`)
+
+Features switch parts of your code and optional dependencies on or off **without rewriting anything**: bit resolves them
+and starts the compiler with the final list (`h# compile ... --features fast,simd`). Nothing is generated into `src/`
+(older bit versions wrote `src/bit_features.h#`; bit deletes that file when it finds it).
+
+```
+! whole-line comments start with `!`
+[features]
+-> default => [fast]
+-> fast => [simd, dep:silver]
+-> simd => []
+-> tls => []
+
+[dependencies]
+-> silver
+--> optional => true
+```
+
+`default` is what is on when nothing is asked for (`--no-default-features` turns it off); the other keys list the features
+they switch on, and `dep:<name>` pulls in an optional dependency (built only then).
+
+```bash
+bit build --features fast,simd     # comma or space separated
+bit build -F fast -F tls           # repeatable;  --features=fast,tls  works too
+bit build --all-features           # every feature and optional dependency
+bit build --no-default-features    # without `default`
+bit features                       # list them (and report mistakes in the table)
+bit build -v                       # shows the exact `h# ... --features ...` command
+```
+
+In H# code (needs an H# that lists `--features` in `h# compile --help`; bit says so when it does not):
+
+```
+#[cfg(feature = "fast")]                  ;; items, impl/trait members, struct fields, enum variants, `use`, statements
+fn path() is ... end
+#[cfg(not(feature = "fast"))]             ;; also all(..), any(..)
+fn path() is ... end
+
+if feature_enabled("tls") is ... end       ;; a bool literal, decided at compile time
+let on: [string] = enabled_features()     ;; every enabled feature
+```
+
+Rules: a requested name that is neither a feature nor an optional dependency is an error; `[features]` is validated
+(unknown requirements, `dep:x` of a dependency that is not optional, bad names). In a workspace a requested feature only
+applies to the members that declare it. A dependency is built with **its own** `default` features — never with the list of
+the package that uses it. Every other language sees `BIT_FEATURES=fast,simd` (and `BIT_FEATURE_DEPS`) in the environment
+of compilers and hooks.
+
 ## Where libraries live, and what runs before the build (`[directories]`)
 
 Available for **every** language (`h#`, `hl`, `hs`):
