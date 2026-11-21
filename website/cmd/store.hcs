@@ -1,0 +1,169 @@
+const CACHE_PREFIX = "bitio:cache:"
+
+const TTL_MANIFEST = 2700000
+const TTL_README = 2700000
+const TTL_TREE = 7200000
+const TTL_FILE = 7200000
+const TTL_META = 7200000
+const TTL_REV = 3600000
+const TTL_RELEASES = 1800000
+
+struct CacheStats [
+    entries: Int,
+    bytes: Int,
+    libraries: Int
+]
+
+fun cache_read(key: Str) [
+    let raw = ls_get(CACHE_PREFIX + key)
+    if is_null(raw) [
+        end null
+    ]
+    let env = json_parse(raw)
+    if is_null(env) [
+        end null
+    ]
+    if not js_has(env, "value") [
+        end null
+    ]
+    end env
+]
+
+!! Wartosc, dopoki swieza (inaczej null).
+fun cache_get(key: Str) [
+    let env = cache_read(key)
+    if is_null(env) [
+        end null
+    ]
+    let exp = js_num(env, "expires")
+    if exp > 0 and now_ms() > exp [
+        end null
+    ]
+    end env.value
+]
+
+!! Wartosc nawet przeterminowana (gdy zawiodla siec).
+fun cache_get_stale(key: Str) [
+    let env = cache_read(key)
+    if is_null(env) [
+        end null
+    ]
+    end env.value
+]
+
+!! Wiek wpisu w ms albo -1.
+fun cache_age(key: Str) -> Int [
+    let env = cache_read(key)
+    if is_null(env) [
+        end -1
+    ]
+    end now_ms() - js_num(env, "savedAt")
+]
+
+fun cache_keys() -> List<Str> [
+    let out: List<Str> = []
+    let all = ls_keys()
+    for k in all [
+        if k.startsWith(CACHE_PREFIX) [
+            out.push(k.slice(CACHE_PREFIX.length))
+        ]
+    ]
+    end out
+]
+
+fun evict_oldest(except: Str) -> Bool [
+    let oldest_key = ""
+    let oldest_at = 0
+    let found = false
+    for k in cache_keys() [
+        if k != except and k != "index" [
+            let env = cache_read(k)
+            let at = 0
+            if not is_null(env) [
+                at = js_num(env, "savedAt")
+            ]
+            if not found or at < oldest_at [
+                found = true
+                oldest_key = k
+                oldest_at = at
+            ]
+        ]
+    ]
+    if not found [
+        end false
+    ]
+    end ls_remove(CACHE_PREFIX + oldest_key)
+]
+
+fun cache_set(key: Str, value, ttl: Int) -> Bool [
+    let env = js_new_obj()
+    js_set(env, "value", value)
+    if ttl > 0 [
+        js_set(env, "expires", now_ms() + ttl)
+    ] else [
+        js_set(env, "expires", null)
+    ]
+    js_set(env, "savedAt", now_ms())
+    let payload = json_str(env)
+    for attempt in range(0, 3) [
+        if ls_set(CACHE_PREFIX + key, payload) [
+            end true
+        ]
+        if not evict_oldest(key) [
+            end false
+        ]
+    ]
+    end false
+]
+
+fun cache_stats() -> CacheStats [
+    let bytes = 0
+    let libs = js_new_obj()
+    let keys = cache_keys()
+    for k in keys [
+        let raw = ls_get(CACHE_PREFIX + k)
+        if not is_null(raw) [
+            bytes = bytes + raw.length * 2
+        ]
+        let m = re_match("^(?:manifest|readme|tree|src|releases|meta|rev|dir|api):(.+?)(?:@|$)", "", k)
+        if not is_null(m) [
+            js_set(libs, m[1], true)
+        ]
+    ]
+    end CacheStats(keys.length, bytes, js_keys(libs).length)
+]
+
+fun cache_clear() [
+    for k in cache_keys() [
+        ls_remove(CACHE_PREFIX + k)
+    ]
+]
+
+fun format_age(ms: Int) -> Str [
+    if ms < 0 [
+        end "earlier"
+    ]
+    if ms < 20000 [
+        end "just now"
+    ]
+    if ms < 60000 [
+        end (Math.round(ms / 1000.0) as Str) + "s ago"
+    ]
+    if ms < 3600000 [
+        end (Math.round(ms / 60000.0) as Str) + " min ago"
+    ]
+    if ms < 86400000 [
+        end (Math.round(ms / 3600000.0) as Str) + " h ago"
+    ]
+    end (Math.round(ms / 86400000.0) as Str) + " d ago"
+]
+
+fun format_bytes(n: Int) -> Str [
+    if n < 1024 [
+        end (n as Str) + " B"
+    ]
+    if n < 1048576 [
+        end fixed(n / 1024.0, 1) + " KB"
+    ]
+    end fixed(n / 1048576.0, 1) + " MB"
+]
