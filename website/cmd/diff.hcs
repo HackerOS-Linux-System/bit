@@ -1,0 +1,125 @@
+struct DiffLine [
+    t: Str,
+    s: Str
+]
+
+!! Zwraca null, gdy pliki sa za duze (> 1500 linii).
+fun diff_lines(a, b, context: Int) [
+    if a.length > 1500 or b.length > 1500 [
+        end null
+    ]
+    let n = a.length
+    let m = b.length
+    let lcs = []
+    for r in range(0, n + 1) [
+        lcs.push(zeros(m + 1))
+    ]
+    let i = n - 1
+    while i >= 0 [
+        let j = m - 1
+        while j >= 0 [
+            if a[i] == b[j] [
+                lcs[i][j] = lcs[i + 1][j + 1] + 1
+            ] else [
+                lcs[i][j] = Math.max(lcs[i + 1][j], lcs[i][j + 1])
+            ]
+            j = j - 1
+        ]
+        i = i - 1
+    ]
+    let all: List<DiffLine> = []
+    i = 0
+    let j = 0
+    while i < n and j < m [
+        if a[i] == b[j] [
+            all.push(DiffLine(" ", a[i]))
+            i = i + 1
+            j = j + 1
+        ] elif lcs[i + 1][j] >= lcs[i][j + 1] [
+            all.push(DiffLine("-", a[i]))
+            i = i + 1
+        ] else [
+            all.push(DiffLine("+", b[j]))
+            j = j + 1
+        ]
+    ]
+    while i < n [
+        all.push(DiffLine("-", a[i]))
+        i = i + 1
+    ]
+    while j < m [
+        all.push(DiffLine("+", b[j]))
+        j = j + 1
+    ]
+    let keep = []
+    for k in range(0, all.length) [
+        keep.push(false)
+    ]
+    let idx = 0
+    for l in all [
+        if l.t != " " [
+            let k = Math.max(0, idx - context)
+            let hi = Math.min(all.length - 1, idx + context)
+            while k <= hi [
+                keep[k] = true
+                k = k + 1
+            ]
+        ]
+        idx = idx + 1
+    ]
+    let out: List<DiffLine> = []
+    idx = 0
+    for l in all [
+        if keep[idx] [
+            out.push(l)
+        ] elif out.length > 0 and out[out.length - 1].t != "…" [
+            out.push(DiffLine("…", ""))
+        ]
+        idx = idx + 1
+    ]
+    while out.length > 0 and out[out.length - 1].t == "…" [
+        out.pop()
+    ]
+    end out
+]
+
+fun spec_map(doc) [
+    let m = js_new_obj()
+    for d in dependencies_of(doc) [
+        js_set(m, d.name, d.spec)
+    ]
+    end m
+]
+
+fun or_dash(s: Str) -> Str [
+    if s == "" [
+        end "—"
+    ]
+    end s
+]
+
+!! Krotki opis roznic w manifestach: wersja i zaleznosci.
+fun manifest_changes(older, newer) -> List<Str> [
+    let out: List<Str> = []
+    let va = hk_get(older, "package", "version")
+    let vb = hk_get(newer, "package", "version")
+    if va != vb [
+        out.push("version " + or_dash(va) + " → " + or_dash(vb))
+    ]
+    let da = spec_map(older)
+    let db = spec_map(newer)
+    for name in js_keys(db) [
+        let spec = js_str(db, name)
+        if not js_has(da, name) [
+            out.push(("+ dependency " + name + " " + spec).trim())
+        ] elif js_str(da, name) != spec [
+            out.push("~ dependency " + name + ": " + js_str(da, name) + " → " + spec)
+        ]
+    ]
+    for name in js_keys(da) [
+        if not js_has(db, name) [
+            out.push("− dependency " + name)
+        ]
+    ]
+    end out
+]
