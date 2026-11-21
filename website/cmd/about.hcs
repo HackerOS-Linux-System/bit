@@ -1,0 +1,97 @@
+use <mode:website>
+!! Dokumentacja `bit` (strona statyczna budowana z kodu).
+include <jsutil>
+include <platform>
+include <dom>
+include <store>
+include <offline>
+include <github>
+include <theme>
+include <getapp>
+include <chrome>
+include <styles>
+
+fun c(t: Str) [
+    end h("code", "", [t])
+]
+
+fun snippet(text: Str) [
+    end h("div", "snippet", [h("pre", "", [text]), copy_button(text, "Copy")])
+]
+
+fun row2(a, b) [
+    end h("tr", "", [h("td", "", [a]), h("td", "", [b])])
+]
+
+fun head2(a: Str, b: Str) [
+    end h("tr", "", [h("th", "", [a]), h("th", "", [b])])
+]
+
+const QUICK_START = "bit init myapp --lang h#     # or hl, hs\ncd myapp\nbit                           # does everything Bit.hk describes"
+
+const BIT_HK = "[package]\n-> name        => myapp\n-> version     => 0.1.0\n-> lang        => h#            ;; h# | hl | hs   (several: h#, hs)\n\n[build]\n-> link   => static             ;; the only mode\n-> target => h#                 ;; language toolchain (or a platform like linux-aarch64)\n\n[lib]\n-> output => hlib               ;; hlib | so | a | obj\n\n[default-build]                 ;; what a bare `bit` does\n-> profile => release\n-> run     => true\n\n[dependencies]\n-> mold => *\n-> tui  => rev v1.0\n-> mine => path ../mine\n\n[commands]                      ;; your own `bit deploy`\n-> deploy => scp cache/build/release/myapp server:/opt/\n--> description => Copy the release build to the server"
+
+const COMMANDS = "bit init [name] [--lang h#|hl|hs] [--lib]\nbit build [--release] [--target h#|hl|hs] [--platform linux-aarch64] [--emit bin|hlib|so|a|obj]\nbit run [-- args]        bit check        bit clean [--all]\nbit install [name|git-url] [--output hlib|so|a|obj] [--no-build]\nbit add <name> [rev]     bit remove <name>    bit upgrade [name]\nbit search [text|all] [--lang hl]     bit info <name>     bit list\nbit update       bit verify       bit doctor      bit langs\nbit publish      bit commands     bit x <custom>"
+
+const INDEX_ENTRY = "{\n  \"name\": \"mylib\",\n  \"target\": \"https://github.com/you/mylib\",\n  \"description\": \"What it does.\",\n  \"tags\": [\"tui\"],\n  \"lang\": \"hsharp\",\n  \"author\": \"You\"\n}"
+
+fun sections_table() [
+    end h("table", "", [
+        head2("Section", "Purpose"),
+        row2(c("[package]"), ["name, version, description, authors, license, ", c("lang")]),
+        row2(c("[layout]"), ["where the code is. Auto-detected: ", c("src/"), " = H#, ", c("cmd/"), " + ", c("lib/"), " = HackerScript. Hacker Lang needs ", c("hl-entry"), "."]),
+        row2(c("[edition]"), ["H# only (", c("lang => h#"), "): ", c("edition"), " (default edition for files without ", c("using"), "), ", c("toolchain"), " (minimum ", c("h# --version"), "; newer is fine, older is an error)"]),
+        row2(c("[directories]"), ["every language: ", c("file"), " (", c("default"), " | ", c("home"), " | ", c("root"), " | ", c("project"), " — where libraries live) and ", c("before-build"), " (script or command run before the build)"]),
+        row2(c("[build]"), [c("target"), " (h# / hl / hs), ", c("platform"), ", ", c("link"), " (static), ", c("mem-mode"), ", ", c("flags")]),
+        row2(c("[lib]"), ["library output: hlib (default), so, a, obj"]),
+        row2(c("[default-build]"), [c("profile"), ", ", c("target"), ", ", c("platform"), ", ", c("emit"), ", ", c("run"), ", ", c("args"), ", ", c("before"), ", ", c("after")]),
+        row2(c("[dependencies]"), [c("*"), ", ", c("rev X"), ", ", c("git URL [rev]"), ", ", c("path DIR")]),
+        row2(c("[commands]"), ["custom commands, run as ", c("bit <name>"), " (extra args are appended or fill ", c("{args}"), ")"]),
+        row2(c("[hooks]"), [c("pre-build"), ", ", c("post-build")]),
+        row2(c("[workspace]"), [c("members"), " — the workspace root's ", c("cache/"), " is shared"])
+    ])
+]
+
+fun places_table() [
+    end h("table", "", [
+        row2(c("~/.hackeros/libs/<name>/<commit>/"), ["installed libraries (", c("current"), " → active commit)"]),
+        row2(c("~/.hackeros/bit/bit.lock"), ["what is installed, with checksums"]),
+        row2(c("<project>/cache/"), ["build outputs and links (no ", c("build/"), " directory — same idea as virus)"]),
+        row2(c("<project>/Bit.lock"), ["the commits + checksums your project resolved to — commit it"])
+    ])
+]
+
+fun main() [
+    head_setup("Docs — bit.io", "How to use bit, the package manager for H#, Hacker Lang and HackerScript.")
+    let main_el = page_shell("docs", "wrap page", true)
+    dom_add(main_el, [
+        h("h1", "", ["bit ", h("span", "grad", ["docs"])]),
+        h("p", "lead", ["bit is the package manager for H#, Hacker Lang and HackerScript. It is written 100% in H# and statically linked."]),
+
+        h("h2", "", ["Quick start"]),
+        snippet(QUICK_START),
+        h("p", "", ["A bare ", c("bit"), " reads ", c("Bit.hk"), ", installs the missing dependencies, builds with ", c("[default-build]"), " and, if you asked for it, runs the result."]),
+
+        h("h2", "", ["Bit.hk"]),
+        snippet(BIT_HK),
+        sections_table(),
+
+        h("h2", "", ["Where things live"]),
+        places_table(),
+
+        h("h2", "", ["Statically linked, checksummed"]),
+        h("p", "", ["Every library is built and linked statically; ", c("link => dynamic"), " and ", c("extern dynamic"), " are rejected. On install, bit hashes the library's files (", c("sha256"), " over the sorted per-file hashes, independent of install location) and stores the result in ", c("bit.lock"), ". ", c("bit verify"), " re-checks it, and a ", c("Bit.lock"), " pin that no longer matches fails the build instead of being trusted."]),
+
+        h("h2", "", ["Library pages on bit.io"]),
+        h("p", "", ["Every library has Overview (rendered README, examples, GitHub stats, the pinned revision, compatibility, dependencies and who depends on it), ", h("b", "", ["API"]), " (public ", c("pub fn"), " / ", c("pub struct"), " from the ", c(".h#"), " sources), ", h("b", "", ["Source"]), " (browse and search the code) and ", h("b", "", ["Versions"]), " (GitHub releases, with Bit.hk changes between them)."]),
+        h("p", "", [h("b", "", ["Verify checksum"]), " rebuilds the directory checksum from the files at the pinned revision, in your browser, and compares it with the one in the index. Pages read from GitHub's API only when you open a library; add a personal token in ", link("settings.html", "", ["Settings"]), " to raise the 60 requests/hour limit. Everything you open is saved in the browser, so it keeps working offline."]),
+
+        h("h2", "", ["Commands"]),
+        snippet(COMMANDS),
+
+        h("h2", "", ["Publishing a library"]),
+        h("p", "", ["There is no upload step. Run ", c("bit publish"), " in your library — it validates ", c("Bit.hk"), " and prints an index entry. Add it to ", link_out("https://github.com/HackerOS-Linux-System/bit/blob/main/index/repository.json", "", [c("index/repository.json")]), " and open a pull request; CI checks it before it lands."]),
+        snippet(INDEX_ENTRY)
+    ])
+    init_chrome()
+]
