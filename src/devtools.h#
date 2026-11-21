@@ -142,7 +142,7 @@ pub fn cmd_lint(p: project::Project, only: string, verbose: bool) -> int is
             let files: [string] = files_of(p, lang, only)
             let mut cmd: string = ""
             if lang == "hsharp" is
-                cmd = tool + " check" + quoted(files) + build::edition_flag(p) + " 2>&1"
+                cmd = tool + " check" + quoted(files) + build::edition_flag(p) + build::features_flag(p) + " 2>&1"
             else is
                 let e: string = if only != "" then only else if project::entry_for(p, lang, "bin") != "" then project::entry_for(p, lang, "bin") else project::entry_for(p, lang, "lib")
                 cmd = tool + " lint " + util::sq(e) + " 2>&1"
@@ -392,7 +392,7 @@ fn run_file_tests(p: project::Project, rel: string, filter: string, verbose: boo
     let out_bin: string = project::cache_build(p) + "/test/" + string_replace(rel, "/", "_")
     util::mkdir_p(util::dirname(out_bin))
     file_write(harness, harness_text(content, picked))
-    let rc: int = util::run(build::in_root(p, build::tool_for("hsharp") + " compile " + util::sq(harness) + " -o " + util::sq(out_bin) + build::edition_flag(p) +
+    let rc: int = util::run(build::in_root(p, build::tool_for("hsharp") + " compile " + util::sq(harness) + " -o " + util::sq(out_bin) + build::edition_flag(p) + build::features_flag(p) +
                                               (if verbose then "" else " >/dev/null 2>&1")))
     util::run("rm -f " + util::sq(harness))
     if rc != 0 is
