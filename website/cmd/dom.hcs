@@ -1,0 +1,90 @@
+fun by_id(id: Str) [
+    let e = document.getElementById(id)
+    if e == null [
+        panic("#" + id + " not found")
+    ]
+    end e
+]
+
+fun h(tag: Str, cls: Str, kids) [
+    let e = document.createElement(tag)
+    if cls != "" [
+        e.className = cls
+    ]
+    dom_add(e, kids)
+    end e
+]
+
+fun ha(tag: Str, attrs, kids) [
+    let e = document.createElement(tag)
+    let i = 0
+    while i + 1 < attrs.length [
+        let k = attrs[i]
+        if k == "class" [
+            e.className = attrs[i + 1]
+        ] else [
+            e.setAttribute(k, attrs[i + 1])
+        ]
+        i = i + 2
+    ]
+    dom_add(e, kids)
+    end e
+]
+
+!! Odnosnik <a> z href, klasa i opcjonalnie target=_blank.
+fun link(href: Str, cls: Str, kids) [
+    end ha("a", ["class", cls, "href", href], kids)
+]
+
+fun link_out(href: Str, cls: Str, kids) [
+    end ha("a", ["class", cls, "href", href, "target", "_blank", "rel", "noopener"], kids)
+]
+
+fun clear_el(e) [
+    e.replaceChildren()
+]
+
+fun muted(text: Str) [
+    end h("p", "muted", [text])
+]
+
+fun muted_small(text: Str) [
+    end h("p", "muted small", [text])
+]
+
+fun plural(n: Int, one: Str, many: Str) -> Str [
+    if n == 1 [
+        end one
+    ]
+    end many
+]
+
+fun reset_copy(b) [
+    b.textContent = b.hks_label
+]
+
+async fun on_copy_click(e) [
+    let b = e.currentTarget
+    let ok = await copy_text(b.hks_text)
+    if ok [
+        b.textContent = "Copied ✓"
+    ] else [
+        b.textContent = "Press Ctrl+C"
+    ]
+    setTimeout(reset_copy, 1400, b)
+]
+
+fun copy_button(text: Str, label: Str) [
+    let b = ha("button", ["class", "copy", "type", "button", "aria-label", "Copy: " + text], [label])
+    b.hks_text = text
+    b.hks_label = label
+    b.addEventListener("click", on_copy_click)
+    end b
+]
+
+fun on_off(cls_on: Bool, base: Str) -> Str [
+    if cls_on [
+        end base + " on"
+    ]
+    end base
+]
