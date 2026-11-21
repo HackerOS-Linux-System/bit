@@ -1,0 +1,80 @@
+const REPO_URL = "https://github.com/HackerOS-Linux-System/bit"
+
+fun meta_tag(name: Str, content: Str) [
+    let m = ha("meta", ["name", name, "content", content], [])
+    document.head.append(m)
+    end m
+]
+
+!! <head> ustawiany w czasie dzialania (kompilator nie wspiera bloku head { }).
+fun head_setup(title: Str, desc: Str) [
+    document.documentElement.setAttribute("lang", "en")
+    document.documentElement.setAttribute("data-theme", "light")
+    document.title = title
+    meta_tag("description", desc)
+    meta_tag("theme-color", "#ec4899")
+    document.head.append(ha("link", ["rel", "icon", "href", "images/icon.png", "type", "image/png"], []))
+]
+
+fun nav_item(href: Str, label: Str, active: Bool, settings: Bool) [
+    let a = ha("a", ["href", href], [label])
+    if active [
+        a.setAttribute("aria-current", "page")
+    ]
+    if settings [
+        a.setAttribute("data-settings-link", "")
+    ]
+    end a
+]
+
+fun build_header(active: Str) [
+    let links = h("nav", "nav-links", [
+        nav_item("index.html", "Libraries", active == "libraries", false),
+        nav_item("about.html", "Docs", active == "docs", false),
+        nav_item("settings.html", "Settings", active == "settings", true),
+        ha("a", ["href", REPO_URL, "rel", "noopener", "target", "_blank"], ["GitHub ↗"])
+    ])
+    links.setAttribute("aria-label", "Main")
+    let brand = ha("a", ["class", "brand", "href", "index.html"], [
+        ha("img", ["src", "images/icon.png", "alt", "", "width", "30", "height", "30"], []),
+        "bit.io"
+    ])
+    let toggle = ha("button", ["class", "icon-btn", "data-theme-toggle", "", "aria-label", "Toggle dark mode", "title", "Toggle dark mode"], ["◐"])
+    end h("header", "nav", [h("div", "wrap", [brand, links, h("span", "grow", []), toggle])])
+]
+
+fun build_footer(with_settings: Bool) [
+    let right = [link("about.html", "", ["Docs"]), " · "]
+    if with_settings [
+        right.push(link("settings.html", "", ["Settings"]))
+        right.push(" · ")
+    ]
+    right.push(link_out(REPO_URL, "", ["GitHub"]))
+    end h("footer", "site", [h("div", "wrap", [
+        h("span", "", ["bit — the package manager for H#, Hacker Lang and HackerScript."]),
+        h("span", "", right)
+    ])])
+]
+
+!! Sklada strone w #app i zwraca element <main>. `main_cls` np. "wrap page" albo "".
+fun page_shell(active: Str, main_cls: Str, with_settings: Bool) [
+    let root = app_root()
+    let main = ha("main", ["id", "main", "class", main_cls], [])
+    dom_add(root, ha("a", ["class", "skip", "href", "#main"], ["Skip to content"]))
+    dom_add(root, build_header(active))
+    dom_add(root, main)
+    dom_add(root, build_footer(with_settings))
+    end main
+]
+
+fun init_chrome() [
+    init_theme()
+    init_offline()
+    init_get_app()
+    sw_register()
+    if has_github_token() [
+        for a in dom_all(document, "[data-settings-link]") [
+            a.classList.add("has-token")
+        ]
+    ]
+]
