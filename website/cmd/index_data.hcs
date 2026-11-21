@@ -1,0 +1,173 @@
+const INDEX_URL = "https://raw.githubusercontent.com/HackerOS-Linux-System/bit/main/index/repository.json"
+
+struct LibEntry [
+    name: Str,
+    target: Str,
+    description: Str,
+    tags: List<Str>,
+    author: Str,
+    lang: Str,
+    rev: Str,
+    checksum: Str
+]
+
+struct IndexRes [
+    ok: Bool,
+    updated_at: Str,
+    libraries: List<LibEntry>,
+    error: Str
+]
+
+struct GithubTarget [
+    owner: Str,
+    repo: Str,
+    ref: Str,
+    dir: Str
+]
+
+!! Reczny indeks mial zbedne przecinki: usuwa je (poza napisami) przed parsowaniem.
+fun strip_trailing_commas(text: Str) -> Str [
+    let out = ""
+    let in_str = false
+    let i = 0
+    let n = text.length
+    while i < n [
+        let c = text[i]
+        if in_str [
+            out = out + c
+            if c == "\\" [
+                i = i + 1
+                if i < n [
+                    out = out + text[i]
+                ]
+            ] elif c == "\"" [
+                in_str = false
+            ]
+            i = i + 1
+            continue
+        ]
+        if c == "\"" [
+            in_str = true
+            out = out + c
+        ] elif c == "," [
+            let j = i + 1
+            while j < n and re_test("\\s", "", text[j]) [
+                j = j + 1
+            ]
+            if j >= n or (text[j] != "}" and text[j] != "]") [
+                out = out + c
+            ]
+        ] else [
+            out = out + c
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+fun parse_lenient(text: Str) [
+    end json_parse(strip_trailing_commas(text))
+]
+
+fun to_entry(raw) [
+    if not is_obj(raw) [
+        end null
+    ]
+    let name = js_str(raw, "name")
+    if name == "" [
+        end null
+    ]
+    let tags: List<Str> = []
+    for t in js_arr(raw, "tags") [
+        if is_str(t) [
+            tags.push(t)
+        ]
+    ]
+    let target = js_str(raw, "target")
+    if target == "" [
+        target = js_str(raw, "url")
+    ]
+    if target == "" [
+        target = js_str(raw, "git")
+    ]
+    let lang = normalize_lang(js_str(raw, "lang"))
+    if lang == "any" [
+        lang = lang_from_tags(tags)
+    ]
+    end LibEntry(name, target, js_str(raw, "description"), tags, js_str(raw, "author"), lang, js_str(raw, "rev"), js_str(raw, "checksum"))
+]
+
+const INDEX_CACHE_KEY = "index"
+
+!! Wdrozona kopia najpierw (ta sama domena), GitHub raw jako zapas; potem kopia z przegladarki.
+async fun load_index() -> IndexRes [
+    let last_error = "could not load the library index"
+    let sources = ["repository.json", INDEX_URL]
+    for url in sources [
+        let res = await http_nocache(url)
+        if res.status < 200 or res.status > 299 [
+            last_error = url + ": HTTP " + (res.status as Str)
+            continue
+        ]
+        let doc = parse_lenient(res.text)
+        if is_null(doc) [
+            last_error = url + ": invalid JSON"
+            continue
+        ]
+        let list = []
+        let updated = ""
+        if is_arr(doc) [
+            list = doc
+        ] else [
+            list = js_arr(doc, "libraries")
+            updated = js_str(doc, "updated_at")
+        ]
+        let libs: List<LibEntry> = []
+        for raw in list [
+            let e = to_entry(raw)
+            if not is_null(e) [
+                libs.push(e)
+            ]
+        ]
+        let sorted = sort_by_name(libs)
+        let index = js_set(js_set(js_new_obj(), "updatedAt", updated), "libraries", sorted)
+        cache_set(INDEX_CACHE_KEY, index, 0)
+        clear_stale("index")
+        end IndexRes(true, updated, sorted, "")
+    ]
+    let saved = cache_get_stale(INDEX_CACHE_KEY)
+    if not is_null(saved) and is_arr(saved.libraries) [
+        mark_stale("index", cache_age(INDEX_CACHE_KEY))
+        end IndexRes(true, js_str(saved, "updatedAt"), saved.libraries, "")
+    ]
+    end IndexRes(false, "", [], last_error)
+]
+
+!! `https://github.com/o/r(.git)` -> {o, r}; `.../tree/main/libs/x` -> ref "main", dir "libs/x".
+fun parse_github(url: Str) [
+    let m = re_match("^https:\\/\\/github\\.com\\/([^/\\s]+)\\/([^/\\s#?]+?)(?:\\.git)?(?:\\/tree\\/([^/\\s#?]+)(?:\\/([^\\s#?]*?))?)?\\/?(?:[#?].*)?$", "", url.trim())
+    if is_null(m) or m[1] == "" or m[2] == "" [
+        end null
+    ]
+    let ref = ""
+    if m[3] != "" [
+        ref = dec_uri(m[3])
+    ]
+    let parts: List<Str> = []
+    for p in m[4].split("/") [
+        if p != "" [
+            parts.push(dec_uri(p))
+        ]
+    ]
+    let bad = false
+    for p in parts [
+        if p == ".." or p == "." [
+            bad = true
+        ]
+    ]
+    let dir = ""
+    if parts.length > 0 and not bad [
+        dir = parts.join("/")
+    ]
+    end GithubTarget(m[1], m[2], ref, dir)
+]
