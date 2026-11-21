@@ -1,0 +1,270 @@
+let vs_box = null
+let vs_entry = null
+let vs_repo = null
+let vs_started = false
+
+fun gh_blank(url: Str, cls: Str, kids) [
+    end ha("a", ["class", cls, "href", safe_url(url), "target", "_blank", "rel", "noopener"], kids)
+]
+
+fun on_notes_toggle(e) [
+    let d = e.currentTarget
+    if not d.open or d.hks_drawn [
+        end 0
+    ]
+    d.hks_drawn = true
+    let r = d.hks_release
+    let md = d.hks_md
+    md.append(render_markdown(r.body, Repo(d.hks_repo.owner, d.hks_repo.repo, r.tag, "")))
+    decorate_code(md)
+]
+
+fun diff_class(t: Str) -> Str [
+    if t == "+" [
+        end "diff-add"
+    ]
+    if t == "-" [
+        end "diff-del"
+    ]
+    if t == "…" [
+        end "diff-gap"
+    ]
+    end "diff-ctx"
+]
+
+async fun on_diff_toggle(e) [
+    let d = e.currentTarget
+    if not d.open or d.hks_loaded [
+        end 0
+    ]
+    d.hks_loaded = true
+    let body = d.hks_body
+    let repo = d.hks_repo
+    dom_set(body, [muted_small("Reading both manifests…")])
+    let a = await load_manifest(Repo(repo.owner, repo.repo, d.hks_prev.tag, repo.dir))
+    let b = await load_manifest(Repo(repo.owner, repo.repo, d.hks_cur.tag, repo.dir))
+    if not is_null(a.err) or not is_null(b.err) [
+        dom_set(body, [muted_small("Couldn't read the manifests (offline?).")])
+        end 0
+    ]
+    if is_null(a.value) or is_null(b.value) [
+        dom_set(body, [muted_small("No Bit.hk in one of these versions.")])
+        end 0
+    ]
+    let summary = manifest_changes(a.value.doc, b.value.doc)
+    let lines = diff_lines(a.value.text.split("\n"), b.value.text.split("\n"), 2)
+    let pre = h("pre", "diff", [])
+    let all_ctx = true
+    if not is_null(lines) [
+        for l in lines [
+            if l.t != " " [
+                all_ctx = false
+            ]
+        ]
+    ]
+    if is_null(lines) or all_ctx [
+        if is_null(lines) [
+            pre.append("Bit.hk is too large to diff here.")
+        ] else [
+            pre.append("No changes to Bit.hk.")
+        ]
+    ] else [
+        for l in lines [
+            let text = l.t + " " + l.s
+            if l.t == "…" [
+                text = "  …"
+            ]
+            pre.append(h("span", diff_class(l.t), [text]))
+        ]
+    ]
+    let kids = []
+    if summary.length > 0 [
+        let items = []
+        for x in summary [
+            items.push(h("li", "", [x]))
+        ]
+        kids.push(h("ul", "deps", items))
+    ]
+    kids.push(pre)
+    dom_set(body, kids)
+]
+
+fun manifest_diff(repo: Repo, prev, cur) [
+    let d = h("details", "ver-notes ver-diff", [h("summary", "", ["Manifest changes since " + prev.tag])])
+    let body = h("div", "", [])
+    d.append(body)
+    d.hks_body = body
+    d.hks_repo = repo
+    d.hks_prev = prev
+    d.hks_cur = cur
+    d.hks_loaded = false
+    d.addEventListener("toggle", on_diff_toggle)
+    end d
+]
+
+fun release_row(entry, repo: Repo, r, latest: Bool, prev) [
+    let pinned = entry.rev != "" and entry.rev == r.tag
+    let viewing = repo.ref == r.tag
+    let title = ""
+    if r.name != "" and r.name != r.tag [
+        title = r.name
+    ]
+    let badges = []
+    if latest [
+        badges.push(h("span", "vbadge is-latest", ["Latest"]))
+    ]
+    if r.prerelease [
+        badges.push(h("span", "vbadge is-pre", ["Pre-release"]))
+    ]
+    if r.draft [
+        badges.push(h("span", "vbadge is-pre", ["Draft"]))
+    ]
+    if pinned [
+        badges.push(ha("span", ["class", "vbadge is-pin", "title", "The index pins this version"], ["Pinned in index"]))
+    ]
+    if viewing [
+        badges.push(h("span", "vbadge", ["Viewing"]))
+    ]
+    let bit_hk = "-> " + entry.name + " => rev " + r.tag
+    let actions = h("div", "ver-actions", [
+        link("lib.html?name=" + enc(entry.name) + "&ref=" + enc(r.tag) + "#source", "copy", ["Browse source"]),
+        gh_blank(r.url, "copy", ["GitHub ↗"]),
+        copy_button(bit_hk, "Copy Bit.hk line")
+    ])
+    if not is_null(prev) [
+        actions.insertBefore(gh_blank("https://github.com/" + repo.owner + "/" + repo.repo + "/compare/" + enc(prev.tag) + "..." + enc(r.tag), "copy", ["Compare with " + prev.tag + " ↗"]), actions.lastChild)
+    ]
+    let meta: List<Str> = []
+    if title != "" [
+        meta.push(title)
+    ]
+    if r.date != "" [
+        let fd = fmt_date(r.date)
+        if fd != "" [
+            meta.push(fd)
+        ]
+    ]
+    let head_kids = [h("h3", "", [gh_blank(r.url, "", [r.tag])])]
+    for b in badges [
+        head_kids.push(b)
+    ]
+    head_kids.push(h("span", "muted small ver-date", [meta.join(" · ")]))
+    let el = h("li", "ver", [h("div", "ver-head", head_kids), actions])
+    if r.body.trim() != "" [
+        let d = h("details", "ver-notes", [h("summary", "", ["Release notes"])])
+        let md = h("div", "markdown-body", [])
+        d.hks_drawn = false
+        d.hks_release = r
+        d.hks_md = md
+        d.hks_repo = repo
+        d.addEventListener("toggle", on_notes_toggle)
+        d.append(md)
+        el.append(d)
+    ]
+    if not is_null(prev) [
+        el.append(manifest_diff(repo, prev, r))
+    ]
+    if r.assets.length > 0 [
+        let items = []
+        for a in r.assets [
+            let name_node = a.name
+            if a.url != "" [
+                name_node = ha("a", ["href", safe_url(a.url), "rel", "noopener"], [a.name])
+            ]
+            items.push(h("li", "", [name_node, h("span", "muted small", ["  " + format_bytes(a.size) + " · " + fmt_int(a.downloads) + plural(a.downloads, " download", " downloads")])]))
+        ]
+        el.append(h("ul", "ver-assets", items))
+    ]
+    end el
+]
+
+fun on_versions_retry(e) [
+    vs_run()
+]
+
+async fun vs_run() [
+    vs_started = true
+    dom_set(vs_box, [muted("Loading versions…")])
+    let repo = vs_repo
+    let res = await load_releases(repo)
+    if not is_null(res.err) [
+        let limited = res.err.limited
+        let msg = "Couldn't load releases. If you're offline, open this tab once while online to save it."
+        if limited [
+            msg = res.err.message
+        ]
+        let retry = ha("button", ["class", "retry-btn", "type", "button"], ["Try again"])
+        retry.addEventListener("click", on_versions_retry)
+        let acts = [retry]
+        if limited [
+            acts.push(link("settings.html", "retry-btn", ["Add token"]))
+        ]
+        dom_set(vs_box, [muted(msg), h("div", "lang-actions", acts)])
+        end 0
+    ]
+    let list = []
+    if not is_null(res.value) [
+        list = res.value
+    ]
+    if list.length == 0 [
+        dom_set(vs_box, [
+            h("p", "empty-note", ["This repository has no releases or tags yet. The index installs it from the default branch."]),
+            gh_blank("https://github.com/" + repo.owner + "/" + repo.repo + "/releases", "", ["Open releases on GitHub ↗"])
+        ])
+        end 0
+    ]
+    let tag_only = true
+    let first_stable = -1
+    let idx = 0
+    for r in list [
+        if not r.tag_only [
+            tag_only = false
+        ]
+        if first_stable == -1 and not r.prerelease and not r.draft [
+            first_stable = idx
+        ]
+        idx = idx + 1
+    ]
+    if first_stable == -1 [
+        first_stable = 0
+    ]
+    let summary = (list.length as Str) + " "
+    if tag_only [
+        summary = summary + plural(list.length, "tag", "tags") + " (no GitHub releases published — showing tags)"
+    ] else [
+        summary = summary + plural(list.length, "release", "releases")
+    ]
+    if res.stale [
+        summary = summary + " · saved copy (" + format_age(res.age) + ")"
+    ]
+    let rows = []
+    idx = 0
+    for r in list [
+        let prev = null
+        if idx + 1 < list.length [
+            prev = list[idx + 1]
+        ]
+        rows.push(release_row(vs_entry, repo, r, idx == first_stable, prev))
+        idx = idx + 1
+    ]
+    let kids = [muted_small(summary), h("ol", "versions", rows)]
+    if list.length >= 50 [
+        kids.push(h("p", "muted small", ["Showing the 50 most recent. ", gh_blank("https://github.com/" + repo.owner + "/" + repo.repo + "/releases", "", ["All releases on GitHub ↗"])]))
+    ]
+    dom_set(vs_box, kids)
+]
+
+fun mount_versions(panel, entry, repo: Repo) [
+    vs_entry = entry
+    vs_repo = repo
+    vs_started = false
+    vs_box = h("div", "", [muted("Loading versions…")])
+    panel.append(vs_box)
+]
+
+!! Pierwsze wejscie w zakladke ladujemy dopiero na zadanie.
+fun versions_load() [
+    if not vs_started [
+        vs_run()
+    ]
+]
