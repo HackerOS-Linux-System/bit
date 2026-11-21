@@ -1,0 +1,33 @@
+const THEME_KEY = "bitio:theme"
+
+fun apply_theme(theme: Str) [
+    document.documentElement.setAttribute("data-theme", theme)
+]
+
+fun on_theme_toggle(e) [
+    let cur = document.documentElement.getAttribute("data-theme")
+    let next = "dark"
+    if cur == "dark" [
+        next = "light"
+    ]
+    apply_theme(next)
+    ls_set(THEME_KEY, next)
+]
+
+fun init_theme() [
+    let stored = ls_get(THEME_KEY)
+    let prefers_dark = false
+    if not is_null(window.matchMedia) [
+        prefers_dark = window.matchMedia("(prefers-color-scheme: dark)").matches
+    ]
+    if stored == "light" or stored == "dark" [
+        apply_theme(stored)
+    ] elif prefers_dark [
+        apply_theme("dark")
+    ] else [
+        apply_theme("light")
+    ]
+    for btn in dom_all(document, "[data-theme-toggle]") [
+        btn.addEventListener("click", on_theme_toggle)
+    ]
+]
