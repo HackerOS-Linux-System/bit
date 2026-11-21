@@ -1,0 +1,1021 @@
+struct Token [
+    kind: Str,
+    text: Str
+]
+
+struct CommentRule [
+    start: Str,
+    stop_at: Str,
+    has_end: Bool,
+    kind: Str,
+    not_followed: Str
+]
+
+struct CodeCfg [
+    comments: List<CommentRule>,
+    quotes: Str,
+    backtick: Bool,
+    char_literal: Bool,
+    escape: Str,
+    kw: Any,
+    consts: Any,
+    types: Any,
+    capitals: Bool,
+    fn_def: Any,
+    type_def: Any,
+    attrs: List<Str>,
+    calls: Bool,
+    ops: Str,
+    num_re: Str,
+    hook: Str
+]
+
+const RE_NUM = "0[xX][0-9a-fA-F_]+|0[bB][01_]+|\\d[\\d_]*(?:\\.\\d[\\d_]*)?(?:[eE][+-]?\\d+)?"
+const RE_NUM_SUFFIX = "(?:[iu](?:8|16|32|64|128|size)|f32|f64)\\b"
+const RE_CHAR_LIT = "'(?:\\\\(?:x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|[^\\n])|[^'\\\\\\n])'"
+const RE_IDENT = "[A-Za-z_][A-Za-z0-9_]*"
+
+!! Dolacza token; sasiednie tokeny tego samego rodzaju sa scalane.
+fun out_push(out, kind: Str, text: Str) [
+    if text == "" [
+        end 0
+    ]
+    let n = out.length
+    if n > 0 and out[n - 1].kind == kind [
+        out[n - 1].text = out[n - 1].text + text
+    ] else [
+        out.push(Token(kind, text))
+    ]
+]
+
+fun is_ident_char(c: Str) -> Bool [
+    end c != "" and re_test("[A-Za-z0-9_]", "", c)
+]
+
+fun cmt(start: Str, kind: Str) -> CommentRule [
+    end CommentRule(start, "", false, kind, "")
+]
+
+fun cmt_to(start: Str, finish: Str, kind: Str) -> CommentRule [
+    end CommentRule(start, finish, true, kind, "")
+]
+
+fun cmt_nf(start: Str, kind: Str, nf: Str) -> CommentRule [
+    end CommentRule(start, "", false, kind, nf)
+]
+
+fun default_cfg() -> CodeCfg [
+    end CodeCfg([], "\"'", false, false, "\\\\[^\\n]", js_new_obj(), word_set("true false null nil None True False undefined"), js_new_obj(), false, word_set("fn func function def"), word_set("struct enum class trait interface type"), [], false, "->|=>|::|&&|\\|\\||==|!=|<=|>=|[+\\-*/%<>=!&|^~?]", RE_NUM, "")
+]
+
+!! Wywolanie hook-a HackerScript: zwraca nowy indeks albo -1.
+fun hcs_hook(text: Str, i: Int, out, prev: Str) -> Int [
+    let c = text[i]
+    if c == "<" and (prev == "get" or prev == "use" or prev == "include" or prev == "using") [
+        let m = re_sticky("<[^>\\n]*>", text, i)
+        if not is_null(m) [
+            out_push(out, "mod", m[0])
+            end i + m[0].length
+        ]
+    ]
+    if c == "{" and prev == "native" [
+        let m = re_sticky("\\{[^}\\n]*\\}", text, i)
+        if not is_null(m) [
+            out_push(out, "type", m[0])
+            end i + m[0].length
+        ]
+    ]
+    if c == "$" and text.charAt(i + 1) == " " [
+        let eol = text.indexOf("\n", i)
+        let stop = text.length
+        if eol != -1 [
+            stop = eol
+        ]
+        let line = text.slice(i, stop)
+        let close = line.indexOf(" $", 1)
+        if close > 0 [
+            out_push(out, "op", "$")
+            out_push(out, "str", line.slice(1, close + 1))
+            out_push(out, "op", "$")
+            end i + close + 2
+        ]
+    ]
+    end -1
+]
+
+fun lex_code(text: Str, cfg: CodeCfg) -> List<Token> [
+    let out: List<Token> = []
+    let n = text.length
+    let i = 0
+    let prev = ""
+    while i < n [
+        let c = text[i]
+        let matched = false
+        for rule in cfg.comments [
+            if matched [
+                continue
+            ]
+            if not text.startsWith(rule.start, i) [
+                continue
+            ]
+            if rule.not_followed != "" and text.charAt(i + rule.start.length) == rule.not_followed [
+                continue
+            ]
+            let stop = n
+            if not rule.has_end [
+                let eol = text.indexOf("\n", i)
+                if eol != -1 [
+                    stop = eol
+                ]
+            ] else [
+                let close = text.indexOf(rule.stop_at, i + rule.start.length)
+                if close != -1 [
+                    stop = close + rule.stop_at.length
+                ]
+            ]
+            out_push(out, rule.kind, text.slice(i, stop))
+            i = stop
+            matched = true
+        ]
+        if matched [
+            prev = ""
+            continue
+        ]
+        if cfg.hook == "hcs" [
+            let ni = hcs_hook(text, i, out, prev)
+            if ni >= 0 [
+                i = ni
+                prev = ""
+                continue
+            ]
+        ]
+        if cfg.quotes.includes(c) [
+            if c == "'" and cfg.char_literal [
+                let m = re_sticky(RE_CHAR_LIT, text, i)
+                if not is_null(m) [
+                    out_push(out, "str", m[0])
+                    i = i + m[0].length
+                    prev = ""
+                    continue
+                ]
+                out_push(out, "", c)
+                i = i + 1
+                prev = ""
+                continue
+            ]
+            out_push(out, "str", c)
+            let j = i + 1
+            while j < n and text[j] != c and text[j] != "\n" [
+                if text[j] == "\\" [
+                    let m = re_sticky(cfg.escape, text, j)
+                    if not is_null(m) [
+                        out_push(out, "esc", m[0])
+                        j = j + m[0].length
+                        continue
+                    ]
+                    out_push(out, "str", text.slice(j, j + 2))
+                    j = j + 2
+                    continue
+                ]
+                let k = j
+                while k < n and text[k] != c and text[k] != "\n" and text[k] != "\\" [
+                    k = k + 1
+                ]
+                out_push(out, "str", text.slice(j, k))
+                j = k
+            ]
+            if j < n and text[j] == c [
+                out_push(out, "str", c)
+                j = j + 1
+            ]
+            i = j
+            prev = ""
+            continue
+        ]
+        if c == "`" and cfg.backtick [
+            let j = i + 1
+            while j < n and text[j] != "`" [
+                if text[j] == "\\" [
+                    j = j + 1
+                ]
+                j = j + 1
+            ]
+            let e = Math.min(j + 1, n)
+            out_push(out, "str", text.slice(i, e))
+            i = e
+            prev = ""
+            continue
+        ]
+        let attr = null
+        for re in cfg.attrs [
+            if is_null(attr) [
+                attr = re_sticky(re, text, i)
+            ]
+        ]
+        if not is_null(attr) [
+            out_push(out, "attr", attr[0])
+            i = i + attr[0].length
+            prev = ""
+            continue
+        ]
+        if c >= "0" and c <= "9" and not is_ident_char(text.charAt(i - 1)) [
+            let m = re_sticky(cfg.num_re, text, i)
+            if not is_null(m) [
+                let len = m[0].length
+                let suf = re_sticky(RE_NUM_SUFFIX, text, i + len)
+                if not is_null(suf) [
+                    len = len + suf[0].length
+                ]
+                out_push(out, "num", text.slice(i, i + len))
+                i = i + len
+                prev = ""
+                continue
+            ]
+        ]
+        if re_test("[A-Za-z_]", "", c) [
+            let w = re_sticky(RE_IDENT, text, i)[0]
+            let next = text.charAt(i + w.length)
+            let kind = ""
+            if js_has(cfg.fn_def, prev) [
+                kind = "fn"
+            ] elif js_has(cfg.type_def, prev) [
+                kind = "type"
+            ] elif js_has(cfg.kw, w) [
+                kind = "kw"
+            ] elif js_has(cfg.consts, w) [
+                kind = "const"
+            ] elif js_has(cfg.types, w) [
+                kind = "type"
+            ] elif cfg.capitals and re_test("^[A-Z][A-Z0-9_]+$", "", w) [
+                kind = "const"
+            ] elif cfg.capitals and re_test("^[A-Z]", "", w) [
+                kind = "type"
+            ] elif cfg.calls and (next == "(" or (next == " " and text.charAt(i + w.length + 1) == "(")) [
+                kind = "fn"
+            ]
+            out_push(out, kind, w)
+            i = i + w.length
+            prev = w
+            continue
+        ]
+        if c == " " or c == "\t" or c == "\n" or c == "\r" [
+            out_push(out, "", c)
+            i = i + 1
+            continue
+        ]
+        let op = re_sticky(cfg.ops, text, i)
+        if not is_null(op) [
+            out_push(out, "op", op[0])
+            i = i + op[0].length
+        ] else [
+            out_push(out, "", c)
+            i = i + 1
+        ]
+        prev = ""
+    ]
+    end out
+]
+
+!! ---- konfiguracje jezykow ----
+fun cfg_hsharp() -> CodeCfg [
+    let c = default_cfg()
+    c.comments = [cmt_nf("///", "doc", "/"), cmt(";;", "com"), cmt_to("//", "\\\\", "com"), cmt_nf("#", "com", "[")]
+    c.char_literal = true
+    c.escape = "\\\\(?:x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|u\\{[0-9a-fA-F]+\\}|[^\\n])"
+    c.kw = word_set("if is then else elsif end match while for in loop do break continue return unsafe async await fn let mut struct enum trait impl pub extern mod use from as new self type arena manual using write const")
+    c.consts = word_set("true false nil")
+    c.types = word_set("int uint i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 bool string bytes void any")
+    c.capitals = true
+    c.fn_def = word_set("fn")
+    c.type_def = word_set("struct enum trait impl")
+    c.attrs = ["@[A-Za-z_][A-Za-z0-9_]*", "#\\[[^\\]\\n]*\\]"]
+    c.calls = true
+    c.ops = "->|=>|::|\\.\\.=?|[+\\-*/%]=|==|!=|<=|>=|&&|\\|\\||[+\\-*/%<>=!?&|^~]"
+    end c
+]
+
+fun cfg_hackerscript() -> CodeCfg [
+    let c = default_cfg()
+    c.comments = [cmt("!!!", "doc"), cmt("!!", "com"), cmt_to("!>", "<!", "com")]
+    c.escape = "\\\\[ntr\\\\\"'0e]"
+    c.kw = word_set("fun let const if else elif while for in return end get import using direct manual struct enum match break continue gc pub self and or not as impl include native region use async await spawn style")
+    c.consts = word_set("true false null")
+    c.types = word_set("Int Float Str Bool List Dict Option Result Self Some None Ok Err")
+    c.capitals = true
+    c.fn_def = word_set("fun")
+    c.type_def = word_set("struct enum impl")
+    c.attrs = ["@[A-Za-z_][A-Za-z0-9_]*"]
+    c.calls = true
+    c.ops = "->|::|&&|\\|\\||[+\\-*/%]=|==|!=|<=|>=|[+\\-*/%<>=!&|^~]"
+    c.hook = "hcs"
+    end c
+]
+
+const C_LIKE_WORDS = "if else for while do switch case break continue return fn func function let var const mut static struct enum union impl trait type interface class new delete import export from use using mod pub public private protected extends implements package namespace async await yield try catch finally throw throws match in as is not and or void int float double bool char string self this super extern unsafe where loop default"
+const SCRIPT_WORDS = "if elif else fi then for while do done case esac in function return break continue local export source import set let end begin until unless and or not def class"
+
+fun cfg_family(fam: Str) [
+    let c = default_cfg()
+    if fam == "c" [
+        c.comments = [cmt("//", "com"), cmt_to("/*", "*/", "com")]
+        c.backtick = true
+        c.kw = word_set(C_LIKE_WORDS)
+    ] elif fam == "hash" [
+        c.comments = [cmt("#", "com")]
+        c.kw = word_set(SCRIPT_WORDS)
+    ] elif fam == "lua" [
+        c.comments = [cmt_to("--[[", "]]", "com"), cmt("--", "com")]
+        c.kw = word_set(SCRIPT_WORDS)
+    ] elif fam == "sql" [
+        c.comments = [cmt("--", "com"), cmt_to("/*", "*/", "com")]
+        c.kw = word_set("select from where insert update delete create table join on group by order limit and or not null as into values set")
+    ] elif fam == "html" [
+        c.comments = [cmt_to("<!--", "-->", "com")]
+        c.consts = js_new_obj()
+        c.ops = "[<>/=]"
+    ] else [
+        end null
+    ]
+    end c
+]
+
+!! ---- Hacker Lang (.hl) ----
+const HL_IDENT = "[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*"
+const HL_PATH = "(?:~|\\.{1,2})?\\/[A-Za-z0-9_.\\-/*~]*|\\.{1,2}(?=[\\s/]|$)"
+const HL_FLAG = "--?[A-Za-z][A-Za-z0-9_-]*(?:=[^\\s\"']*)?"
+let hl_in_export = false
+
+fun hl_cmd_prefixes() -> List<Str> [
+    end ["^->", "^>>", "->>", "^>", "->", "/>", ">>", ">", "&"]
+]
+
+!! `"...@var...\n..."`: napis + zmienne i escape'y w srodku.
+fun hl_string(out, body: Str) [
+    out_push(out, "str", "\"")
+    let k = 1
+    while k < body.length [
+        let ch = body[k]
+        if ch == "\\" and k + 1 < body.length [
+            out_push(out, "esc", body.slice(k, k + 2))
+            k = k + 2
+        ] elif ch == "@" and is_ident_char(body.charAt(k + 1)) [
+            let m = re_sticky(HL_IDENT, body, k + 1)
+            out_push(out, "var", "@" + m[0])
+            k = k + 1 + m[0].length
+        ] elif ch == "$" [
+            let m = re_sticky("\\$(?:\\{[^}]*\\}|[A-Za-z_][A-Za-z0-9_]*)", body, k)
+            if not is_null(m) [
+                out_push(out, "var", m[0])
+                k = k + m[0].length
+            ] else [
+                out_push(out, "str", ch)
+                k = k + 1
+            ]
+        ] else [
+            let e = k + 1
+            while e < body.length and body[e] != "\\" and body[e] != "@" and body[e] != "$" [
+                e = e + 1
+            ]
+            out_push(out, "str", body.slice(k, e))
+            k = e
+        ]
+    ]
+]
+
+!! Napisy, @zmienne, liczby, flagi, pipe'y w jednej linii Hacker Lang. mode: "expr" | "shell" | "print".
+fun hl_inline(out, s: Str, mode: Str) [
+    let n = s.length
+    let i = 0
+    let word_start = mode == "shell"
+    while i < n [
+        let c = s[i]
+        if c == "@" and is_ident_char(s.charAt(i + 1)) [
+            let m = re_sticky(HL_IDENT, s, i + 1)
+            out_push(out, "var", "@" + m[0])
+            i = i + 1 + m[0].length
+            word_start = false
+            continue
+        ]
+        if mode == "print" [
+            let j = i + 1
+            while j < n and s[j] != "@" [
+                j = j + 1
+            ]
+            out_push(out, "", s.slice(i, j))
+            i = j
+            continue
+        ]
+        if c == "\"" or (c == "'" and mode == "shell") [
+            let j = i + 1
+            while j < n and s[j] != c [
+                if s[j] == "\\" [
+                    j = j + 1
+                ]
+                j = j + 1
+            ]
+            let e = Math.min(j + 1, n)
+            if c == "\"" [
+                hl_string(out, s.slice(i, e))
+            ] else [
+                out_push(out, "str", s.slice(i, e))
+            ]
+            i = e
+            word_start = false
+            continue
+        ]
+        if c == "|" and s.charAt(i + 1) == ">" [
+            out_push(out, "op", "|>")
+            i = i + 2
+            continue
+        ]
+        if c == "$" [
+            if s.charAt(i + 1) == "(" [
+                out_push(out, "op", "$(")
+                i = i + 2
+                word_start = mode == "shell"
+                continue
+            ]
+            let m = re_sticky("\\$(?:\\{[^}]*\\}|[A-Za-z_][A-Za-z0-9_]*|[0-9?#$!@*])", s, i)
+            if not is_null(m) [
+                out_push(out, "var", m[0])
+                i = i + m[0].length
+                word_start = false
+                continue
+            ]
+        ]
+        if c == " " or c == "\t" [
+            out_push(out, "", c)
+            i = i + 1
+            continue
+        ]
+        if mode == "shell" and c == "-" and (i == 0 or s[i - 1] == " " or s[i - 1] == "\t") [
+            let m = re_sticky(HL_FLAG, s, i)
+            if not is_null(m) [
+                out_push(out, "attr", m[0])
+                i = i + m[0].length
+                word_start = false
+                continue
+            ]
+        ]
+        if mode == "shell" and (c == "/" or c == "~" or c == ".") [
+            let m = re_sticky(HL_PATH, s, i)
+            if not is_null(m) and m[0].length > 0 [
+                out_push(out, "mod", m[0])
+                i = i + m[0].length
+                word_start = false
+                continue
+            ]
+        ]
+        if c >= "0" and c <= "9" and not is_ident_char(s.charAt(i - 1)) and s.charAt(i - 1) != "." and s.charAt(i - 1) != "-" [
+            let m = re_sticky("\\d+(?:\\.\\d+)?(?![A-Za-z_])", s, i)
+            if not is_null(m) [
+                out_push(out, "num", m[0])
+                i = i + m[0].length
+                word_start = false
+                continue
+            ]
+        ]
+        if re_test("[A-Za-z_]", "", c) [
+            let re = RE_IDENT
+            if mode == "shell" [
+                re = "[A-Za-z_][A-Za-z0-9_.\\-/:=,]*"
+            ]
+            let w = re_sticky(re, s, i)[0]
+            let kind = ""
+            if w == "true" or w == "false" [
+                kind = "const"
+            ] elif mode == "shell" and word_start [
+                kind = "fn"
+            ] elif mode == "expr" and (w == "in" or w == "and" or w == "or" or w == "not") [
+                kind = "kw"
+            ]
+            out_push(out, kind, w)
+            i = i + w.length
+            word_start = false
+            continue
+        ]
+        let op = re_sticky("&&|\\|\\||>>|==|!=|<=|>=|->|[|;<>=!+\\-*/%()&]", s, i)
+        if not is_null(op) [
+            out_push(out, "op", op[0])
+            i = i + op[0].length
+            if mode == "shell" and (op[0] == "|" or op[0] == "&&" or op[0] == "||" or op[0] == ";" or op[0] == "(") [
+                word_start = true
+            ]
+            continue
+        ]
+        out_push(out, "", c)
+        i = i + 1
+    ]
+]
+
+fun hl_name(s: Str, at: Int) -> Str [
+    let m = re_sticky(HL_IDENT, s, at)
+    if is_null(m) [
+        end ""
+    ]
+    end m[0]
+]
+
+!! `<main/colors> | detail` -> sciezka modulu + opis.
+fun import_tail(out, s: Str) [
+    let bar = s.indexOf("|")
+    let spec = s
+    if bar != -1 [
+        spec = s.slice(0, bar)
+    ]
+    let trimmed = spec.trimEnd()
+    out_push(out, "mod", trimmed)
+    out_push(out, "", spec.slice(trimmed.length))
+    if bar != -1 [
+        out_push(out, "op", "|")
+        out_push(out, "str", s.slice(bar + 1))
+    ]
+]
+
+fun skip_ws(s: Str, from: Int) -> Int [
+    end from + re_match("^[ \\t]*", "", s.slice(from))[0].length
+]
+
+!! Jedna linia Hacker Lang (bez wciecia).
+fun hl_line(out, s: Str) [
+    if hl_in_export [
+        if s.startsWith("]") [
+            out_push(out, "op", "]")
+            out_push(out, "", s.slice(1))
+            hl_in_export = false
+            end 0
+        ]
+        if s.startsWith(";;;") [
+            out_push(out, "doc", s)
+            end 0
+        ]
+        if s.startsWith(";;") [
+            out_push(out, "com", s)
+            end 0
+        ]
+        if s.startsWith("|") and s.charAt(1) != ">" and s.charAt(1) != "|" [
+            out_push(out, "op", "|")
+            hl_inline(out, s.slice(1), "expr")
+            end 0
+        ]
+    ]
+    if s.startsWith("#!") [
+        out_push(out, "com", s)
+        end 0
+    ]
+    if s.startsWith("///") or s.startsWith(";;;") [
+        out_push(out, "doc", s)
+        end 0
+    ]
+    if s.startsWith(";;") [
+        out_push(out, "com", s)
+        end 0
+    ]
+    if s.startsWith("//") [
+        out_push(out, "attr", "//")
+        let p = skip_ws(s, 2)
+        out_push(out, "", s.slice(2, p))
+        let lb = s.indexOf("[", p)
+        let stop = s.length
+        if lb != -1 [
+            stop = lb
+        ]
+        let name = s.slice(p, stop)
+        let trimmed = name.trimEnd()
+        out_push(out, "mod", trimmed)
+        out_push(out, "", name.slice(trimmed.length))
+        if lb != -1 [
+            out_push(out, "str", s.slice(lb))
+        ]
+        end 0
+    ]
+    if s.startsWith("#") [
+        out_push(out, "kw", "#")
+        let p = skip_ws(s, 1)
+        out_push(out, "", s.slice(1, p))
+        import_tail(out, s.slice(p))
+        end 0
+    ]
+    if s.startsWith("<<") or s.startsWith("<*") [
+        out_push(out, "kw", s.slice(0, 2))
+        let p = skip_ws(s, 2)
+        out_push(out, "", s.slice(2, p))
+        import_tail(out, s.slice(p))
+        end 0
+    ]
+    if s.startsWith("~>") [
+        out_push(out, "kw", "~>")
+        hl_inline(out, s.slice(2), "print")
+        end 0
+    ]
+    if s.startsWith("$(") [
+        out_push(out, "kw", "$(")
+        let depth = 1
+        let j = 2
+        while j < s.length and depth > 0 [
+            if s[j] == "(" [
+                depth = depth + 1
+            ] elif s[j] == ")" [
+                depth = depth - 1
+            ]
+            j = j + 1
+        ]
+        let close = j
+        if depth == 0 [
+            close = j - 1
+        ]
+        hl_inline(out, s.slice(2, close), "expr")
+        if depth == 0 [
+            out_push(out, "kw", ")")
+        ]
+        hl_inline(out, s.slice(j), "expr")
+        end 0
+    ]
+    if s.startsWith(":*") [
+        out_push(out, "kw", ":*")
+        let m = re_match("^(\\s*)([A-Za-z0-9_-]*)(\\s*)(def\\b)?(.*)$", "", s.slice(2))
+        out_push(out, "", m[1])
+        out_push(out, "fn", m[2])
+        out_push(out, "", m[3])
+        out_push(out, "kw", m[4])
+        out_push(out, "", m[5])
+        end 0
+    ]
+    if s.startsWith("::") [
+        out_push(out, "kw", "::")
+        let p = skip_ws(s, 2)
+        out_push(out, "", s.slice(2, p))
+        let name = hl_name(s, p)
+        out_push(out, "fn", name)
+        p = p + name.length
+        let tail = s.slice(p)
+        let arena = re_match("^(\\s*)(<[^>\\n]*>)?(\\s*)(def)\\b(.*)$", "", tail)
+        if not is_null(arena) [
+            out_push(out, "", arena[1])
+            out_push(out, "num", arena[2])
+            out_push(out, "", arena[3])
+            out_push(out, "kw", arena[4])
+            out_push(out, "com", arena[5])
+        ] else [
+            hl_inline(out, tail, "shell")
+        ]
+        end 0
+    ]
+    let fdef = re_match("^:(\\s*)([A-Za-z0-9_-]+)(\\s+)def\\b(.*)$", "", s)
+    if not is_null(fdef) [
+        out_push(out, "kw", ":")
+        out_push(out, "", fdef[1])
+        out_push(out, "fn", fdef[2])
+        out_push(out, "", fdef[3])
+        out_push(out, "kw", "def")
+        out_push(out, "com", fdef[4])
+        end 0
+    ]
+    if s.startsWith("*--") [
+        out_push(out, "kw", "*--")
+        let p = skip_ws(s, 3)
+        out_push(out, "", s.slice(3, p))
+        let name = hl_name(s, p)
+        out_push(out, "fn", name)
+        hl_inline(out, s.slice(p + name.length), "expr")
+        end 0
+    ]
+    if s.startsWith("*>") [
+        out_push(out, "kw", "*>")
+        hl_inline(out, s.slice(2), "shell")
+        end 0
+    ]
+    if s.startsWith("--") [
+        out_push(out, "kw", "--")
+        let p = skip_ws(s, 2)
+        out_push(out, "", s.slice(2, p))
+        let name = hl_name(s, p)
+        out_push(out, "fn", name)
+        hl_inline(out, s.slice(p + name.length), "expr")
+        end 0
+    ]
+    if s.startsWith("=>") [
+        out_push(out, "kw", "=>")
+        let p = skip_ws(s, 2)
+        out_push(out, "", s.slice(2, p))
+        let name = hl_name(s, p)
+        out_push(out, "var", name)
+        let after = s.slice(p + name.length)
+        let eq = re_match("^(\\s*)(=)(.*)$", "", after)
+        let lst = re_match("^(\\s*)(\\[)(.*)$", "", after)
+        if not is_null(eq) [
+            out_push(out, "", eq[1])
+            out_push(out, "op", "=")
+            hl_inline(out, eq[3], "expr")
+        ] elif not is_null(lst) [
+            out_push(out, "", lst[1])
+            out_push(out, "op", "[")
+            out_push(out, "", lst[3])
+            hl_in_export = true
+        ] else [
+            out_push(out, "", after)
+        ]
+        end 0
+    ]
+    if s.startsWith("_>") [
+        out_push(out, "kw", "_>")
+        let p = skip_ws(s, 2)
+        out_push(out, "", s.slice(2, p))
+        let fm = re_match("^[^\\s[]+", "", s.slice(p))
+        let file = ""
+        if not is_null(fm) [
+            file = fm[0]
+        ]
+        out_push(out, "mod", file)
+        p = p + file.length
+        let m = re_match("^(\\s*)(\\[[^\\]\\n]*\\])?(\\s*)(def\\b)?(.*)$", "", s.slice(p))
+        out_push(out, "", m[1])
+        out_push(out, "type", m[2])
+        out_push(out, "", m[3])
+        out_push(out, "kw", m[4])
+        out_push(out, "", m[5])
+        end 0
+    ]
+    for prefix in hl_cmd_prefixes() [
+        if s.startsWith(prefix) [
+            out_push(out, "kw", prefix)
+            hl_inline(out, s.slice(prefix.length), "shell")
+            end 0
+        ]
+    ]
+    if s.startsWith("%") [
+        out_push(out, "kw", "%")
+        let p = skip_ws(s, 1)
+        out_push(out, "", s.slice(1, p))
+        let name = hl_name(s, p)
+        out_push(out, "var", name)
+        p = p + name.length
+        let m = re_match("^(\\s*)(?::(\\s*)([A-Za-z0-9_-]+))?(\\s*)(=)?(.*)$", "", s.slice(p))
+        out_push(out, "", m[1])
+        if m[3] != "" [
+            out_push(out, "op", ":")
+            out_push(out, "", m[2])
+            out_push(out, "type", m[3])
+        ]
+        out_push(out, "", m[4])
+        if m[5] != "" [
+            out_push(out, "op", "=")
+        ]
+        hl_inline(out, m[6], "expr")
+        end 0
+    ]
+    if s.startsWith("@") [
+        let f = re_match("^@(\\s*)([A-Za-z0-9_-]+)(\\s+)in\\b(.*)$", "", s)
+        if not is_null(f) [
+            out_push(out, "kw", "@")
+            out_push(out, "", f[1])
+            out_push(out, "var", f[2])
+            out_push(out, "", f[3])
+            out_push(out, "kw", "in")
+            hl_inline(out, f[4], "shell")
+            end 0
+        ]
+        hl_inline(out, s, "expr")
+        end 0
+    ]
+    if s.startsWith("?") [
+        if s.startsWith("?~") [
+            out_push(out, "kw", "?~")
+            hl_inline(out, s.slice(2), "expr")
+            end 0
+        ]
+        let m = re_match("^\\?(\\s*)([A-Za-z]+)(.*)$", "", s)
+        if not is_null(m) [
+            out_push(out, "kw", "?")
+            out_push(out, "", m[1])
+            out_push(out, "kw", m[2])
+            hl_inline(out, m[3], "expr")
+            end 0
+        ]
+    ]
+    let kw_line = re_match("^(done|using)\\b(.*)$", "", s)
+    if not is_null(kw_line) [
+        out_push(out, "kw", kw_line[1])
+        let tail = kw_line[2]
+        let g = re_match("^(\\s*)(<[^>\\n]*>)(.*)$", "", tail)
+        if not is_null(g) [
+            out_push(out, "", g[1])
+            out_push(out, "mod", g[2])
+            out_push(out, "com", g[3])
+        ] else [
+            hl_inline(out, tail, "expr")
+        ]
+        end 0
+    ]
+    let rep = re_match("^(_)(\\d+)(?![A-Za-z0-9_])(.*)$", "", s)
+    if not is_null(rep) [
+        out_push(out, "kw", "_")
+        out_push(out, "num", rep[2])
+        hl_inline(out, rep[3], "expr")
+        end 0
+    ]
+    hl_inline(out, s, "expr")
+]
+
+fun lex_hacker_lang(text: Str) -> List<Token> [
+    let out: List<Token> = []
+    hl_in_export = false
+    let idx = 0
+    for line in text.split("\n") [
+        if idx > 0 [
+            out_push(out, "", "\n")
+        ]
+        idx = idx + 1
+        let lead = re_match("^[ \\t\\r]*", "", line)[0]
+        out_push(out, "", lead)
+        let s = line.slice(lead.length)
+        if s != "" [
+            hl_line(out, s)
+        ]
+    ]
+    end out
+]
+
+!! ---- .hk ----
+const HK_STRING = "\"(?:\\\\.|[^\"\\\\\\n])*\"?"
+
+fun hk_tail(out, s: Str) [
+    let i = 0
+    let n = s.length
+    while i < n [
+        let c = s[i]
+        if c == ";" and s.charAt(i + 1) == ";" [
+            out_push(out, "com", s.slice(i))
+            end 0
+        ]
+        if c == "\"" [
+            let m = re_sticky(HK_STRING, s, i)
+            out_push(out, "str", m[0])
+            i = i + m[0].length
+            continue
+        ]
+        if c == "[" or c == "]" or c == "," [
+            out_push(out, "op", c)
+            i = i + 1
+            continue
+        ]
+        if c >= "0" and c <= "9" and not is_ident_char(s.charAt(i - 1)) [
+            let m = re_sticky("\\d+(?:\\.\\d+)?(?![A-Za-z_.-])", s, i)
+            if not is_null(m) [
+                out_push(out, "num", m[0])
+                i = i + m[0].length
+                continue
+            ]
+        ]
+        if re_test("[A-Za-z]", "", c) and not is_ident_char(s.charAt(i - 1)) [
+            let m = re_sticky("[A-Za-z][A-Za-z0-9_]*", s, i)
+            if m[0] == "true" or m[0] == "false" [
+                out_push(out, "const", m[0])
+            ] else [
+                out_push(out, "", m[0])
+            ]
+            i = i + m[0].length
+            continue
+        ]
+        out_push(out, "", c)
+        i = i + 1
+    ]
+]
+
+fun lex_hk(text: Str) -> List<Token> [
+    let out: List<Token> = []
+    let idx = 0
+    for line in text.split("\n") [
+        if idx > 0 [
+            out_push(out, "", "\n")
+        ]
+        idx = idx + 1
+        let lead = re_match("^[ \\t\\r]*", "", line)[0]
+        out_push(out, "", lead)
+        let s = line.slice(lead.length)
+        if s == "" [
+            continue
+        ]
+        if s.startsWith("!") or s.startsWith(";;") [
+            out_push(out, "com", s)
+            continue
+        ]
+        let sec = re_match("^\\[[^\\]\\n]*\\]", "", s)
+        if not is_null(sec) [
+            out_push(out, "sec", sec[0])
+            hk_tail(out, s.slice(sec[0].length))
+            continue
+        ]
+        let arrow = re_match("^(-+>)(\\s*)(.*)$", "", s)
+        if not is_null(arrow) [
+            out_push(out, "op", arrow[1])
+            out_push(out, "", arrow[2])
+            let body = arrow[3]
+            let sep = body.indexOf("=>")
+            let cm = body.indexOf(";;")
+            let key_end = body.length
+            if sep != -1 and (cm == -1 or sep < cm) [
+                key_end = sep
+            ] elif cm != -1 [
+                key_end = cm
+            ]
+            let key_text = body.slice(0, key_end)
+            let key = key_text.trimEnd()
+            out_push(out, "key", key)
+            out_push(out, "", key_text.slice(key.length))
+            if key_end == sep [
+                out_push(out, "op", "=>")
+                hk_tail(out, body.slice(key_end + 2))
+            ] else [
+                hk_tail(out, body.slice(key_end))
+            ]
+            continue
+        ]
+        hk_tail(out, s)
+    ]
+    end out
+]
+
+!! ---- publiczne API ----
+const BY_EXT_SPEC = "h#=hsharp;h#i=hsharp;hcs=hackerscript;hl=hackerlang;hk=hk;js=c;jsx=c;ts=c;tsx=c;mjs=c;cjs=c;c=c;h=c;cpp=c;cc=c;hpp=c;rs=c;go=c;java=c;cs=c;swift=c;kt=c;kts=c;scala=c;zig=c;dart=c;php=c;css=c;json=c;py=hash;rb=hash;sh=hash;bash=hash;zsh=hash;yml=hash;yaml=hash;toml=hash;pl=hash;r=hash;cmake=hash;mk=hash;cfg=hash;ini=hash;gitignore=hash;lua=lua;sql=sql;html=html;htm=html;xml=html;svg=html"
+const LANG_ALIAS_SPEC = "hsharp=h#;h-sharp=h#;h#=h#;h#i=h#i;hsh=h#;hackerlang=hl;hacker-lang=hl;hacker_lang=hl;hacker lang=hl;hl=hl;hackerscript=hcs;hacker-script=hcs;hacker_script=hcs;hacker script=hcs;hs=hcs;hcs=hcs;hk=hk;bit=hk;shell=sh;console=sh;zsh=sh;bash=sh;javascript=js;typescript=ts;python=py;rust=rs;yaml=yml;markdown=md"
+let by_ext = kv_table(BY_EXT_SPEC)
+let lang_alias = kv_table(LANG_ALIAS_SPEC)
+
+!! Jezyk z ogrodzenia Markdown ("h#", "hacker lang", "bash"...) -> rozszerzenie znane kolorowaniu.
+fun ext_for_lang(lang: Str) -> Str [
+    let l = lang.toLowerCase().trim()
+    if js_has(lang_alias, l) [
+        end js_get(lang_alias, l)
+    ]
+    end l
+]
+
+fun family_for(ext: Str, file_name: Str) -> Str [
+    if file_name == "Makefile" or file_name == "Dockerfile" [
+        end "hash"
+    ]
+    if file_name == "Bit.hk" or file_name == "bit.hk" [
+        end "hk"
+    ]
+    if js_has(by_ext, ext) [
+        end js_get(by_ext, ext)
+    ]
+    end "plain"
+]
+
+fun highlight(text: Str, ext: Str, file_name: Str) -> List<Token> [
+    let fam = family_for(ext, file_name)
+    if fam == "plain" [
+        end [Token("", text)]
+    ]
+    if fam == "hsharp" [
+        end lex_code(text, cfg_hsharp())
+    ]
+    if fam == "hackerscript" [
+        end lex_code(text, cfg_hackerscript())
+    ]
+    if fam == "hackerlang" [
+        end lex_hacker_lang(text)
+    ]
+    if fam == "hk" [
+        end lex_hk(text)
+    ]
+    let cfg = cfg_family(fam)
+    if is_null(cfg) [
+        end [Token("", text)]
+    ]
+    end lex_code(text, cfg)
+]
+
+!! Dzieli strumien tokenow na linie (tokeny obejmujace nowe linie sa ciete).
+fun to_lines(tokens) [
+    let lines = [[]]
+    for t in tokens [
+        let parts = t.text.split("\n")
+        let idx = 0
+        for part in parts [
+            if idx > 0 [
+                lines.push([])
+            ]
+            if part != "" [
+                lines[lines.length - 1].push(Token(t.kind, part))
+            ]
+            idx = idx + 1
+        ]
+    ]
+    end lines
+]
+
+!! Tokeny -> wezly DOM (span.tok-KIND / tekst).
+fun tokens_to_nodes(tokens) [
+    let nodes = []
+    for t in tokens [
+        if t.kind != "" [
+            nodes.push(h("span", "tok-" + t.kind, [t.text]))
+        ] else [
+            nodes.push(dom_text_node(t.text))
+        ]
+    ]
+    end nodes
+]
