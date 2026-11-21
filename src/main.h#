@@ -13,6 +13,12 @@ fn arg_at(arr: [string], i: int) -> string is
     return ""
 end
 
+fn join_features(acc: string, more: string) -> string is
+    if more == "" is return acc end
+    if acc == "" is return more end
+    return acc + "," + more
+end
+
 fn join_from(arr: [string], start: int) -> string is
     let mut out: string = ""
     let mut i: int = start
@@ -107,8 +113,9 @@ fn main() is
                 "--no-default-features" => is env_set("BIT_SEL_NO_DEFAULT", "1") end
                 "--no-system-check" => is env_set("BIT_NO_SYSTEM_CHECK", "1") end
                 "--features" | "-F" => is
+                    ;; repeatable and comma/space separated:  --features a,b   -F c   --features="d e"
                     i += 1
-                    features = arg_at(args, i)
+                    features = join_features(features, arg_at(args, i))
                     env_set("BIT_SEL_FEATURES", features)
                 end
                 "--bin"            => is
@@ -157,7 +164,10 @@ fn main() is
                     sign = arg_at(args, i)
                 end
                 _ => is
-                    if string_starts_with(a, "-") && string_len(a) > 1 is
+                    if string_starts_with(a, "--features=") is
+                        features = join_features(features, string_slice(a, 11, string_len(a)))
+                        env_set("BIT_SEL_FEATURES", features)
+                    else if string_starts_with(a, "-") && string_len(a) > 1 is
                         ui::fail("unknown option '" + a + "'   (bit --help)")
                         exit(2)
                     else if cmd == "" is
