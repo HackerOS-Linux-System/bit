@@ -316,6 +316,26 @@ end
 
 ;; ` --edition <year>` for `h#` when [edition] applies (H# projects only), else "". Without it
 ;; h# falls back to HSHARP_EDITION, then Bit.hk itself, then the newest edition.
+;; Does the installed `h#` understand `--features`? (asked once per run: its `compile --help` mentions the flag)
+pub fn hsharp_supports_features() -> bool is
+    let cached: string = env_get("BIT_HSHARP_FEATURES_OK")
+    if cached != "" is return cached == "1" end
+    let tool: string = tool_for("hsharp")
+    let ok: bool = tool != "" && string_contains(util::capture(util::sq(tool) + " compile --help 2>&1"), "--features")
+    env_set("BIT_HSHARP_FEATURES_OK", if ok then "1" else "0")
+    return ok
+end
+
+;; ` --features a,b` for `h#`: the features `bit` resolved from `[features]` for THIS package (BIT_FEATURES is only
+;; honoured for the package `features::activate` ran for — a dependency is built with its own defaults, never with the
+;; root's list). "" when no feature is on, so an `h#` that predates the flag keeps working for projects without any.
+pub fn features_flag(p: project::Project) -> string is
+    if env_get("BIT_FEATURES_ROOT") != project::root_of(p) is return "" end
+    let f: string = env_get("BIT_FEATURES")
+    if f == "" is return "" end
+    return " --features " + util::sq(f)
+end
+
 pub fn edition_flag(p: project::Project) -> string is
     let e: string = project::hsharp_edition(p)
     if e == "" is return "" end
@@ -360,7 +380,7 @@ fn build_hsharp_bin(p: project::Project, o: BuildOpts, entry: string, out: strin
         (if o.bo_release then " --release" else "") +
         (if plat != "" then " --target " + plat else "") +
         (if mem != "" then " --mem-mode " + mem else "") +
-        edition_flag(p) +
+        edition_flag(p) + features_flag(p) +
         (if o.bo_verbose then " --verbose" else "") + flags_of(p)
     ;; NOTE: `--dynamic` is never passed — h# links statically by default.
     return run_step(p, "H#  " + util::basename(out), cmd, o.bo_verbose)
@@ -375,7 +395,7 @@ fn build_hsharp_lib(p: project::Project, o: BuildOpts, entry: string, dir: strin
             " --lib-version " + util::sq(project::version_of(p)) +
             (if plat != "" then " --target " + plat else "") +
             (if o.bo_release then " --release" else "") +
-            edition_flag(p) +
+            edition_flag(p) + features_flag(p) +
             (if o.bo_ffi || flags::ffi() then " --ffi" +
                 (if project::get(p, "ffi", "instantiate", "") != "" then " --ffi-inst " + util::sq(project::get(p, "ffi", "instantiate", "")) else "") else "") +
             (if o.bo_sign != "" then " --sign " + util::sq(o.bo_sign) else "")
@@ -387,7 +407,7 @@ fn build_hsharp_lib(p: project::Project, o: BuildOpts, entry: string, dir: strin
                        else name + ".o"
     let cmd: string = tool + " compile " + util::sq(entry) + " --emit " + emit + " -o " + util::sq(dir + "/" + file) +
         (if o.bo_release then " --release" else "") +
-        (if plat != "" then " --target " + plat else "") + edition_flag(p) + flags_of(p)
+        (if plat != "" then " --target " + plat else "") + edition_flag(p) + features_flag(p) + flags_of(p)
     return run_step(p, "H#  " + file, cmd, o.bo_verbose)
 end
 
