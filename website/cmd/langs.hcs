@@ -1,0 +1,50 @@
+struct LangInfo [
+    id: Str,
+    label: Str,
+    short: Str,
+    color: Str
+]
+
+const LANG_ANY = "any"
+
+fun all_langs() -> List<LangInfo> [
+    end [
+        LangInfo("hsharp", "H#", "h#", "var(--lang-hsharp)"),
+        LangInfo("hackerlang", "Hacker Lang", "hl", "var(--lang-hl)"),
+        LangInfo("hackerscript", "HackerScript", "hs", "var(--lang-hs)")
+    ]
+]
+
+fun lang_info(id: Str) -> LangInfo [
+    for l in all_langs() [
+        if l.id == id [
+            end l
+        ]
+    ]
+    end LangInfo("any", "any", "any", "var(--muted)")
+]
+
+!! Akceptuje kazda pisownie: "h#", "H-Sharp", "hl", "Hacker Lang", "hcs"...
+fun normalize_lang(raw: Str) -> Str [
+    let t = re_replace("[\\s-]", "g", raw.toLowerCase(), "")
+    if t == "h#" or t == "hsharp" or t == "hsh" [
+        end "hsharp"
+    ]
+    if t == "hl" or t == "hackerlang" [
+        end "hackerlang"
+    ]
+    if t == "hs" or t == "hcs" or t == "hackerscript" [
+        end "hackerscript"
+    ]
+    end "any"
+]
+
+fun lang_from_tags(tags) -> Str [
+    for t in tags [
+        let l = normalize_lang(t)
+        if l != "any" [
+            end l
+        ]
+    ]
+    end "any"
+]
