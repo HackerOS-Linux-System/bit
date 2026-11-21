@@ -1,0 +1,100 @@
+const TOKEN_KEY = "bitio:gh-token"
+
+let last_rate = null
+
+fun get_github_token() -> Str [
+    let v = ls_get(TOKEN_KEY)
+    if is_null(v) [
+        end ""
+    ]
+    end v
+]
+
+fun set_github_token(token: Str) -> Bool [
+    if token != "" [
+        end ls_set(TOKEN_KEY, token)
+    ]
+    end ls_remove(TOKEN_KEY)
+]
+
+fun has_github_token() -> Bool [
+    end get_github_token() != ""
+]
+
+fun known_rate_limit() [
+    end last_rate
+]
+
+!! "resets in ~N min (~HH:MM)" albo "" gdy brak danych.
+fun rate_limit_note() -> Str [
+    if is_null(last_rate) [
+        end ""
+    ]
+    let reset = last_rate.reset
+    if reset <= 0 [
+        end ""
+    ]
+    let left = reset - now_ms()
+    if left <= 0 [
+        end "resets any moment now"
+    ]
+    let mins = Math.max(1, Math.ceil(left / 60000.0))
+    end "resets in ~" + (mins as Str) + " min (~" + fmt_clock(reset) + ")"
+]
+
+!! Blad api.github.com: tresc + status; `limited` = problem tokena/limitu (pokazujemy "Add token").
+struct GhErr [
+    message: Str,
+    status: Int,
+    limited: Bool
+]
+
+!! GET na api.github.com z tokenem (gdy zapisany). Wynik: { status, text, rl }.
+async fun github_api(path: Str) [
+    let token = get_github_token()
+    let res = await http("https://api.github.com" + path, token)
+    if not is_null(res.rl) [
+        last_rate = res.rl
+    ]
+    end res
+]
+
+!! Zamienia status 401/403/429 na GhErr; inaczej null.
+fun github_status_error(status: Int) [
+    if status == 401 [
+        end GhErr("The saved GitHub token was rejected (401) — check it in Settings.", 401, true)
+    ]
+    if status == 403 or status == 429 [
+        let note = rate_limit_note()
+        let extra = ""
+        if note != "" [
+            extra = " (" + note + ")"
+        ]
+        end GhErr("GitHub API rate limit reached" + extra + ". Adding a token in Settings raises it.", 403, true)
+    ]
+    end null
+]
+
+struct RateResult [
+    ok: Bool,
+    status: Int,
+    has_rate: Bool,
+    remaining: Int,
+    limit: Int
+]
+
+!! /rate_limit nie liczy sie do limitu.
+async fun fetch_rate_limit() -> RateResult [
+    let res = await github_api("/rate_limit")
+    if res.status < 200 or res.status > 299 [
+        end RateResult(false, res.status, false, 0, 0)
+    ]
+    let data = json_parse(res.text)
+    let resources = js_obj(data, "resources")
+    let core = js_obj(resources, "core")
+    if is_null(core) [
+        end RateResult(true, res.status, false, 0, 0)
+    ]
+    last_rate = js_set(js_set(js_set(js_new_obj(), "remaining", js_num(core, "remaining")), "limit", js_num(core, "limit")), "reset", js_num(core, "reset") * 1000)
+    end RateResult(true, res.status, true, js_num(core, "remaining"), js_num(core, "limit"))
+]
