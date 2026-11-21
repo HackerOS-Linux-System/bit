@@ -1,0 +1,81 @@
+let off_bar = null
+let off_stale = js_new_obj()
+let off_listeners = []
+
+fun ensure_bar() [
+    if off_bar != null [
+        end off_bar
+    ]
+    off_bar = ha("div", ["id", "offline-bar", "class", "offline-bar", "role", "status", "aria-live", "polite"], [])
+    off_bar.hidden = true
+    document.body.prepend(off_bar)
+    end off_bar
+]
+
+fun offline_update() [
+    let el = ensure_bar()
+    let offline = not is_online()
+    let keys = js_keys(off_stale)
+    if not offline and keys.length == 0 [
+        el.hidden = true
+        end 0
+    ]
+    let oldest = -1
+    for k in keys [
+        let age = js_num(off_stale, k)
+        if age >= 0 and age > oldest [
+            oldest = age
+        ]
+    ]
+    let lead = "Couldn't reach the network"
+    if offline [
+        lead = "No internet connection"
+    ]
+    let tail = ""
+    if oldest >= 0 [
+        tail = " (" + format_age(oldest) + ")"
+    ]
+    el.textContent = lead + " — showing data saved in this browser" + tail + "."
+    el.hidden = false
+]
+
+fun on_back_online(e) [
+    off_stale = js_new_obj()
+    offline_update()
+    for cb in off_listeners [
+        cb()
+    ]
+]
+
+fun on_went_offline(e) [
+    offline_update()
+]
+
+fun init_offline() [
+    ensure_bar()
+    offline_update()
+    window.addEventListener("offline", on_went_offline)
+    window.addEventListener("online", on_back_online)
+]
+
+!! Dane pochodza z lokalnej kopii, bo siec zawiodla.
+fun mark_stale(key: Str, age_ms: Int) [
+    js_set(off_stale, key, age_ms)
+    offline_update()
+]
+
+fun clear_stale(key: Str) [
+    if js_has(off_stale, key) [
+        js_set(off_stale, key, null)
+        delete_key(off_stale, key)
+        offline_update()
+    ]
+]
+
+fun on_online(cb) [
+    off_listeners.push(cb)
+]
+
+fun is_offline() -> Bool [
+    end not is_online()
+]
