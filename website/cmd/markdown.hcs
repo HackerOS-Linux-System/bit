@@ -1,0 +1,716 @@
+const RE_REF_DEF = "^ {0,3}\\[([^\\]]+)\\]:\\s*<?([^\\s>]+)>?(?:\\s+(?:\"([^\"]*)\"|'([^']*)'|\\(([^)]*)\\)))?\\s*$"
+const RE_FENCE = "^( {0,3})(`{3,}|~{3,})\\s*([^`\\s]*)[^`]*$"
+const RE_HEADING = "^ {0,3}(#{1,6})\\s+(.*?)(?:\\s+#+)?\\s*$"
+const RE_HR = "^ {0,3}([-*_])(?:\\s*\\1){2,}\\s*$"
+const RE_ITEM = "^(\\s*)([-*+]|\\d{1,9}[.)])(\\s+)(.*)$"
+const RE_HTML_BLOCK = "^\\s{0,3}(?:<!--|<\\/?(?:p|div|details|summary|center|h[1-6]|table|thead|tbody|tfoot|tr|td|th|caption|ul|ol|li|dl|dt|dd|picture|figure|figcaption|blockquote|section|hr|br|img|a)\\b)"
+const RE_URL_PART = "\\(\\s*(&lt;[^&]*?&gt;|[^\\s()]*(?:\\([^\\s()]*\\)[^\\s()]*)*)(?:\\s+&quot;(.*?)&quot;)?\\s*\\)"
+
+struct RefDef [
+    url: Str,
+    title: Str
+]
+
+struct ListRes [
+    html: Str,
+    next: Int
+]
+
+!! Stan biezacego renderowania (renderer nie jest re-entrant: tylko jedno wywolanie naraz).
+let md_refs = js_new_obj()
+let md_stash = []
+
+fun escape_html(s: Str) -> Str [
+    let a = re_replace("&", "g", s, "&amp;")
+    let b = re_replace("<", "g", a, "&lt;")
+    let c = re_replace(">", "g", b, "&gt;")
+    end re_replace("\"", "g", c, "&quot;")
+]
+
+fun ref_key(label: Str) -> Str [
+    end re_replace("\\s+", "g", label.toLowerCase(), " ")
+]
+
+!! Definicje `[id]: url "tytul"` zbierane z calego dokumentu (poza blokami kodu).
+fun collect_refs(lines) [
+    let kept: List<Str> = []
+    let fence = ""
+    for line in lines [
+        let f = re_match(RE_FENCE, "", line)
+        if fence == "" and not is_null(f) and f[2] != "" [
+            fence = f[2].charAt(0)
+        ] elif fence != "" and not is_null(f) and f[2] != "" and f[2].charAt(0) == fence and f[3] == "" [
+            fence = ""
+        ]
+        if fence == "" and is_null(f) [
+            let m = re_match(RE_REF_DEF, "", line)
+            if not is_null(m) and m[1] != "" and m[2] != "" [
+                let title = m[3]
+                if title == "" [
+                    title = m[4]
+                ]
+                if title == "" [
+                    title = m[5]
+                ]
+                js_set(md_refs, ref_key(m[1]), RefDef(m[2], title))
+                continue
+            ]
+        ]
+        kept.push(line)
+    ]
+    end kept
+]
+
+fun markdown_to_html(src: Str) -> Str [
+    md_refs = js_new_obj()
+    let text = re_replace("\\t", "g", re_replace("\\r\\n?", "g", src, "\n"), "    ")
+    let lines = collect_refs(text.split("\n"))
+    end render_blocks(lines, false)
+]
+
+fun is_block_start(line: Str) -> Bool [
+    end re_test(RE_FENCE, "", line) or re_test(RE_HEADING, "", line) or re_test("^ {0,3}>", "", line) or re_test(RE_ITEM, "", line) or re_test(RE_HR, "", line) or re_test(RE_HTML_BLOCK, "i", line)
+]
+
+fun join_paragraph(lines) -> Str [
+    let parts: List<Str> = []
+    let idx = 0
+    for l in lines [
+        let last = idx == lines.length - 1
+        let t = re_replace("^\\s+", "", l, "")
+        if last [
+            parts.push(re_replace("\\s+$", "", t, ""))
+        ] elif re_test(" {2,}$", "", t) or re_test("\\\\$", "", t) [
+            parts.push(re_replace("(?: {2,}|\\\\)$", "", t, "") + BR_MARK)
+        ] else [
+            parts.push(re_replace("\\s+$", "", t, ""))
+        ]
+        idx = idx + 1
+    ]
+    end parts.join("\n")
+]
+
+fun render_blocks(lines, tight: Bool) -> Str [
+    let out: List<Str> = []
+    let i = 0
+    while i < lines.length [
+        let line = lines[i]
+        if line.trim() == "" [
+            i = i + 1
+            continue
+        ]
+        let fence = re_match(RE_FENCE, "", line)
+        if not is_null(fence) and fence[2] != "" [
+            let mark = fence[2]
+            let indent = fence[1].length
+            let lang = fence[3]
+            let code: List<Str> = []
+            i = i + 1
+            while i < lines.length [
+                let l = lines[i]
+                let close = re_match("^ {0,3}(`{3,}|~{3,})\\s*$", "", l)
+                if not is_null(close) and close[1].charAt(0) == mark.charAt(0) and close[1].length >= mark.length [
+                    break
+                ]
+                code.push(re_replace("^ {0," + (indent as Str) + "}", "", l, ""))
+                i = i + 1
+            ]
+            i = i + 1
+            let cls = ""
+            if lang != "" and re_test("^[\\w+#.-]{1,24}$", "", lang) [
+                cls = " class=\"language-" + lang + "\""
+            ]
+            out.push("<pre><code" + cls + ">" + escape_html(code.join("\n")) + "</code></pre>")
+            continue
+        ]
+        if re_test(RE_HTML_BLOCK, "i", line) [
+            let chunk: List<Str> = []
+            if re_test("^\\s{0,3}<!--", "", line) [
+                while i < lines.length [
+                    let l = lines[i]
+                    chunk.push(l)
+                    i = i + 1
+                    if l.includes("-->") [
+                        break
+                    ]
+                ]
+                out.push(chunk.join("\n"))
+                continue
+            ]
+            while i < lines.length and lines[i].trim() != "" [
+                chunk.push(lines[i])
+                i = i + 1
+            ]
+            out.push(chunk.join("\n"))
+            continue
+        ]
+        let hd = re_match(RE_HEADING, "", line)
+        if not is_null(hd) and hd[1] != "" [
+            let n = hd[1].length
+            out.push("<h" + (n as Str) + ">" + md_inline(hd[2]) + "</h" + (n as Str) + ">")
+            i = i + 1
+            continue
+        ]
+        if re_test(RE_HR, "", line) [
+            out.push("<hr>")
+            i = i + 1
+            continue
+        ]
+        if re_test("^ {0,3}>", "", line) [
+            let quoted: List<Str> = []
+            while i < lines.length [
+                let l = lines[i]
+                if re_test("^ {0,3}>", "", l) [
+                    quoted.push(re_replace("^ {0,3}>\\s?", "", l, ""))
+                ] elif l.trim() != "" and quoted.length > 0 and not is_block_start(l) [
+                    quoted.push(l)
+                ] else [
+                    break
+                ]
+                i = i + 1
+            ]
+            out.push("<blockquote>" + render_blocks(quoted, false) + "</blockquote>")
+            continue
+        ]
+        let sep = lines.at(i + 1)
+        if line.includes("|") and not is_null(sep) and is_table_separator(sep) [
+            let header = split_row(line)
+            let aligns: List<Str> = []
+            for c in split_row(sep) [
+                aligns.push(cell_align(c))
+            ]
+            let rows = []
+            i = i + 2
+            while i < lines.length and lines[i].trim() != "" and lines[i].includes("|") [
+                rows.push(split_row(lines[i]))
+                i = i + 1
+            ]
+            out.push(render_table(header, aligns, rows))
+            continue
+        ]
+        if re_test(RE_ITEM, "", line) [
+            let r = render_list(lines, i)
+            out.push(r.html)
+            i = r.next
+            continue
+        ]
+        if re_test("^ {4,}\\S", "", line) [
+            let code: List<Str> = []
+            while i < lines.length and (re_test("^ {4,}\\S", "", lines[i]) or lines[i].trim() == "") [
+                code.push(re_replace("^ {4}", "", lines[i], ""))
+                i = i + 1
+            ]
+            while code.length > 0 and code[code.length - 1].trim() == "" [
+                code.pop()
+            ]
+            out.push("<pre><code>" + escape_html(code.join("\n")) + "</code></pre>")
+            continue
+        ]
+        let para: List<Str> = []
+        let setext = 0
+        while i < lines.length [
+            let l = lines[i]
+            if l.trim() == "" [
+                break
+            ]
+            if para.length > 0 [
+                let u = re_match("^ {0,3}(=+|-+)\\s*$", "", l)
+                if not is_null(u) and u[1] != "" [
+                    if u[1].startsWith("=") [
+                        setext = 1
+                    ] else [
+                        setext = 2
+                    ]
+                    i = i + 1
+                    break
+                ]
+                if is_block_start(l) and not re_test(RE_ITEM, "", l) [
+                    break
+                ]
+                if re_test(RE_ITEM, "", l) and re_test("^(?:[-*+]|1[.)])\\s", "", l.trim()) [
+                    break
+                ]
+            ]
+            para.push(l)
+            i = i + 1
+        ]
+        if para.length == 0 [
+            i = i + 1
+            continue
+        ]
+        let html = md_inline(join_paragraph(para))
+        if setext > 0 [
+            out.push("<h" + (setext as Str) + ">" + html + "</h" + (setext as Str) + ">")
+        ] elif tight [
+            out.push(html)
+        ] else [
+            out.push("<p>" + html + "</p>")
+        ]
+    ]
+    end out.join("\n")
+]
+
+fun render_list(lines, start: Int) -> ListRes [
+    let first = re_match(RE_ITEM, "", lines[start])
+    let base_indent = first[1].length
+    let ordered = re_test("\\d", "", first[2])
+    let start_num = 1
+    if ordered [
+        start_num = parseInt(first[2], 10)
+    ]
+    let items = []
+    let loose = false
+    let i = start
+    while i < lines.length [
+        let m = re_match(RE_ITEM, "", lines[i])
+        if is_null(m) or m[1].length != base_indent or re_test("\\d", "", m[2]) != ordered [
+            break
+        ]
+        let content_indent = base_indent + m[2].length + Math.min(m[3].length, 4)
+        let body: List<Str> = [m[4]]
+        i = i + 1
+        let blank = false
+        while i < lines.length [
+            let l = lines[i]
+            if l.trim() == "" [
+                blank = true
+                body.push("")
+                i = i + 1
+                continue
+            ]
+            let ind = re_search("\\S", l)
+            if ind >= content_indent or (ind > base_indent and not blank and not re_test(RE_ITEM, "", l)) [
+                body.push(l.slice(Math.min(ind, content_indent)))
+                blank = false
+                i = i + 1
+                continue
+            ]
+            if not blank and ind > base_indent [
+                body.push(l.slice(Math.min(ind, content_indent)))
+                i = i + 1
+                continue
+            ]
+            break
+        ]
+        let trailing_blank = body.length > 0 and body[body.length - 1] == ""
+        while body.length > 0 and body[body.length - 1] == "" [
+            body.pop()
+        ]
+        let next = ""
+        if i < lines.length [
+            next = lines[i]
+        ]
+        let nm = re_match(RE_ITEM, "", next)
+        let continues = not is_null(nm) and nm[1].length == base_indent and re_test("\\d", "", nm[2]) == ordered
+        if trailing_blank and continues [
+            loose = true
+        ]
+        items.push(body)
+    ]
+    let lis: List<Str> = []
+    for body in items [
+        let text = body[0]
+        let box = ""
+        let task = re_match("^\\[([ xX])\\]\\s+", "", text)
+        if not is_null(task) [
+            let checked = ""
+            if task[1] != " " [
+                checked = " checked"
+            ]
+            box = "<input type=\"checkbox\" disabled" + checked + "> "
+            text = text.slice(task[0].length)
+        ]
+        let rest_lines = [text]
+        for l in body.slice(1) [
+            rest_lines.push(l)
+        ]
+        let inner = render_blocks(rest_lines, not loose)
+        lis.push("<li>" + box + inner + "</li>")
+    ]
+    let tag = "ul"
+    if ordered [
+        tag = "ol"
+    ]
+    let start_attr = ""
+    if ordered and start_num != 1 [
+        start_attr = " start=\"" + (start_num as Str) + "\""
+    ]
+    end ListRes("<" + tag + start_attr + ">" + lis.join("") + "</" + tag + ">", i)
+]
+
+fun is_table_separator(line: Str) -> Bool [
+    end line.includes("-") and re_test("^\\s*\\|?\\s*:?-+:?\\s*(\\|\\s*:?-+:?\\s*)*\\|?\\s*$", "", line)
+]
+
+fun split_row(line: Str) [
+    let t = line.trim()
+    if t.startsWith("|") [
+        t = t.slice(1)
+    ]
+    if t.endsWith("|") and not t.endsWith("\\|") [
+        t = t.slice(0, t.length - 1)
+    ]
+    let cells: List<Str> = []
+    for c in re_split("(?<!\\\\)\\|", "", t) [
+        cells.push(re_replace("\\\\\\|", "g", c.trim(), "|"))
+    ]
+    end cells
+]
+
+fun cell_align(spec: Str) -> Str [
+    let s = spec.trim()
+    if re_test("^:-+:$", "", s) [
+        end "center"
+    ]
+    if re_test("^-+:$", "", s) [
+        end "right"
+    ]
+    if re_test("^:-+$", "", s) [
+        end "left"
+    ]
+    end ""
+]
+
+fun table_cell(tag: Str, c: Str, aligns, idx: Int) -> Str [
+    let a = ""
+    if idx < aligns.length [
+        a = aligns[idx]
+    ]
+    let attr = ""
+    if a != "" [
+        attr = " align=\"" + a + "\""
+    ]
+    end "<" + tag + attr + ">" + md_inline(c) + "</" + tag + ">"
+]
+
+fun render_table(header, aligns, rows) -> Str [
+    let th = ""
+    let idx = 0
+    for c in header [
+        th = th + table_cell("th", c, aligns, idx)
+        idx = idx + 1
+    ]
+    let trs = ""
+    for r in rows [
+        let tds = ""
+        let k = 0
+        while k < header.length [
+            let cell = ""
+            if k < r.length [
+                cell = r[k]
+            ]
+            tds = tds + table_cell("td", cell, aligns, k)
+            k = k + 1
+        ]
+        trs = trs + "<tr>" + tds + "</tr>"
+    ]
+    end "<div class=\"md-table\"><table><thead><tr>" + th + "</tr></thead><tbody>" + trs + "</tbody></table></div>"
+]
+
+!! ---- inline ----
+fun md_hold(html: Str) -> Str [
+    md_stash.push(html)
+    end STASH_MARK + ((md_stash.length - 1) as Str) + STASH_MARK
+]
+
+fun md_lookup(label: Str) [
+    let k = ref_key(label)
+    end js_get(md_refs, k)
+]
+
+fun clean_url(u: Str) -> Str [
+    if u.startsWith("&lt;") and u.endsWith("&gt;") [
+        end u.slice(4, u.length - 4)
+    ]
+    end u
+]
+
+fun md_plain(s: Str) -> Str [
+    let a = re_replace("\\u0000\\d+\\u0000", "g", s, "")
+    end re_replace("<[^>]*>", "g", a, "")
+]
+
+fun title_attr(t: Str) -> Str [
+    if t != "" [
+        end " title=\"" + t + "\""
+    ]
+    end ""
+]
+
+fun cb_code(m) -> Str [
+    end md_hold("<code>" + escape_html(m[2].trim()) + "</code>")
+]
+
+fun cb_autolink(m) -> Str [
+    end md_hold("<a href=\"" + escape_html(m[1]) + "\">" + escape_html(m[1]) + "</a>")
+]
+
+fun cb_rawtag(m) -> Str [
+    end md_hold(m[0])
+]
+
+fun cb_image(m) -> Str [
+    end md_hold("<img src=\"" + clean_url(m[2]) + "\" alt=\"" + md_plain(m[1]) + "\"" + title_attr(m[3]) + ">")
+]
+
+fun cb_image_ref(m) -> Str [
+    let id = m[2]
+    if id == "" [
+        id = m[1]
+    ]
+    let def = md_lookup(id)
+    if is_null(def) [
+        end m[0]
+    ]
+    end md_hold("<img src=\"" + escape_html(def.url) + "\" alt=\"" + md_plain(m[1]) + "\"" + title_attr(escape_html(def.title)) + ">")
+]
+
+fun cb_link(m) -> Str [
+    end md_hold("<a href=\"" + clean_url(m[2]) + "\"" + title_attr(m[3]) + ">" + m[1] + "</a>")
+]
+
+fun cb_link_ref(m) -> Str [
+    let id = m[2]
+    if id == "" [
+        id = m[1]
+    ]
+    let def = md_lookup(id)
+    if is_null(def) [
+        end m[0]
+    ]
+    end md_hold("<a href=\"" + escape_html(def.url) + "\"" + title_attr(escape_html(def.title)) + ">" + m[1] + "</a>")
+]
+
+fun cb_link_short(m) -> Str [
+    let def = md_lookup(m[1])
+    if is_null(def) [
+        end m[0]
+    ]
+    end md_hold("<a href=\"" + escape_html(def.url) + "\">" + m[1] + "</a>")
+]
+
+fun cb_bare_url(m) -> Str [
+    end m[1] + md_hold("<a href=\"" + m[2] + "\">" + m[2] + "</a>")
+]
+
+fun cb_unstash(m) -> Str [
+    let v = md_stash[parseInt(m[1], 10)]
+    if is_null(v) [
+        end ""
+    ]
+    end v
+]
+
+fun md_inline(text: Str) -> Str [
+    md_stash = []
+    let s = text
+    s = re_replace_fn("(`+)([^`]|[^`][\\s\\S]*?[^`])\\1(?!`)", "g", s, cb_code)
+    s = re_replace_fn("<(https?:\\/\\/[^\\s<>]+)>", "g", s, cb_autolink)
+    s = re_replace_fn("<!--[\\s\\S]*?-->|<\\/?[a-zA-Z][^<>]*>", "g", s, cb_rawtag)
+    s = escape_html(s)
+    s = re_replace_fn("!\\[([^\\]]*)\\]" + RE_URL_PART, "g", s, cb_image)
+    s = re_replace_fn("!\\[([^\\]]*)\\](?:\\[([^\\]]*)\\])?", "g", s, cb_image_ref)
+    s = re_replace_fn("\\[([^\\]]+)\\]" + RE_URL_PART, "g", s, cb_link)
+    s = re_replace_fn("\\[([^\\]]+)\\]\\[([^\\]]*)\\]", "g", s, cb_link_ref)
+    s = re_replace_fn("\\[([^\\]]+)\\]", "g", s, cb_link_short)
+    s = re_replace_fn("(^|[\\s(>])(https?:\\/\\/[^\\s<]*[^\\s<.,:;\"')\\]!?])", "g", s, cb_bare_url)
+    s = re_replace("\\*\\*\\*([^*\\n]+?)\\*\\*\\*", "g", s, "<strong><em>$1</em></strong>")
+    s = re_replace("(^|[^\\w])___([^_\\n]+?)___(?!\\w)", "g", s, "$1<strong><em>$2</em></strong>")
+    s = re_replace("\\*\\*([^*\\n]+?)\\*\\*", "g", s, "<strong>$1</strong>")
+    s = re_replace("(^|[^\\w])__([^_\\n]+?)__(?!\\w)", "g", s, "$1<strong>$2</strong>")
+    s = re_replace("(^|[^*\\w])\\*([^*\\s][^*\\n]*?)\\*(?!\\*)", "g", s, "$1<em>$2</em>")
+    s = re_replace("(^|[^_\\w])_([^_\\s][^_\\n]*?)_(?!\\w)", "g", s, "$1<em>$2</em>")
+    s = re_replace("~~([^~\\n]+?)~~", "g", s, "<del>$1</del>")
+    s = re_replace("\\u0001\\n?", "g", s, "<br>")
+    for pass in range(0, 5) [
+        if re_test("\\u0000\\d+\\u0000", "", s) [
+            s = re_replace_fn("\\u0000(\\d+)\\u0000", "g", s, cb_unstash)
+        ]
+    ]
+    end s
+]
+
+!! ---- sanityzacja ----
+const MD_ID_PREFIX = "user-content-"
+let md_allowed = word_set("a abbr b blockquote br caption center code dd del details div dl dt em figcaption figure h1 h2 h3 h4 h5 h6 hr i img input ins kbd li mark ol p pre s small span strong sub summary sup table tbody td tfoot th thead tr u ul")
+let md_drop = word_set("script style iframe object embed noscript template form svg math link meta base title head source")
+let md_align = word_set("left right center justify")
+let md_align_tags = word_set("p div td th img h1 h2 h3 h4 h5 h6 table")
+
+fun is_safe_scheme(url: Str, allow_mailto: Bool) -> Bool [
+    let m = re_match("^([a-zA-Z][a-zA-Z0-9+.-]*):", "", url)
+    if is_null(m) [
+        end true
+    ]
+    let scheme = m[1].toLowerCase()
+    end scheme == "https" or scheme == "http" or (allow_mailto and scheme == "mailto")
+]
+
+!! Adres z README -> bezpieczny adres bezwzgledny (null = pomin). kind: "link" | "media".
+fun resolve_url(url: Str, ctx: Repo, kind: Str) [
+    let u = url.trim()
+    if u == "" or re_test("[\\u0000-\\u001f]", "", u) [
+        end null
+    ]
+    if u.startsWith("#") [
+        end null
+    ]
+    if u.startsWith("//") [
+        end "https:" + u
+    ]
+    if not is_safe_scheme(u, kind == "link") [
+        end null
+    ]
+    if re_test("^[a-zA-Z][a-zA-Z0-9+.-]*:", "", u) [
+        end u
+    ]
+    let rel = re_replace("^\\/", "", re_replace("^\\.\\/", "", u, ""), "")
+    let clean = rel
+    if ctx.dir != "" and not u.startsWith("/") [
+        clean = ctx.dir + "/" + rel
+    ]
+    let ref = enc_path(ctx.ref)
+    if kind == "media" [
+        end "https://raw.githubusercontent.com/" + ctx.owner + "/" + ctx.repo + "/" + ref + "/" + clean
+    ]
+    end "https://github.com/" + ctx.owner + "/" + ctx.repo + "/blob/" + ref + "/" + clean
+]
+
+fun slugify(text: Str) -> Str [
+    let a = re_replace("[^\\p{L}\\p{N}\\s_-]+", "gu", text.toLowerCase(), "")
+    end re_replace("\\s+", "g", a.trim(), "-")
+]
+
+fun copy_attr(out, el, name: Str) [
+    let v = el.getAttribute(name)
+    if not is_null(v) and v != "" [
+        out.setAttribute(name, v)
+    ]
+]
+
+fun sanitize_into(parent, source, ctx: Repo, slugs) [
+    for node in dom_children(source) [
+        if node.nodeType == 3 [
+            parent.appendChild(document.createTextNode(node.textContent))
+            continue
+        ]
+        if node.nodeType != 1 [
+            continue
+        ]
+        let el = node
+        let tag = el.tagName.toLowerCase()
+        if js_has(md_drop, tag) [
+            continue
+        ]
+        if not js_has(md_allowed, tag) [
+            sanitize_into(parent, el, ctx, slugs)
+            continue
+        ]
+        if tag == "input" [
+            if el.getAttribute("type") != "checkbox" [
+                continue
+            ]
+            let box = document.createElement("input")
+            box.setAttribute("type", "checkbox")
+            box.setAttribute("disabled", "")
+            if el.hasAttribute("checked") [
+                box.setAttribute("checked", "")
+            ]
+            parent.appendChild(box)
+            continue
+        ]
+        let out = document.createElement(tag)
+        if tag == "a" [
+            let href = el.getAttribute("href")
+            if is_null(href) [
+                href = ""
+            ]
+            if href.startsWith("#") [
+                out.setAttribute("href", "#" + MD_ID_PREFIX + href.slice(1).toLowerCase())
+            ] else [
+                let r = resolve_url(href, ctx, "link")
+                if not is_null(r) [
+                    out.setAttribute("href", r)
+                    out.setAttribute("target", "_blank")
+                    out.setAttribute("rel", "noopener noreferrer")
+                ]
+            ]
+            copy_attr(out, el, "title")
+        ] elif tag == "img" [
+            let src = el.getAttribute("src")
+            if is_null(src) [
+                src = ""
+            ]
+            let r = resolve_url(src, ctx, "media")
+            if is_null(r) [
+                continue
+            ]
+            out.setAttribute("src", r)
+            let alt = el.getAttribute("alt")
+            if is_null(alt) [
+                alt = ""
+            ]
+            out.setAttribute("alt", alt)
+            out.setAttribute("loading", "lazy")
+            out.setAttribute("referrerpolicy", "no-referrer")
+            for a in ["width", "height"] [
+                let v = el.getAttribute(a)
+                if not is_null(v) and re_test("^\\d{1,4}%?$", "", v) [
+                    out.setAttribute(a, v)
+                ]
+            ]
+            copy_attr(out, el, "title")
+        ] elif re_test("^h[1-6]$", "", tag) [
+            let base = slugify(el.textContent)
+            if base == "" [
+                base = "section"
+            ]
+            let n = js_num(slugs, base)
+            js_set(slugs, base, n + 1)
+            if n > 0 [
+                out.setAttribute("id", MD_ID_PREFIX + base + "-" + (n as Str))
+            ] else [
+                out.setAttribute("id", MD_ID_PREFIX + base)
+            ]
+        ] elif tag == "code" [
+            let cls = el.getAttribute("class")
+            if not is_null(cls) and re_test("^language-[\\w+#.-]{1,24}$", "", cls) [
+                out.setAttribute("class", cls)
+            ]
+        ] elif tag == "div" and el.getAttribute("class") == "md-table" [
+            out.setAttribute("class", "md-table")
+        ] elif tag == "details" and el.hasAttribute("open") [
+            out.setAttribute("open", "")
+        ] elif tag == "td" or tag == "th" [
+            for a in ["colspan", "rowspan"] [
+                let v = el.getAttribute(a)
+                if not is_null(v) and re_test("^\\d{1,2}$", "", v) [
+                    out.setAttribute(a, v)
+                ]
+            ]
+        ]
+        let al = el.getAttribute("align")
+        if is_null(al) [
+            al = ""
+        ]
+        al = al.toLowerCase()
+        if js_has(md_align, al) and js_has(md_align_tags, tag) [
+            out.setAttribute("align", al)
+        ]
+        if tag == "br" or tag == "hr" or tag == "img" [
+            parent.appendChild(out)
+            continue
+        ]
+        sanitize_into(out, el, ctx, slugs)
+        parent.appendChild(out)
+    ]
+]
+
+!! Markdown -> DocumentFragment (bezpieczny: tylko biala lista tagow/atrybutow).
+fun render_markdown(src: Str, ctx: Repo) [
+    let html = markdown_to_html(src)
+    let body = parse_html(html)
+    let frag = new_fragment()
+    sanitize_into(frag, body, ctx, js_new_obj())
+    end frag
+]
