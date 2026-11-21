@@ -10,6 +10,7 @@ mod checksum
 mod lock
 mod project
 mod build
+mod features
 mod registry
 mod bitpkg
 mod locator
@@ -160,7 +161,11 @@ fn build_installed(name: string, dir: string, lang: string, output: string, o: I
     util::mkdir_p(outdir)
     let bo: build::BuildOpts = build::opts_new(o.io_release, o.io_verbose, lang, o.io_platform, output)
     ;; build_project uses cache/; keep the installed tree clean by building into .bit
-    let rc: int = build::build_project(project::load_with_cache(dir, dir + "/.bit"), bo)
+    ;; the library is built with ITS OWN default features — never with the list of the package that asked for it
+    let dp: project::Project = project::load_with_cache(dir, dir + "/.bit")
+    let parked: [string] = features::dep_enter(dp)
+    let rc: int = build::build_project(dp, bo)
+    features::dep_leave(parked)
     if rc != 0 is
         ui::warn(name + ": build failed — kept as source only")
         return ""
