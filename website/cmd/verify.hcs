@@ -1,0 +1,117 @@
+const VERIFY_MAX_FILES = 400
+const VERIFY_MAX_BYTES = 20971520
+
+struct VerifyResult [
+    ok: Bool,
+    error: Str,
+    actual: Str,
+    expected: Str,
+    files: Int
+]
+
+fun verify_fail(msg: Str) -> VerifyResult [
+    end VerifyResult(false, msg, "", "", 0)
+]
+
+fun untag(s: Str) -> Str [
+    let t = s
+    if t.startsWith("sha256:") [
+        t = t.slice(7)
+    ]
+    end t.trim().toLowerCase()
+]
+
+fun row_cmp(a, b) [
+    end compare_bytes(a.name, b.name)
+]
+
+async fun combine_checksum(hashes) -> Str [
+    let rows = []
+    for f in hashes [
+        rows.push(js_set(js_set(js_new_obj(), "name", "./" + f.path), "hex", f.hex))
+    ]
+    let sorted = rows.slice().sort(row_cmp)
+    let listing = ""
+    for r in sorted [
+        listing = listing + r.hex + "  " + r.name + "\n"
+    ]
+    end await sha256_str(listing)
+]
+
+let vf_progress = null
+
+async fun hash_worker(ctx, f, idx) [
+    if not is_null(ctx.error) [
+        end 0
+    ]
+    let res = await fetch_raw_bytes(ctx.repo, f.path)
+    if is_null(res.bytes) [
+        ctx.error = f.path + " could not be downloaded."
+        end 0
+    ]
+    let hex = await sha256_buf(res.bytes)
+    ctx.hashes.push(js_set(js_set(js_new_obj(), "path", f.path), "hex", hex))
+    ctx.done = ctx.done + 1
+    if not is_null(vf_progress) [
+        vf_progress(ctx.done, ctx.total)
+    ]
+]
+
+fun vf_stop(ctx) -> Bool [
+    end not is_null(ctx.error)
+]
+
+!! progress(done, total) opcjonalne.
+async fun verify_checksum(repo: Repo, expected_tagged: Str, progress) -> VerifyResult [
+    if not can_hash() [
+        end verify_fail("This browser can't hash here (needs HTTPS).")
+    ]
+    let expected = untag(expected_tagged)
+    let tree = await load_tree(repo)
+    if not is_null(tree.err) [
+        end verify_fail(tree.err.message)
+    ]
+    if is_null(tree.value) [
+        end verify_fail("Nothing found at \"" + repo.ref + "\".")
+    ]
+    if tree.value.truncated [
+        end verify_fail("The repository is too large to verify here — run `bit` locally.")
+    ]
+    let files = []
+    let total = 0
+    let bad_name = false
+    for f in tree.value.files [
+        if f.mode != "120000" and not f.path.startsWith(".git/") and not f.path.startsWith(".bit/") [
+            files.push(f)
+            total = total + f.size
+            if re_test("[\\\\\\n]", "", f.path) [
+                bad_name = true
+            ]
+        ]
+    ]
+    if files.length == 0 [
+        end verify_fail("The repository has no files.")
+    ]
+    if files.length > VERIFY_MAX_FILES or total > VERIFY_MAX_BYTES [
+        end verify_fail((files.length as Str) + " files / " + fixed(total / 1048576.0, 1) + " MB is too much to verify in a browser — run `bit` locally.")
+    ]
+    if bad_name [
+        end verify_fail("A file name contains a backslash or newline; sha256sum escapes those, so it can't be verified here.")
+    ]
+    let ctx = js_new_obj()
+    js_set(ctx, "repo", repo)
+    js_set(ctx, "hashes", [])
+    js_set(ctx, "done", 0)
+    js_set(ctx, "total", files.length)
+    js_set(ctx, "error", null)
+    vf_progress = progress
+    if not is_null(progress) [
+        progress(0, files.length)
+    ]
+    await pool(files, 6, hash_worker, ctx, vf_stop)
+    if not is_null(ctx.error) [
+        end verify_fail(ctx.error)
+    ]
+    let actual = await combine_checksum(ctx.hashes)
+    end VerifyResult(actual == expected, "", actual, expected, files.length)
+]
