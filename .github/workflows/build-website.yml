@@ -72,14 +72,42 @@ jobs:
         run: lua5.4 scripts/validate-index.lua
 
   build:
-    name: Type-check & build
+    name: Build (HackerScript, mode:website) & test
     runs-on: ubuntu-latest
     needs: validate-index
-    defaults:
-      run:
-        working-directory: website
+    env:
+      # absolute URLs in lib/<name>.html (canonical, og:*) and sitemap.xml
+      SITE_URL: https://bit.io
+      BIT_URL: https://github.com/HackerOS-Linux-System/bit/releases/download/v0.3/bit
+      HACKERC_URL: https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v0.6/hackerc
     steps:
       - uses: actions/checkout@v4
+
+      # The site is written in HackerScript (website/cmd/*.hcs, `use <mode:website>`; no JavaScript, no TypeScript).
+      # hackerc compiles it; bit runs the project's `site` command (see Bit.hk).
+      - name: Download bit v0.3 and hackerc v0.6
+        run: |
+          set -euo pipefail
+          bin="$HOME/.local/bin"
+          mkdir -p "$bin"
+          for pair in "bit|$BIT_URL" "hackerc|$HACKERC_URL"; do
+            name="${pair%%|*}"
+            url="${pair#*|}"
+            echo "Downloading $name from $url"
+            if ! curl -fsSL --retry 3 --retry-delay 2 -o "$bin/$name" "$url"; then
+              echo "::error::could not download $name from $url (does the release asset exist?)"
+              exit 1
+            fi
+            # a failed download must never be mistaken for a binary
+            test "$(stat -c %s "$bin/$name")" -gt 100000 || { echo "::error::$name is suspiciously small - not a binary"; head -c 200 "$bin/$name"; exit 1; }
+            chmod +x "$bin/$name"
+          done
+          echo "$bin" >> "$GITHUB_PATH"
+
+      - name: Show tool versions
+        run: |
+          hackerc --version
+          bit --version
 
       - uses: actions/setup-node@v4
         with:
@@ -87,35 +115,34 @@ jobs:
           cache: npm
           cache-dependency-path: website/package-lock.json
 
-      - name: Install dependencies
+      - name: Install test dependencies (jsdom)
+        working-directory: website
         run: npm ci --no-audit --no-fund
 
-      - name: Type-check (tsc --noEmit)
-        run: npm run typecheck
+      # `bit site` = `bash website/scripts/build.sh` (Bit.hk [commands]):
+      # hackerc website cmd/{index,lib,about,settings}.hcs -> dist/*.html + *.js,
+      # then sw.js + 404/offline pages + index + images + lib/<name>.html + sitemap.xml + robots.txt.
+      - name: Build the site (bit site)
+        run: bit site
 
-      - name: Build (tsc → dist/js, copy public/ → dist/)
-        run: npm run build
-
-      # The site reads the same index bit does; ship a same-origin copy so the
-      # page works even if raw.githubusercontent.com is slow or rate-limited.
-      - name: Bundle the library index
-        run: cp ../index/repository.json dist/repository.json
-
-      # The pages reference /images/*.png, which live in the repository root
-      # (images/), not in website/public — copy them next to the build.
-      - name: Bundle images
-        run: |
-          mkdir -p dist/images
-          cp -r ../images/. dist/images/
+      - name: Unit tests (jsdom, compiled HackerScript)
+        working-directory: website
+        run: npm test
 
       - name: Sanity-check the build output
+        working-directory: website
         run: |
           set -e
-          for f in index.html lib.html about.html 404.html styles.css repository.json \
-                   js/home.js js/lib.js js/about.js js/index-data.js images/icon.png; do
+          for f in index.html lib.html about.html settings.html 404.html offline.html sw.js \
+                   home.js lib.js about.js settings.js repository.json images/icon.png sitemap.xml; do
             test -s "dist/$f" || { echo "::error::missing dist/$f"; exit 1; }
           done
-          ! grep -R --include='*.js' -n 'localhost' dist/js || { echo "::error::localhost reference in build"; exit 1; }
+          # every page must load its own script, not the compiler's default app.js
+          for p in index:home lib:lib about:about settings:settings; do
+            grep -q "src=\"${p#*:}.js\"" "dist/${p%%:*}.html" || { echo "::error::${p%%:*}.html does not load ${p#*:}.js"; exit 1; }
+          done
+          test "$(ls dist/lib | wc -l)" -ge 1 || { echo "::error::no lib/<name>.html pages generated"; exit 1; }
+          ! grep -n 'localhost' dist/*.js || { echo "::error::localhost reference in build"; exit 1; }
           du -sh dist
 
       - uses: actions/upload-artifact@v4
