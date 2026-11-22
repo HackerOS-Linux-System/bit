@@ -175,7 +175,7 @@
       "target": "https://github.com/bit-io/BetterPrompt",
       "description": "Library inspired prompt toolkit. Written in H#",
       "tags": [
-        "prompt",
+        "prompt"
       ],
       "author": "Bit Developers"
     },
