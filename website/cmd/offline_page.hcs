@@ -1,0 +1,27 @@
+use <mode:website>
+!! Strona "brak polaczenia" (service worker serwuje ja z cache, wiec build.sh wkleja jej JS inline).
+!! Bez wlasnego bloku `style { }` - patrz uwaga w 404.hcs.
+include <jsutil>
+include <platform>
+include <dom>
+include <theme>
+include <styles>
+
+fun on_retry(e) [
+    location.reload()
+]
+
+fun main() [
+    document.documentElement.setAttribute("lang", "en")
+    document.title = "Offline — bit.io"
+    let retry = ha("button", ["class", "btn", "type", "button"], ["Try again"])
+    retry.addEventListener("click", on_retry)
+    dom_add(app_root(), ha("main", ["class", "wrap page", "style", "text-align:center;padding-top:14vh"], [
+        h("h1", "", [h("span", "grad", ["No internet connection"])]),
+        h("p", "lead", ["This page hasn't been saved in your browser yet. Libraries and pages you opened before work offline — try the index."]),
+        link("index.html", "btn primary", ["Go to the index"]),
+        " ",
+        retry
+    ]))
+    init_theme()
+]
