@@ -18,11 +18,14 @@ trap 'rm -rf "$TMP"' EXIT
 # strona:plik-js — `hackerc website` zawsze pisze index.html + app.js, wiec kazda strone
 # budujemy osobno, a potem nadajemy jej wlasne nazwy.
 PAGES="index:home lib:lib about:about settings:settings"
+# strony serwowane pod dowolnym adresem (404) albo z cache workera (offline): JS wklejamy do HTML
+INLINE_PAGES="404 offline_page:offline"
 
 build_page() {
   local src="$1"
   local js="$2"
   local html="$1"
+  [ "${3:-}" = "inline" ] && html="$2"
   local dir="$TMP/$src"
   mkdir -p "$dir"
   # blad kompilacji bywa zglaszany tylko w tekscie (kod wyjscia 0) - sprawdzamy tez wyjscie
@@ -33,9 +36,19 @@ build_page() {
     cat "$TMP/$src.log"
     return 1
   fi
-  cp "$dir/app.js" "$OUT/$js.js"
-  sed "s|src=\"app.js\"|src=\"$js.js\"|" "$dir/index.html" >"$OUT/$html.html"
-  echo "built $html.html + $js.js ($(wc -c <"$OUT/$js.js") B)"
+  case "${3:-}" in
+    inline)
+      if grep -q '</script' "$dir/app.js"; then echo "::error::$src.js contains </script>, cannot inline"; return 1; fi
+      { echo "<script>"; cat "$dir/app.js"; echo "</script>"; } >"$TMP/$src.inline"
+      sed -e "/<script src=\"app.js\"><\/script>/{" -e "r $TMP/$src.inline" -e "d" -e "}" "$dir/index.html" >"$OUT/$html.html"
+      echo "built $html.html (JS inlined, $(wc -c <"$OUT/$html.html") B)"
+      ;;
+    *)
+      cp "$dir/app.js" "$OUT/$js.js"
+      sed "s|src=\"app.js\"|src=\"$js.js\"|" "$dir/index.html" >"$OUT/$html.html"
+      echo "built $html.html + $js.js ($(wc -c <"$OUT/$js.js") B)"
+      ;;
+  esac
 }
 
 pids=()
@@ -43,12 +56,14 @@ for p in $PAGES; do
   build_page "${p%%:*}" "${p##*:}" &
   pids+=($!)
 done
+for p in $INLINE_PAGES; do
+  build_page "${p%%:*}" "${p##*:}" inline &
+  pids+=($!)
+done
 fail=0
 for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
 [ "$fail" -eq 0 ] || exit 1
 
-# statyczne pliki (404, offline, robots)
-cp -r public/. "$OUT"/
 # service worker - tez HackerScript (use <lang:javascript>)
 if ! "$HACKERC" build cmd/sw.hcs -o "$OUT/sw.js" >"$TMP/sw.log" 2>&1 || grep -Eq 'hackerc-self\]|error\[' "$TMP/sw.log" || [ ! -s "$OUT/sw.js" ]; then
   echo "::error::compiling cmd/sw.hcs failed"; cat "$TMP/sw.log"; exit 1
@@ -62,6 +77,6 @@ cp -r ../images/. "$OUT/images/"
 
 # strony bibliotek (lib/<nazwa>.html), sitemap.xml, robots.txt - tez HackerScript
 "$HACKERC" build scripts/generate-pages.hcs -o "$TMP/generate-pages.cjs" >/dev/null
-node "$TMP/generate-pages.cjs"
+OUT="$OUT" node "$TMP/generate-pages.cjs"
 
 echo "dist: $(du -sh "$OUT" | cut -f1)"
