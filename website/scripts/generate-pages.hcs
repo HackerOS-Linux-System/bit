@@ -84,7 +84,11 @@ fun page_html(name: Str, description: Str, site: Str) -> Str [
 
 fun main() [
     let root = process.cwd()
-    let dist = path.join(root, "dist")
+    let out = env_get("OUT")
+    if out == "" [
+        out = "dist"
+    ]
+    let dist = path.resolve(root, out)
     let site = re_replace("\\/+$", "", env_get("SITE_URL"), "")
     let doc = parse_lenient(fs.readFileSync(path.join(root, "..", "index", "repository.json"), "utf8"))
     let raw = []
@@ -115,11 +119,12 @@ fun main() [
         ]
         let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n" + rows.join("\n") + "\n</urlset>\n"
         fs.writeFileSync(path.join(dist, "sitemap.xml"), xml)
-        let robots = path.join(dist, "robots.txt")
-        if fs.existsSync(robots) [
-            fs.appendFileSync(robots, "Sitemap: " + site + "/sitemap.xml\n")
-        ]
         note = " + sitemap.xml"
     ]
+    let robots = "User-agent: *\nAllow: /\n"
+    if site != "" [
+        robots = robots + "Sitemap: " + site + "/sitemap.xml\n"
+    ]
+    fs.writeFileSync(path.join(dist, "robots.txt"), robots)
     log("generated " + (libs.length as Str) + " library pages" + note)
 ]
