@@ -59,9 +59,9 @@ fun write_url() [
     ]
     let s = qs_build(pairs)
     if s != "" [
-        history.replaceState(null, "", "?" + s)
+        replace_url("?" + s)
     ] else [
-        history.replaceState(null, "", location.pathname)
+        replace_url(location.pathname)
     ]
 ]
 
