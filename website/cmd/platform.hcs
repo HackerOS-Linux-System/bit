@@ -10,13 +10,45 @@ fun ret_false(e) [
     end false
 ]
 
-!! ---- localStorage ----
-!! Zapis nie moze przekroczyc limitu (~5 MB): liczymy znaki i odmawiamy zapisu ponad budzet,
-!! zamiast liczyc na wyjatek QuotaExceeded. cache_set() po odmowie usuwa najstarsze wpisy i ponawia.
-const LS_BUDGET = 4000000
-let ls_used = -1
+!! ---- "try/catch" bez try/catch ----
+!! Wykonawca (executor) Promise uruchamia sie synchronicznie, a wyjatek w nim zostaje zamieniony w odrzucenie
+!! obietnicy, ktore tu polykamy. Dzieki temu `try_call(f)` wykonuje f() i zwraca, czy sie powiodlo.
+!! Wyniki i argumenty przekazujemy przez zmienne modulu (bez domkniec).
+let try_ok = false
+let try_fn = null
 
-fun ls_keys() [
+fun try_exec(resolve, reject) [
+    try_fn()
+    try_ok = true
+]
+
+fun try_call(fn) -> Bool [
+    try_ok = false
+    try_fn = fn
+    Reflect.construct(Promise, [try_exec]).catch(net_fail)
+    end try_ok
+]
+
+!! ---- localStorage ----
+!! Dostep do localStorage moze rzucic wyjatek (SecurityError przy file:// albo zablokowanych danych witryn,
+!! QuotaExceededError przy zapisie), wiec kazda operacja idzie przez try_call.
+let ls_arg_k = ""
+let ls_arg_v = ""
+let ls_res = null
+
+fun ls_op_get() [
+    ls_res = localStorage.getItem(ls_arg_k)
+]
+
+fun ls_op_set() [
+    localStorage.setItem(ls_arg_k, ls_arg_v)
+]
+
+fun ls_op_remove() [
+    localStorage.removeItem(ls_arg_k)
+]
+
+fun ls_op_keys() [
     let out = []
     let i = 0
     while i < localStorage.length [
@@ -26,54 +58,48 @@ fun ls_keys() [
         ]
         i = i + 1
     ]
-    end out
+    ls_res = out
+]
+
+fun ls_keys() [
+    ls_res = []
+    if try_call(ls_op_keys) [
+        end ls_res
+    ]
+    end []
 ]
 
 fun ls_get(k: Str) [
-    let v = localStorage.getItem(k)
-    if is_null(v) [
-        end null
+    ls_arg_k = k
+    ls_res = null
+    if try_call(ls_op_get) and not is_null(ls_res) [
+        end ls_res
     ]
-    end v
+    end null
 ]
 
-fun ls_measure() -> Int [
-    let total = 0
-    for k in ls_keys() [
-        let v = localStorage.getItem(k)
-        if not is_null(v) [
-            total = total + k.length + v.length
-        ]
-    ]
-    end total
-]
-
+!! false = nie zapisano (brak miejsca albo storage zablokowany).
 fun ls_set(k: Str, v: Str) -> Bool [
-    if ls_used < 0 [
-        ls_used = ls_measure()
-    ]
-    let old = localStorage.getItem(k)
-    let delta = k.length + v.length
-    if not is_null(old) [
-        delta = v.length - old.length
-    ]
-    if ls_used + delta > LS_BUDGET [
-        end false
-    ]
-    localStorage.setItem(k, v)
-    ls_used = ls_used + delta
-    end true
+    ls_arg_k = k
+    ls_arg_v = v
+    end try_call(ls_op_set)
 ]
 
 fun ls_remove(k: Str) -> Bool [
-    let old = localStorage.getItem(k)
-    if not is_null(old) [
-        localStorage.removeItem(k)
-        if ls_used >= 0 [
-            ls_used = ls_used - k.length - old.length
-        ]
-    ]
-    end true
+    ls_arg_k = k
+    end try_call(ls_op_remove)
+]
+
+!! history.replaceState rzuca na file:// (origin "null") - nie moze zabic renderowania.
+let url_arg = ""
+
+fun url_op_replace() [
+    history.replaceState(null, "", url_arg)
+]
+
+fun replace_url(u: Str) -> Bool [
+    url_arg = u
+    end try_call(url_op_replace)
 ]
 
 !! ---- siec ----
