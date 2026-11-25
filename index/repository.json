@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-11-18",
+  "updated_at": "2026-11-25",
   "libraries": [
     {
       "name": "mold",
@@ -311,6 +311,18 @@
         "local-model"
       ],
       "author": "Bit Developers"
+    },
+    {
+      "name": "lrpm",
+      "target": "https://github.com/LegendaryOS-Linux-System/lrpm",
+      "description": "Package manager engine for LegendaryOS",
+      "tags": [
+        "LegendaryOS",
+        "package-manager",
+        "rpm",
+        "fedora"
+      ],
+      "author": "LegendaryOS Team"
     }
   ]
 }
